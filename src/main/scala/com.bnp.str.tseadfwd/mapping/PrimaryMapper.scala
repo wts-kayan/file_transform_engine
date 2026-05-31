@@ -70,8 +70,13 @@ class PrimaryMapper(
     if (debug) {
       logShow("INPUT - PARAMETRAGE", parametrage)
       logShow("INPUT - MACRO_VARIABLE (scenario)", scenario.where(s"$COL_SCEN_DATE = '$projectionDate'"))
-      val raCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ monthColumns(ra_bcef).take(6)
-      logShow("INPUT - RA_BCEF (keys + first 6 months)", ra_bcef.select(raCols.head, raCols.tail: _*))
+      // M1..Mn are MONTHLY columns (METRIC is the separate key column). The full series is
+      // used by collectRa; here we only preview the first/last 3 months to keep the table readable.
+      val allMonths = monthColumns(ra_bcef)
+      val sampleMonths = allMonths.take(3) ++ allMonths.takeRight(3)
+      val raCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ sampleMonths
+      logShow(s"INPUT - RA_BCEF (keys + first/last months; ${allMonths.length} monthly cols used in full)",
+        ra_bcef.select(raCols.head, raCols.tail: _*))
       val matRows = matrices.map(m => Row(m.matrixId(Quarterly).dropRight(2), m.segments.mkString("+"), m.fwlApplied.toString, m.macroVar))
       val matSchema = StructType(Seq("MATRIX", "SEGMENTS", "FWL_APPLIED", "MACRO_VAR").map(StructField(_, StringType)))
       logShow("PARSED - matrix definitions", sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(matRows, 1), matSchema))
