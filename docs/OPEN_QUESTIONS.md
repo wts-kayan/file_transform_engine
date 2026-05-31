@@ -112,10 +112,18 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryMapper.matrixRows` (leg chosen by `delta` sign).
 - Confirmed: [x]
 
-## Q11 — `projection_date` ⚠️
-- **Chosen:** `2025Q4` (from the output name `…25Q4…` and the last date in the scenario file).
-- **Config:** `tseadfwd_app.projection_date`.
-- Confirmed: [ ]   Correct value: ____________
+## Q11 — Macro shock source: single date vs path ✔️ ANSWERED
+- **DECISION (user):** use the macro **path over a window** `shock_window_start..shock_window_end`
+  (default `2021Q1..2025Q4`); **term 0 = window start, step 1 quarter** (yearly steps 1 year =
+  4 quarters); past the window end the last delta is held. Replaces the single `projection_date`.
+- **Why not a single date 2022Q1:** at 2022Q1 all scenarios are equal → delta = 0 → no shock.
+  The path lets the delta ramp in (scenarios diverge from 2022Q3), giving a term-varying shock.
+- **Result:** mechanism verified — shock ramps with the correct direction (Adverse/Extreme
+  lower EAD, Optimistic higher). Numeric match unchanged vs target because the shock magnitude
+  is still tiny (`ref_shock=1.0`, Q12) and the tail-vintage error dominates (Q15).
+- **Config:** `tseadfwd_app.shock_window_start` / `shock_window_end`.
+- **Code:** `PrimaryMapper.deltaPath` / `macroDeltaArray` / `shockWindow`; `PrimaryView.scenarioRa`.
+- Confirmed: [x]
 
 ## Q12 — `ref_shock` calibration (FWL=YES shock magnitude) ⛔
 - **What it is:** the rate-shock magnitude the `STRESS (+)/(-)` legs represent;

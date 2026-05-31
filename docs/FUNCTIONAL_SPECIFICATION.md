@@ -32,7 +32,8 @@ CSV, `;`-delimited. One row per (date, scenario).
 | `scenario` | `Central`, `Adverse`, `Optimistic`, `Extreme` (`Secto` not yet provided) |
 | `IR_10Y_FR`, `IR_10Y_BE`, `IR_10Y_IT` | Macro variables (10Y interest rates per country) |
 
-The shock for a scenario is read at a configured **`projection_date`** (e.g. `2025Q4`).
+The shock for a scenario is read along the macro **path** over a configured window
+(`shock_window_start..shock_window_end`, e.g. `2021Q1..2025Q4`).
 
 ### 2.2 PARAMETRAGE
 Excel. One row per (perimeter, segment, rate type).
@@ -143,10 +144,13 @@ For each case the value is computed for every
 
 For **FWL = NO**, all scenarios equal the Central value (no scenario differentiation).
 
-### 4.7 FWL = YES — scenario (parallel) shock
-For non-Central scenarios:
-1. `delta(scenario) = MACRO[scenario][projection_date] − MACRO[Central][projection_date]`.
-2. Stress leg = `STRESS (-)` if `delta < 0`, else `STRESS (+)`.
+### 4.7 FWL = YES — scenario shock (macro path)
+For non-Central scenarios the shock is **term-varying**, read from the scenario macro path
+over a window (`shock_window_start..shock_window_end`, default `2021Q1..2025Q4`):
+term 0 = window start, step 1 quarter (yearly steps 1 year); past the window end the last
+delta is held.
+1. `delta_i(scenario) = MACRO[scenario][date_i] − MACRO[Central][date_i]` (per term `i`).
+2. Stress leg = `STRESS (-)` if `delta_i < 0`, else `STRESS (+)`.
 3. Per period:
    - `stat_detail = -RA_STAT_baseline / CRD`
    - `fire_base = -(RA_FI_baseline + RE_baseline) / CRD`
@@ -175,7 +179,8 @@ series are **summed element-wise** before the formula is applied. The combined
 ## 6. Decisions / assumptions
 
 - `PROJECTION_HORIZON` is **not** used; the projection uses a fixed term horizon (30y)
-  and reads the scenario shock at the configured `projection_date`.
+  and reads the scenario shock along the macro path over the configured window
+  (`shock_window_start..shock_window_end`).
 - Computation always emits **both** Q and Y matrices.
 - Scenario `S` (Secto) is omitted until data is available.
 

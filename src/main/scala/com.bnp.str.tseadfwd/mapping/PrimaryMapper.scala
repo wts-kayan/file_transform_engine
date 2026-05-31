@@ -32,12 +32,20 @@ class PrimaryMapper(
   private val log = LoggerFactory.getLogger(this.getClass)
 
   private val appConf = config.getConfig(APP_CONF)
-  /** Date in the scenario file the parallel shock is read at (e.g. "2025Q4"). */
-  private val projectionDate: String =
-    if (appConf.hasPath("projection_date")) appConf.getString("projection_date") else "2025Q4"
+  /** FWL=YES shock reads the scenario macro path over this window (term 0 = start, step 1Q). */
+  private val shockWindowStart: String =
+    if (appConf.hasPath("shock_window_start")) appConf.getString("shock_window_start") else "2021Q1"
+  private val shockWindowEnd: String =
+    if (appConf.hasPath("shock_window_end")) appConf.getString("shock_window_end") else "2025Q4"
   /** Stress reference magnitude used to scale the macroData rate delta (FWL=YES calibration). */
   private val refShock: Double =
     if (appConf.hasPath("ref_shock")) appConf.getDouble("ref_shock") else 1.0
+
+  /** Ordered list of "yyyyQq" labels from start to end inclusive. */
+  private lazy val shockWindow: Vector[String] = {
+    def ord(q: String): Int = { val p = q.split("Q"); p(0).toInt * 4 + (p(1).toInt - 1) }
+    (ord(shockWindowStart) to ord(shockWindowEnd)).map { o => s"${o / 4}Q${o % 4 + 1}" }.toVector
+  }
   /** When true, log a titled `show()` of the inputs and a full per-term trace per matrix. */
   private val debug: Boolean =
     if (appConf.hasPath("debug")) appConf.getBoolean("debug") else false
@@ -62,7 +70,7 @@ class PrimaryMapper(
   }
 
   def getDataFrame: DataFrame = {
-    log.info(s"Building $OUTPUT_EAD_FWD (projectionDate=$projectionDate, refShock=$refShock)")
+    log.info(s"Building $OUTPUT_EAD_FWD (shockWindow=$shockWindowStart..$shockWindowEnd, refShock=$refShock)")
 
     val perimeters = ra_bcef.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
     val ra = collectRa(ra_bcef)
@@ -71,7 +79,8 @@ class PrimaryMapper(
 
     if (debug) {
       logShow("INPUT - PARAMETRAGE", parametrage)
-      logShow("INPUT - MACRO_VARIABLE (scenario)", scenario.where(s"$COL_SCEN_DATE = '$projectionDate'"))
+      logShow("INPUT - MACRO_VARIABLE (scenario, shock window)",
+        scenario.where(s"$COL_SCEN_DATE IN (${shockWindow.map(q => s"'$q'").mkString(",")})"))
       // M1..Mn are MONTHLY columns (METRIC is the separate key column). The full series is
       // used by collectRa; here we only preview the first/last 3 months to keep the table readable.
       val allMonths = monthColumns(ra_bcef)
@@ -126,12 +135,12 @@ class PrimaryMapper(
       if (!m.fwlApplied || scenName == SCENARIO_CENTRAL) {
         centralRa(crd, raStat, raFiB, reB, freq)
       } else {
-        // parallel shock: rate delta vs Central at the projection date drives the stress leg
-        val delta = macroDelta(macroData, scenName, m.macroVar)
-        val (fiS, reS) =
-          if (delta < 0) (series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE))
-          else           (series(FWL_STRESS_PLUS, METRIC_RA_FI),  series(FWL_STRESS_PLUS, METRIC_RE))
-        scenarioRa(crd, raStat, raFiB, reB, fiS, reS, freq, math.abs(delta), refShock)
+        // term-varying shock: the macro delta path (vs Central) over the window selects the
+        // stress leg and weight per term; both legs are supplied to scenarioRa.
+        scenarioRa(crd, raStat, raFiB, reB,
+          series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE),
+          series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE),
+          freq, deltaPath(macroData, scenName, m.macroVar, freq), refShock)
       }
 
     val vf = vectorFactored(ra_detail)
@@ -139,8 +148,12 @@ class PrimaryMapper(
     // Debug: show every intermediate calc per term. Skip the redundant A/O/E dumps for
     // FWL=NO matrices (all scenarios equal Central there).
     if (debug && (scenName == SCENARIO_CENTRAL || m.fwlApplied)) {
-      val delta = if (m.fwlApplied && scenName != SCENARIO_CENTRAL) macroDelta(macroData, scenName, m.macroVar) else 0.0
-      logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$delta, refShock=$refShock)",
+      val deltaInfo =
+        if (m.fwlApplied && scenName != SCENARIO_CENTRAL) {
+          val arr = macroDeltaArray(macroData, scenName, m.macroVar)
+          if (arr.isEmpty) "0" else f"path ${arr.head}%.4f..${arr.last}%.4f"
+        } else "0"
+      logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$deltaInfo, refShock=$refShock)",
         buildTrace(freq, crd, raStat, raFiB, reB, ra_detail, vf))
     }
 
@@ -174,15 +187,28 @@ class PrimaryMapper(
     sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(rows, 1), schema)
   }
 
-  /** macroData(scenario, projectionDate)[macroVar] - macroData(Central, projectionDate)[macroVar]. */
-  private def macroDelta(
-                          macroData: Map[(String, String), Map[String, Double]],
-                          scenName: String,
-                          macroVar: String
-                        ): Double = {
-    def v(scen: String): Double =
-      macroData.get((scen, projectionDate)).flatMap(_.get(macroVar)).getOrElse(0.0)
-    v(scenName) - v(SCENARIO_CENTRAL)
+  /** Signed macro delta (scenario - Central) for `macroVar` at each quarter of the shock window. */
+  private def macroDeltaArray(
+                               macroData: Map[(String, String), Map[String, Double]],
+                               scenName: String, macroVar: String
+                             ): Array[Double] =
+    shockWindow.map { q =>
+      def v(scen: String): Double = macroData.get((scen, q)).flatMap(_.get(macroVar)).getOrElse(0.0)
+      v(scenName) - v(SCENARIO_CENTRAL)
+    }.toArray
+
+  /**
+   * Maps a 1-based projection period to its macro delta on the window path:
+   * term 0 = window start, step 1 quarter (quarterly) or 1 year = 4 quarters (yearly);
+   * past the window end the last delta is held.
+   */
+  private def deltaPath(
+                         macroData: Map[(String, String), Map[String, Double]],
+                         scenName: String, macroVar: String, freq: Frequency
+                       ): Int => Double = {
+    val arr = macroDeltaArray(macroData, scenName, macroVar)
+    val step = if (freq == Quarterly) 1 else 4
+    (period: Int) => if (arr.isEmpty) 0.0 else arr(math.min((period - 1) * step, arr.length - 1))
   }
 
   // ---- input collection -----------------------------------------------------

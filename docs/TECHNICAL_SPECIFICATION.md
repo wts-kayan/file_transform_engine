@@ -77,7 +77,7 @@ Pure functions, no Spark dependency:
 | `termGrid(freq)` | output term grid (0..coreMax by step, then `100`) |
 | `aggregate(m, period, freq, isCrd)` | monthly → period value; `Option` (None if window exceeds data) |
 | `centralRa(crd, raStat, raFi, re, freq)` | per-period `RA = -(STAT+FI+RE)/CRD`; run-off guard `CRD==0 → 0` |
-| `scenarioRa(... stress legs, rateDelta, refShock)` | FWL=YES parallel-shock RA |
+| `scenarioRa(... both stress legs, deltaAt, refShock)` | FWL=YES RA; `deltaAt(period)` selects leg + weight per term |
 | `vectorFactored(ra)` | cumulative product of `1 - RA` |
 | `termSeries(vf, freq)` | maps the output grid to `vf`, holding the last value flat |
 
@@ -98,7 +98,10 @@ flat tail in `termSeries` covers the remaining grid points.
 - `collectRa` — `(SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) → Array[Double]` of months.
 - `aggregateSegments` — element-wise sum of constituent segments' monthly series.
 - `collectScenario` — `(scenario, Date) → (macroVar → Double)`.
-- `macroDelta` — `MACRO[scen][projection_date] − MACRO[Central][projection_date]`.
+- `shockWindow` / `macroDeltaArray` / `deltaPath` — build the macro delta path
+  (`scenario − Central`) over `shock_window_start..shock_window_end`, then map a 1-based
+  projection period to it (term 0 = window start, step 1 quarter; yearly step = 4 quarters;
+  held past the window end).
 - `matrixRows` — selects `centralRa` (FWL=NO or Central) or `scenarioRa` (FWL=YES,
   non-Central), then `vectorFactored` + `termSeries`; emits output rows.
 - `fmtNumber` — decimal-comma formatting (half-up, trailing zeros stripped; non-finite → `0`).
@@ -128,7 +131,7 @@ Under `tseadfwd_app`:
 | `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | — |
 | `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel (points to `PARAMETRAGE_corrected.xlsx`) | — |
 | `MACRO_VARIABLE.path` / `.header` / `.delimiter` | scenario CSV | — |
-| `projection_date` | date the FWL shock is read at | `"2025Q4"` |
+| `shock_window_start` / `shock_window_end` | macro path window the FWL shock is read over (term 0 = start, step 1Q) | `"2021Q1"` / `"2025Q4"` |
 | `ref_shock` | stress-leg magnitude for FWL=YES scaling (calibration) | `1.0` |
 | `debug` | enable titled `show()` of inputs + per-term trace | `false` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
