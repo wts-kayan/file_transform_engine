@@ -19,7 +19,7 @@ object MainDriver {
     */
   def main(args: Array[String]): Unit = {
 
-    logger.info(" Start %s ".format(PrimaryConstants.APPLICATION_NAME), this.getClass.getName)
+    logger.info(s"Start ${PrimaryConstants.APPLICATION_NAME} (${this.getClass.getName})")
 
     val absoluteConfigPath = args(0)
 
@@ -51,6 +51,6 @@ object MainDriver {
 
     primaryWriter.write(df, outputTableName)(sparkSession, config)
 
-    logger.info(" End %s ".format(PrimaryConstants.APPLICATION_NAME), this.getClass.getName)
+    logger.info(s"End ${PrimaryConstants.APPLICATION_NAME} (${this.getClass.getName})")
   }
 }
