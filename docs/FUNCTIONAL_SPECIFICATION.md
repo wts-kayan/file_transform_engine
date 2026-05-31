@@ -66,7 +66,7 @@ Excel (sheet per perimeter, e.g. `RA_BCEF`). One row per (segment, rate type, FW
 
 | Column | Description |
 |--------|-------------|
-| `EAD_MATRIX_ID` | `PERIMETER_SEGMENT_(Q\|Y)` (see §4.1) |
+| `EAD_MATRIX_ID` | `PERIMETER_SEGMENT_RATETYPE_(Q\|Y)` (see §4.1) |
 | `SCENARIO_ID` | `C`/`A`/`O`/`E` (see §4.2) |
 | `TERM` | Term in years (see §4.3) |
 | `EAD_RA_RATE` | Final factored survival value in `[0,1]` |
@@ -76,12 +76,14 @@ Excel (sheet per perimeter, e.g. `RA_BCEF`). One row per (segment, rate type, FW
 ## 4. Business rules
 
 ### 4.1 EAD_MATRIX_ID
-`PERIMETER + "_" + SEGMENT + "_" + (Q|Y)`:
+`PERIMETER + "_" + SEGMENT + "_" + RATE_TYPE + "_" + (Q|Y)`, e.g. `BCEF_CONSO_TF_Q`:
 - `Q` when computation frequency = quarterly, `Y` when annual.
 - **Both** Q and Y matrices are produced for every segment.
 - `SEGMENT` is the `AGGREGATED_SEGMENT_NAME` when `AGGREGATION = YES` (so `INVEST_PRO` +
   `INVEST_CORP` → `INVEST`).
-- `RATE_TYPE` is omitted from the id (only one rate type, `TF`, in the current data).
+- `RATE_TYPE` **is included** (per spec). Distinct rate types (e.g. `TF`/`TV`) form separate
+  matrices. NB: this differs from the sample target file, which dropped `RATE_TYPE`
+  (see `OPEN_QUESTIONS.md` Q1).
 
 ### 4.2 Scenario_ID
 `C` = Central, `A` = Adverse, `O` = Optimistic, `E` = Extreme, `S` = Secto.

@@ -12,12 +12,16 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 
 ---
 
-## Q1 — Does `EAD_MATRIX_ID` include `RATE_TYPE`? ✅
+## Q1 — Does `EAD_MATRIX_ID` include `RATE_TYPE`? ✔️ ANSWERED
 - **Spec says:** `PERIMETER + "_" + SEGMENT + "_" + RATE_TYPE + "_Q/Y"`.
-- **Target shows:** `BCEF_CONSO_Q` (no `RATE_TYPE`).
-- **Chosen:** omit `RATE_TYPE` → `PERIMETER_SEGMENT_(Q|Y)`. Matches target.
-- **Note:** only one rate type (`TF`) exists in the sample; revisit if multiple appear.
-- Confirmed: [ ]
+- **Target sample shows:** `BCEF_CONSO_Q` (no `RATE_TYPE`).
+- **DECISION (user, keep spec):** include `RATE_TYPE` → `PERIMETER_SEGMENT_RATETYPE_(Q|Y)`,
+  e.g. `BCEF_CONSO_TF_Q`.
+- **Consequence:** output ids deliberately **differ from the sample target** ids (which
+  dropped `RATE_TYPE`); the numeric values are unchanged. Distinct rate types (TF/TV) now
+  form separate matrices, and the RA lookup is keyed by rate type.
+- **Code:** `MatrixDef.matrixId`, `parseParametrage` group key, `collectRa`/`aggregateSegments`.
+- Confirmed: [x]
 
 ## Q2 — Aggregated segment name ✅
 - **Chosen:** when `AGGREGATION = YES`, use `AGGREGATED_SEGMENT_NAME` (so `INVEST_PRO` +

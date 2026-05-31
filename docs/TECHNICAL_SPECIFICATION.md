@@ -91,10 +91,11 @@ flat tail in `termSeries` covers the remaining grid points.
 
 ### 3.3 `PrimaryMapper` — orchestration
 
-- `parseParametrage` — groups rows by `(perimeter, output-segment)`; output segment =
-  `AGGREGATED_SEGMENT_NAME` if aggregated else `SEGMENT`. Combined `fwlApplied = any(YES)`;
-  `macroVar` = first non-`NONE`.
-- `collectRa` — `(SEGMENT, FWL_TYPE, METRIC) → Array[Double]` of months.
+- `parseParametrage` — groups rows by `(perimeter, output-segment, rate-type)`; output
+  segment = `AGGREGATED_SEGMENT_NAME` if aggregated else `SEGMENT`. Combined
+  `fwlApplied = any(YES)`; `macroVar` = first non-`NONE`. Matrix id =
+  `PERIMETER_SEGMENT_RATETYPE_(Q|Y)`.
+- `collectRa` — `(SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) → Array[Double]` of months.
 - `aggregateSegments` — element-wise sum of constituent segments' monthly series.
 - `collectScenario` — `(scenario, Date) → (macroVar → Double)`.
 - `macroDelta` — `MACRO[scen][projection_date] − MACRO[Central][projection_date]`.

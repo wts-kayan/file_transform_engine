@@ -52,11 +52,13 @@ class PrimaryMapper(
   private case class MatrixDef(
                                 perimeter: String,
                                 outSegment: String,
+                                rateType: String,
                                 segments: Seq[String], // constituent RA segments (>1 when aggregated)
                                 fwlApplied: Boolean,
                                 macroVar: String
                               ) {
-    def matrixId(freq: Frequency): String = s"${perimeter}_${outSegment}_${freq.suffix}"
+    def matrixId(freq: Frequency): String =
+      s"${perimeter}_${outSegment}_${rateType}_${freq.suffix}"
   }
 
   def getDataFrame: DataFrame = {
@@ -104,10 +106,11 @@ class PrimaryMapper(
                           freq: Frequency,
                           scenName: String,
                           scenCode: String,
-                          ra: Map[(String, String, String), Array[Double]],
+                          ra: Map[(String, String, String, String), Array[Double]],
                           macroData: Map[(String, String), Map[String, Double]]
                         ): Seq[Row] = {
-    def series(fwl: String, metric: String): Array[Double] = aggregateSegments(ra, m.segments, fwl, metric)
+    def series(fwl: String, metric: String): Array[Double] =
+      aggregateSegments(ra, m.segments, m.rateType, fwl, metric)
 
     val crd    = series(FWL_BASELINE, METRIC_CRD)
     val raStat = series(FWL_BASELINE, METRIC_RA_STAT)
@@ -188,23 +191,23 @@ class PrimaryMapper(
     df.columns.filter(c => c.length > 1 && c.charAt(0) == 'M' && c.drop(1).forall(_.isDigit))
       .sortBy(_.drop(1).toInt)
 
-  /** key = (SEGMENT, FWL_TYPE, METRIC) -> monthly series (M1..Mn). */
-  private def collectRa(df: DataFrame): Map[(String, String, String), Array[Double]] = {
+  /** key = (SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) -> monthly series (M1..Mn). */
+  private def collectRa(df: DataFrame): Map[(String, String, String, String), Array[Double]] = {
     val months = monthColumns(df)
-    val cols = Seq(COL_SEGMENT, COL_FWL_TYPE, COL_METRIC) ++ months
+    val cols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ months
     df.select(cols.head, cols.tail: _*).collect().map { r =>
-      val key = (r.getString(0), r.getString(1), r.getString(2))
-      val series = months.indices.map(i => toDouble(r.get(3 + i))).toArray
+      val key = (r.getString(0), r.getString(1), r.getString(2), r.getString(3))
+      val series = months.indices.map(i => toDouble(r.get(4 + i))).toArray
       key -> series
     }.toMap
   }
 
-  /** Element-wise sum of the monthly series across constituent segments. */
+  /** Element-wise sum of the monthly series across constituent segments (same rate type). */
   private def aggregateSegments(
-                                 ra: Map[(String, String, String), Array[Double]],
-                                 segments: Seq[String], fwl: String, metric: String
+                                 ra: Map[(String, String, String, String), Array[Double]],
+                                 segments: Seq[String], rateType: String, fwl: String, metric: String
                                ): Array[Double] = {
-    val present = segments.flatMap(s => ra.get((s, fwl, metric)))
+    val present = segments.flatMap(s => ra.get((s, rateType, fwl, metric)))
     if (present.isEmpty) Array.empty
     else {
       val len = present.map(_.length).max
@@ -236,17 +239,18 @@ class PrimaryMapper(
       }
       .filter { case (perim, seg, _, _, _, _, _) => perimeters.contains(perim) && seg.nonEmpty }
 
-    // group by (perimeter, output segment) so INVEST_PRO + INVEST_CORP collapse into INVEST
-    recs.groupBy { case (perim, seg, _, agg, aggName, _, _) =>
+    // group by (perimeter, output segment, rate type) so INVEST_PRO + INVEST_CORP collapse
+    // into INVEST while distinct rate types (TF/TV) stay separate matrices.
+    recs.groupBy { case (perim, seg, rateType, agg, aggName, _, _) =>
       val out = if (agg.equalsIgnoreCase(YES) && aggName.nonEmpty) aggName else seg
-      (perim, out)
-    }.map { case ((perim, out), group) =>
+      (perim, out, rateType)
+    }.map { case ((perim, out, rateType), group) =>
       val segments = group.map(_._2).distinct.toSeq
       // combined FWL flag for an aggregated matrix: YES if ANY constituent applies FWL.
       val fwlApplied = group.exists(_._6.equalsIgnoreCase(YES))
       val macroVar = group.map(_._7).find(v => v.nonEmpty && !v.equalsIgnoreCase("NONE")).getOrElse("")
-      MatrixDef(perim, out, segments, fwlApplied, macroVar)
-    }.toSeq.sortBy(m => (m.perimeter, m.outSegment))
+      MatrixDef(perim, out, rateType, segments, fwlApplied, macroVar)
+    }.toSeq.sortBy(m => (m.perimeter, m.outSegment, m.rateType))
   }
 
   // ---- helpers --------------------------------------------------------------
