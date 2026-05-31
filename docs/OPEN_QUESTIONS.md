@@ -172,10 +172,12 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   independently already — it just needs different numbers.
 - Confirmed: [ ]   (pending corrected scenario file)
 
-## Q16 — Output number format ✅
-- **Chosen:** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at 9 dp with trailing
-  zeros stripped, `TERM` like `0`, `0,25`, `100`. Matches target byte-for-byte in format.
-- Confirmed: [ ]
+## Q16 — Output number format ✔️ ANSWERED
+- **DECISION (user): confirmed.** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at
+  9 dp with trailing zeros stripped, `TERM` like `0`, `0,25`, `100`. Matches the target
+  byte-for-byte in format.
+- **Code:** `PrimaryMapper.fmtNumber`; write via `PrimaryUtilities.writeDataframe` (`;`, header).
+- Confirmed: [x]
 
 ---
 
