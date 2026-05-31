@@ -1,0 +1,196 @@
+package com.bnp.str.tseadfwd.mapping
+
+/**
+ * Pure computation core for the EAD FWD Term Structure (no Spark dependency).
+ *
+ * All inputs are tiny reference series (a few dozen rows of 361 monthly points), so the
+ * numeric work is done on the driver with plain Scala collections and validated against
+ * `target_output/TS_EAD_FWD_25Q4_v1_small.csv`.
+ *
+ * Validated formula (see project memory `ead-fwd-formula`):
+ *   - Quarterly aggregation (RA STAT / RA FI / RE), half-weight overlapping window:
+ *       Q1 = M1 + M2/2
+ *       Qn = M[3n-4]/2 + M[3n-3] + M[3n-2] + M[3n-1]/2   (1-based, step 3)
+ *   - Quarterly CRD, block average: Qi = mean(M[3i-2], M[3i-1], M[3i])
+ *   - Yearly aggregation: RA metrics = SUM over window (Y1 = 6 months, Yn = 12 months);
+ *     CRD = MEAN over the same window.
+ *   - Core RA (Central / FWL=NO):  RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i   (BASELINE)
+ *   - VECTOR_i = 1 - RA_i ; EAD_RA_RATE = cumulative product of VECTOR.
+ *   - Computation runs to term 30y; from term 30 on the value is held flat (... 50, 100).
+ */
+object PrimaryView {
+
+  // ----- term grid -----------------------------------------------------------
+  val QUARTERLY_STEP = 0.25
+  val YEARLY_STEP    = 1.0
+  /** Last computed term (years); beyond this the value is held flat. */
+  val COMPUTED_HORIZON_Y = 30.0
+  /** Last flat term before the long tail. */
+  val FLAT_MAX_Y = 50.0
+  /** Long tail term. */
+  val TAIL_TERM = 100.0
+
+  sealed trait Frequency { def suffix: String; def step: Double; def coreMax: Double }
+  // Quarterly carries one extra step (..50.25) vs Yearly (..50), matching the target grid.
+  case object Quarterly extends Frequency { val suffix = "Q"; val step = QUARTERLY_STEP; val coreMax = FLAT_MAX_Y + QUARTERLY_STEP }
+  case object Yearly    extends Frequency { val suffix = "Y"; val step = YEARLY_STEP;    val coreMax = FLAT_MAX_Y }
+
+  /** Output term grid for a frequency: 0 .. coreMax by step, then the tail term. */
+  def termGrid(freq: Frequency): Vector[Double] = {
+    val n = Math.round(freq.coreMax / freq.step).toInt
+    val core = (0 to n).map(i => round2(i * freq.step)).toVector
+    core :+ TAIL_TERM
+  }
+
+  /** Round to a clean grid value (kills binary FP noise like 0.30000000004). */
+  private def round2(x: Double): Double = Math.round(x * 1e6) / 1e6
+
+  // ----- monthly -> period aggregation --------------------------------------
+
+  /**
+   * Aggregate a monthly series into one period value.
+   *
+   * @param m       monthly series, 0-based (m(0) == M1)
+   * @param period  1-based period index (quarter or year)
+   * @param freq    Quarterly or Yearly
+   * @param isCrd   CRD uses an average; RA metrics use a (half-weighted) sum
+   * @return Some(value) if the window fits within the available months, else None
+   */
+  def aggregate(m: Array[Double], period: Int, freq: Frequency, isCrd: Boolean): Option[Double] =
+    freq match {
+      case Quarterly => aggregateQuarter(m, period, isCrd)
+      case Yearly    => aggregateYear(m, period, isCrd)
+    }
+
+  private def at(m: Array[Double], idx0: Int): Option[Double] =
+    if (idx0 >= 0 && idx0 < m.length) Some(m(idx0)) else None
+
+  private def aggregateQuarter(m: Array[Double], q: Int, isCrd: Boolean): Option[Double] = {
+    if (isCrd) {
+      // block average of months [3q-2, 3q-1, 3q] (1-based) -> 0-based [3q-3 .. 3q-1]
+      val idx = (0 until 3).map(j => 3 * (q - 1) + j)
+      seqAt(m, idx).map(xs => xs.sum / 3.0)
+    } else if (q == 1) {
+      for { a <- at(m, 0); b <- at(m, 1) } yield a + b / 2.0
+    } else {
+      // half-weight window M[3q-4]/2 + M[3q-3] + M[3q-2] + M[3q-1]/2 -> 0-based 3q-5 .. 3q-2
+      val s = 3 * q - 5
+      for { a <- at(m, s); b <- at(m, s + 1); c <- at(m, s + 2); d <- at(m, s + 3) }
+        yield a / 2.0 + b + c + d / 2.0
+    }
+  }
+
+  private def aggregateYear(m: Array[Double], y: Int, isCrd: Boolean): Option[Double] = {
+    // Y1 covers 6 months (M1..M6); Yn (n>=2) covers 12 months.
+    val (start0, len) =
+      if (y == 1) (0, 6)
+      else (6 + 12 * (y - 2), 12)
+    val idx = (0 until len).map(start0 + _)
+    seqAt(m, idx).map(xs => if (isCrd) xs.sum / len.toDouble else xs.sum)
+  }
+
+  private def seqAt(m: Array[Double], idx: Seq[Int]): Option[Seq[Double]] = {
+    val xs = idx.flatMap(i => at(m, i))
+    if (xs.length == idx.length) Some(xs) else None
+  }
+
+  // ----- RA detail & vector factored ----------------------------------------
+
+  /**
+   * Per-period "RA" detail for the Central scenario (and for every scenario when FWL=NO):
+   *   RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i
+   * Returns the largest contiguous prefix of periods whose aggregation window is valid
+   * and whose term does not exceed COMPUTED_HORIZON_Y.
+   */
+  def centralRa(
+                 crd: Array[Double],
+                 raStat: Array[Double],
+                 raFi: Array[Double],
+                 re: Array[Double],
+                 freq: Frequency
+               ): Vector[Double] = computeRa(freq) { period =>
+    for {
+      c <- aggregate(crd, period, freq, isCrd = true)
+      s <- aggregate(raStat, period, freq, isCrd = false)
+      f <- aggregate(raFi, period, freq, isCrd = false)
+      r <- aggregate(re, period, freq, isCrd = false)
+    } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> exposure run off, no further loss
+  }
+
+  /**
+   * Per-period RA detail for a non-central scenario under FWL=YES (parallel shock).
+   *
+   * RA_i(scen) = RA_STAT_detail_i(BASELINE) + RA_FIRE_detail_i(scen)
+   * where the FI+RE detail is linearly interpolated from BASELINE towards the relevant
+   * STRESS leg by the macro rate delta:
+   *   weight = rateDelta / refShock      (delta < 0 -> STRESS(-), delta > 0 -> STRESS(+))
+   *   FIRE_detail_i(scen) = -(FI_base+RE_base)/CRD + weight * ( -(FI_stress+RE_stress)/CRD - -(FI_base+RE_base)/CRD )
+   *
+   * NOTE: the exact shock scaling is the calibration point for FWL=YES (see project memory
+   * `ead-fwd-input-vintage-mismatch`). `rateDelta` and `refShock` are injected so the rule
+   * can be tuned without touching the pipeline.
+   */
+  def scenarioRa(
+                  crd: Array[Double],
+                  raStatBase: Array[Double],
+                  raFiBase: Array[Double], reBase: Array[Double],
+                  raFiStress: Array[Double], reStress: Array[Double],
+                  freq: Frequency,
+                  rateDelta: Double,
+                  refShock: Double
+                ): Vector[Double] = computeRa(freq) { period =>
+    for {
+      c  <- aggregate(crd, period, freq, isCrd = true)
+      s  <- aggregate(raStatBase, period, freq, isCrd = false)
+      fb <- aggregate(raFiBase, period, freq, isCrd = false)
+      rb <- aggregate(reBase, period, freq, isCrd = false)
+      fs <- aggregate(raFiStress, period, freq, isCrd = false)
+      rs <- aggregate(reStress, period, freq, isCrd = false)
+    } yield {
+      if (c == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
+      else {
+        val statDetail     = -s / c
+        val fireBaseDetail = -(fb + rb) / c
+        val fireStressDet  = -(fs + rs) / c
+        val w = if (refShock == 0.0) 0.0 else rateDelta / refShock
+        val fireScenDetail = fireBaseDetail + w * (fireStressDet - fireBaseDetail)
+        statDetail + fireScenDetail
+      }
+    }
+  }
+
+  /** Build the RA prefix: keep periods while the window is valid and term <= horizon. */
+  private def computeRa(freq: Frequency)(period: Int => Option[Double]): Vector[Double] = {
+    val buf = Vector.newBuilder[Double]
+    var p = 1
+    var continue = true
+    while (continue) {
+      val term = (p - 1) * freq.step
+      if (term > COMPUTED_HORIZON_Y) continue = false
+      else period(p) match {
+        case Some(v) => buf += v; p += 1
+        case None    => continue = false
+      }
+    }
+    buf.result()
+  }
+
+  /** Cumulative product of (1 - RA). */
+  def vectorFactored(ra: Vector[Double]): Vector[Double] = {
+    var acc = 1.0
+    ra.map { x => acc *= (1.0 - x); acc }
+  }
+
+  /**
+   * Map the output term grid onto the computed vector-factored series, holding the last
+   * computed value flat for every term beyond the computed horizon (incl. the tail term).
+   */
+  def termSeries(vf: Vector[Double], freq: Frequency): Vector[(Double, Double)] = {
+    if (vf.isEmpty) Vector.empty
+    else termGrid(freq).map { t =>
+      val n = Math.round(t / freq.step).toInt + 1 // 1-based period for this term
+      val idx = Math.min(n, vf.length) - 1
+      t -> vf(idx)
+    }
+  }
+}
