@@ -57,8 +57,15 @@ MainDriver
 > **Recap (M = month, not metric).** `M1…M361` are the *monthly* columns; `METRIC` is
 > the separate key column (`CRD`/`RA STAT`/`RA FI`/`RE`). `collectRa` reads **all 361
 > months**; any "first N months" shown in debug is display-only. From 361 months:
-> - **Quarterly:** 120 computed periods (terms `0 … 29.75`) → flat to `50.25` + `100` = 203 rows.
-> - **Yearly:** 31 computed points (terms `0 … 30`) → flat to `50` + `100` = 52 rows.
+> - **Quarterly:** 120 computed periods (terms `0 … 29.75`); terms `30 … 50.25` and `100`
+>   all repeat the term-29.75 value → 203 rows.
+> - **Yearly:** 30 computed points (terms `0 … 29`); terms `30 … 50` and `100` all repeat
+>   the term-29 value → 52 rows.
+>
+> `computeRa` stops when the aggregation window exceeds the 361 available months (the
+> quarterly window for term 30 needs month 362) or when term > 30, whichever comes first.
+> The last computable term is therefore 29.75 (Q) / 29 (Y); `termSeries` holds that value
+> flat for every later grid term.
 
 ### 3.2 `PrimaryView` — computation core
 

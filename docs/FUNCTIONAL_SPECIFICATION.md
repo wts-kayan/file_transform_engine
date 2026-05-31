@@ -92,13 +92,18 @@ Secto is **not** implemented (no Secto data in the scenario file).
 > **Recap (M = month, not metric).** `M1…M361` are the *monthly* time series; `METRIC`
 > is the separate key column (`CRD`/`RA STAT`/`RA FI`/`RE`). All 361 months are used.
 > From 361 months the engine builds:
-> - **Quarterly:** 120 computed periods → terms `0, 0.25 … 29.75`, then held flat to
->   `50.25` plus the tail `100` = **203 rows**.
-> - **Yearly:** 31 computed points → terms `0 … 30`, then held flat to `50` plus `100`
->   = **52 rows**.
+> - **Quarterly:** 120 computed periods → terms `0, 0.25 … 29.75`; every term from
+>   `29.75` onward (`30, 30.25 … 50.25` and `100`) repeats the **term-29.75 value** =
+>   **203 rows**.
+> - **Yearly:** 30 computed points → terms `0 … 29`; every term from `29` onward
+>   (`30, 31 … 50` and `100`) repeats the **term-29 value** = **52 rows**.
 
-Computation runs to term **30 years**; from term 30 onward the value is held flat
-(this also covers the long tail terms up to 50 and the single `100` term).
+The intent is to compute to term **30 years** then hold flat. With exactly 361 input
+months the *last computable* term is **29.75** (quarterly) / **29** (yearly) — the
+quarterly window for term 30 would need month 362 — so the plateau value is the
+last-computed value, and all later grid terms (up to 50 and the single `100`) carry it.
+A longer input vintage would simply shift the last-computed term to 30 without changing
+the flat-tail behaviour.
 
 ### 4.4 The four computation cases
 Per the specification, `EAD_RA_RATE` is replicated for four cases:
