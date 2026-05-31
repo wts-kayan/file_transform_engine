@@ -141,11 +141,14 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - See [`MISSING_INPUTS.md`](../MISSING_INPUTS.md).
 - Confirmed value: ____________ (pending corrected inputs)
 
-## Q13 — Macro-delta scaling (×100?) ⚠️
+## Q13 — Macro-delta scaling (×100?) ✔️ ANSWERED
 - **Spec STEP 3:** `Rate = (MACRO_scen − MACRO_central) × 100`.
-- **Chosen:** code uses the **raw** delta; the ×100 (and any unit scaling) is absorbed by
-  `ref_shock`, so only one knob needs calibrating. Equivalent once `ref_shock` is set.
-- Confirmed: [ ]
+- **DECISION (user):** keep the delta **raw**; the ×100 (and any unit scaling) is absorbed by
+  `ref_shock`, so only one knob (Q12) needs calibrating. Mathematically equivalent.
+- **Consequence:** `ref_shock` is expressed in raw-rate units (e.g. `0.0065` = 65 bps), not
+  ×100 units. The Q12 ballpark `≈0.07` is in these raw units.
+- **Code:** `PrimaryMapper.macroDeltaArray` (no ×100); `PrimaryView.scenarioRa` weight.
+- Confirmed: [x]
 
 ## Q14 — Scenario `S` (Secto) ✅
 - **Chosen:** not implemented — no Secto data in the scenario file. Target has no `S` rows.
@@ -153,17 +156,28 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - Confirmed: [ ]
 
 ## Q15 — Adverse vs Extreme differentiation ⛔
-- **Finding:** in the current scenario file Adverse and Extreme are **identical** at every
+- **Finding:** in the current scenario file Adverse and Extreme are **byte-identical** at every
   quarter and macro variable, so the engine cannot produce distinct A vs E.
-- **Chosen:** rely on each scenario's own macro delta to differentiate (works automatically
-  once the file has differing values). `ref_shock` does **not** affect A-vs-E, only magnitude.
-- **Needed:** the scenario file version where Adverse ≠ Extreme (you indicated this exists).
-- Confirmed: [ ]
+- **Evidence (BCEF_MORTGAGE_Q):**
+  - Target wants them different: term 1 A=`0.935146`, E=`0.942747`; term 10 A=`0.612215`, E=`0.620127`.
+  - Our output forces them equal: term 1 A=E=`0.941924`; term 10 A=E=`0.628110`.
+  - Cause — scenario file `IR_10Y_FR`: Adverse=Extreme=`0.006/0.006/0.007` at 2023Q4/2024Q4/2025Q4.
+- **Mechanism:** scenarios are differentiated only by `delta = MACRO[scen] − MACRO[Central]`;
+  equal macro ⇒ equal delta ⇒ equal output **by construction**. Independent of `ref_shock`
+  (it scales A and E equally). Not a code bug.
+- **Direction hint from target:** Extreme EAD > Adverse EAD (less loss) ⇒ Extreme's `IR_10Y_FR`
+  must sit **closer to Central** than Adverse's (smaller `|delta|`). Exact values must come from
+  the source file.
+- **Needed:** the scenario file version where Adverse ≠ Extreme. Engine handles them
+  independently already — it just needs different numbers.
+- Confirmed: [ ]   (pending corrected scenario file)
 
-## Q16 — Output number format ✅
-- **Chosen:** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at 9 dp with trailing
-  zeros stripped, `TERM` like `0`, `0,25`, `100`. Matches target byte-for-byte in format.
-- Confirmed: [ ]
+## Q16 — Output number format ✔️ ANSWERED
+- **DECISION (user): confirmed.** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at
+  9 dp with trailing zeros stripped, `TERM` like `0`, `0,25`, `100`. Matches the target
+  byte-for-byte in format.
+- **Code:** `PrimaryMapper.fmtNumber`; write via `PrimaryUtilities.writeDataframe` (`;`, header).
+- Confirmed: [x]
 
 ---
 
