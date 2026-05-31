@@ -63,10 +63,11 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
     `BCEF ; MORTGAGE ; TF ; NO ; <blank> ; YES ; IR_10Y_FR ; 3Y`.
 - Confirmed: [x]
 
-## Q6 — Core RA formula ✅
-- **Chosen:** `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i` (BASELINE), reverse-engineered.
+## Q6 — Core RA formula ✔️ ANSWERED
+- **DECISION (user): confirmed.** `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i` (BASELINE).
 - **Evidence:** reproduces `BCEF_MORTGAGE_Q` Central to ~`1e-5` at low terms.
-- Confirmed: [ ]
+- **Code:** `PrimaryView.centralRa`.
+- Confirmed: [x]
 
 ## Q7 — Period aggregation windows ✅
 - **Chosen (quarterly):** RA metrics half-weight (`Q1 = M1 + M2/2`;
