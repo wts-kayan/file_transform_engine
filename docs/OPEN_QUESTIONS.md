@@ -128,12 +128,18 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 ## Q12 — `ref_shock` calibration (FWL=YES shock magnitude) ⛔
 - **What it is:** the rate-shock magnitude the `STRESS (+)/(-)` legs represent;
   `weight = |delta| / ref_shock`, `fire_scen = fire_base + weight·(fire_stress − fire_base)`.
-- **Chosen:** placeholder `1.0` → weight ≈ 0.0065 → A/O/E ≈ Central (shock almost off).
-- **Cannot reproduce the target** until we know this value (or can calibrate against a
-  target produced from a known scenario file). See [`MISSING_INPUTS.md`](../MISSING_INPUTS.md).
-- **Needed:** the rate magnitude the stress legs encode (e.g. ±100 bps) **or** approval to
-  reverse-engineer it from the target.
-- Confirmed value: ____________
+- **Calibration attempt (against target, MORTGAGE_Q Optimistic):** backed out the implied
+  scaling `k = target_shock / (stress − baseline)` per term. It is **not constant** — it ramps
+  `0.02 → 0.38 → 0.26` over terms 2–13. So **no single `ref_shock` reproduces the target shape**
+  from the current data; the stress/baseline FI-RE of this RA vintage don't align with the
+  target's (Q15), and Adverse=Extreme in the macro file.
+- **Magnitude ballpark:** `ref_shock ≈ 0.05–0.08` (Optimistic ≈ 0.082) gets the right order;
+  current `1.0` is ~100× too small (shock ≈ off).
+- **DECISION:** keep `ref_shock = 1.0` (shock effectively off, documented) until the matching
+  RA + scenario vintage arrive, then re-run this calibration (the `k` curve should flatten).
+  Alternative on request: set `≈ 0.07` for a visible-but-approximate shock.
+- See [`MISSING_INPUTS.md`](../MISSING_INPUTS.md).
+- Confirmed value: ____________ (pending corrected inputs)
 
 ## Q13 — Macro-delta scaling (×100?) ⚠️
 - **Spec STEP 3:** `Rate = (MACRO_scen − MACRO_central) × 100`.
