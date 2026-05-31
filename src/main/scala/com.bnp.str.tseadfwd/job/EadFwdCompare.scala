@@ -1,4 +1,4 @@
-package com.bnp.str.tseadfwd
+package com.bnp.str.tseadfwd.job
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
