@@ -118,25 +118,28 @@ object PrimaryView {
   }
 
   /**
-   * Per-period RA detail for a non-central scenario under FWL=YES (parallel shock).
+   * Per-period RA detail for a non-central scenario under FWL=YES.
    *
    * RA_i(scen) = RA_STAT_detail_i(BASELINE) + RA_FIRE_detail_i(scen)
-   * where the FI+RE detail is linearly interpolated from BASELINE towards the relevant
-   * STRESS leg by the macro rate delta:
-   *   weight = rateDelta / refShock      (delta < 0 -> STRESS(-), delta > 0 -> STRESS(+))
-   *   FIRE_detail_i(scen) = -(FI_base+RE_base)/CRD + weight * ( -(FI_stress+RE_stress)/CRD - -(FI_base+RE_base)/CRD )
+   * where the FI+RE detail is linearly interpolated from BASELINE towards a STRESS leg by
+   * the macro rate delta, which is read **per period** from the scenario path (`deltaAt`):
+   *   delta_i = deltaAt(period_i)                         (signed)
+   *   leg     = STRESS(-) if delta_i < 0 else STRESS(+)   (direction of the rate move)
+   *   weight  = |delta_i| / refShock
+   *   FIRE_detail_i(scen) = FIRE_base + weight * (FIRE_leg - FIRE_base)
    *
-   * NOTE: the exact shock scaling is the calibration point for FWL=YES (see project memory
-   * `ead-fwd-input-vintage-mismatch`). `rateDelta` and `refShock` are injected so the rule
-   * can be tuned without touching the pipeline.
+   * NOTE: the exact shock scaling is the calibration point for FWL=YES (`refShock`).
+   * Both stress legs are passed in; `deltaAt` selects the leg and weight per term, so a
+   * ramping macro path naturally produces a term-varying shock.
    */
   def scenarioRa(
                   crd: Array[Double],
                   raStatBase: Array[Double],
                   raFiBase: Array[Double], reBase: Array[Double],
-                  raFiStress: Array[Double], reStress: Array[Double],
+                  raFiPlus: Array[Double], rePlus: Array[Double],
+                  raFiMinus: Array[Double], reMinus: Array[Double],
                   freq: Frequency,
-                  rateDelta: Double,
+                  deltaAt: Int => Double,
                   refShock: Double
                 ): Vector[Double] = computeRa(freq) { period =>
     for {
@@ -144,17 +147,20 @@ object PrimaryView {
       s  <- aggregate(raStatBase, period, freq, isCrd = false)
       fb <- aggregate(raFiBase, period, freq, isCrd = false)
       rb <- aggregate(reBase, period, freq, isCrd = false)
-      fs <- aggregate(raFiStress, period, freq, isCrd = false)
-      rs <- aggregate(reStress, period, freq, isCrd = false)
+      fp <- aggregate(raFiPlus, period, freq, isCrd = false)
+      rp <- aggregate(rePlus, period, freq, isCrd = false)
+      fm <- aggregate(raFiMinus, period, freq, isCrd = false)
+      rm <- aggregate(reMinus, period, freq, isCrd = false)
     } yield {
       if (c == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
       else {
+        val delta = deltaAt(period)
+        val (fs, rs) = if (delta < 0) (fm, rm) else (fp, rp) // leg by sign of the rate move
         val statDetail     = -s / c
         val fireBaseDetail = -(fb + rb) / c
         val fireStressDet  = -(fs + rs) / c
-        val w = if (refShock == 0.0) 0.0 else rateDelta / refShock
-        val fireScenDetail = fireBaseDetail + w * (fireStressDet - fireBaseDetail)
-        statDetail + fireScenDetail
+        val w = if (refShock == 0.0) 0.0 else math.abs(delta) / refShock
+        statDetail + fireBaseDetail + w * (fireStressDet - fireBaseDetail)
       }
     }
   }
