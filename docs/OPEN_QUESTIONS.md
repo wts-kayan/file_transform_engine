@@ -141,11 +141,14 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - See [`MISSING_INPUTS.md`](../MISSING_INPUTS.md).
 - Confirmed value: ____________ (pending corrected inputs)
 
-## Q13 — Macro-delta scaling (×100?) ⚠️
+## Q13 — Macro-delta scaling (×100?) ✔️ ANSWERED
 - **Spec STEP 3:** `Rate = (MACRO_scen − MACRO_central) × 100`.
-- **Chosen:** code uses the **raw** delta; the ×100 (and any unit scaling) is absorbed by
-  `ref_shock`, so only one knob needs calibrating. Equivalent once `ref_shock` is set.
-- Confirmed: [ ]
+- **DECISION (user):** keep the delta **raw**; the ×100 (and any unit scaling) is absorbed by
+  `ref_shock`, so only one knob (Q12) needs calibrating. Mathematically equivalent.
+- **Consequence:** `ref_shock` is expressed in raw-rate units (e.g. `0.0065` = 65 bps), not
+  ×100 units. The Q12 ballpark `≈0.07` is in these raw units.
+- **Code:** `PrimaryMapper.macroDeltaArray` (no ×100); `PrimaryView.scenarioRa` weight.
+- Confirmed: [x]
 
 ## Q14 — Scenario `S` (Secto) ✅
 - **Chosen:** not implemented — no Secto data in the scenario file. Target has no `S` rows.
