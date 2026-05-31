@@ -34,13 +34,17 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   segments, the columns become a no-op and the mapping is 1:1.)
 - Confirmed: [x]
 
-## Q3 — FWL flag for an **aggregated** matrix ⚠️
+## Q3 — FWL flag for an **aggregated** matrix ✔️ ANSWERED
 - **Problem:** constituents disagree — `INVEST_PRO` = `NO`, `INVEST_CORP` = `YES`.
-- **Chosen:** `FWL = YES if ANY constituent is YES` → `INVEST` is FWL=YES. Matches target
-  (INVEST values differ across scenarios).
-- **Alternatives:** "all must be YES", or "use a designated lead segment".
+- **DECISION: `FWL = YES if ANY constituent is YES`** → `INVEST` is FWL=YES.
+- **Evidence (target):** `BCEF_INVEST_Q` scenarios differ at 202/203 terms (FWL=YES
+  behaviour). "ALL must be YES" would make INVEST identical across scenarios → ruled out.
 - **Code:** `PrimaryMapper.parseParametrage` → `group.exists(_._6.equalsIgnoreCase(YES))`.
-- Confirmed: [ ]   Override (if any): ____________
+- **Open refinement (non-blocking):** the engine sums `PRO + CORP` and shocks the whole
+  combined series; strictly only the FWL=YES constituent (`CORP`) should be shocked. This
+  affects the shock *magnitude*, not whether INVEST varies — tied to the `ref_shock`
+  calibration (Q12) and the stress-data vintage, so revisit then.
+- Confirmed: [x]
 
 ## Q4 — Emit both Q and Y for every matrix? ✔️ ANSWERED
 - **Spec:** `computation_frequency` selects `_Q` *or* `_Y`.
