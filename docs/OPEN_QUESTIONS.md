@@ -69,25 +69,30 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryView.centralRa`.
 - Confirmed: [x]
 
-## Q7 — Period aggregation windows ✅
-- **Chosen (quarterly):** RA metrics half-weight (`Q1 = M1 + M2/2`;
+## Q7 — Period aggregation windows ✔️ ANSWERED
+- **DECISION (user): confirmed.**
+- **Quarterly:** RA metrics half-weight (`Q1 = M1 + M2/2`;
   `Qn = M[3n-4]/2 + M[3n-3] + M[3n-2] + M[3n-1]/2`); `CRD` = block mean of 3 months.
-- **Chosen (yearly):** RA metrics = sum (Y1 = 6 months, Yn = 12); `CRD` = mean of window.
+- **Yearly:** RA metrics = sum (Y1 = 6 months, Yn = 12); `CRD` = mean of window.
 - **Evidence:** matches target at low terms; per-quarter residual oscillates in sign
   (data noise, not a window error).
-- Confirmed: [ ]
+- **Code:** `PrimaryView.aggregate`.
+- Confirmed: [x]
 
-## Q8 — Run-off handling when `CRD = 0` ✅
-- **Chosen:** `CRD = 0` → `RA = 0` (`VECTOR = 1`); the curve flattens instead of `0/0`.
+## Q8 — Run-off handling when `CRD = 0` ✔️ ANSWERED
+- **DECISION (user): confirmed.** `CRD = 0` → `RA = 0` (`VECTOR = 1`); the curve flattens
+  instead of `0/0`.
 - **Evidence:** the target plateaus when exposure runs off (e.g. CONSO ~term 16).
-- Confirmed: [ ]
+- **Code:** guards in `PrimaryView.centralRa` / `scenarioRa`.
+- Confirmed: [x]
 
-## Q9 — Flat-tail boundary ✅
-- **Chosen:** compute to the last *computable* term, then hold flat to 50/100.
-  With 361 months that is term **29.75 (quarterly)** / **29 (yearly)** — the quarterly
-  window for term 30 needs month 362. Grid sizes: 203 (Q), 52 (Y). Matches target structure.
+## Q9 — Flat-tail boundary ✔️ ANSWERED
+- **DECISION (user): confirmed.** Compute to the last *computable* term, then hold flat to
+  50/100. With 361 months that is term **29.75 (quarterly)** / **29 (yearly)** — the
+  quarterly window for term 30 needs month 362. Grid sizes: 203 (Q), 52 (Y).
 - **Note:** a longer input vintage moves the last-computed term to 30; flat behaviour unchanged.
-- Confirmed: [ ]
+- **Code:** `PrimaryView.computeRa` (stop condition) + `termSeries` (flat fill).
+- Confirmed: [x]
 
 ## Q10 — Stress leg selection (FWL=YES) ⚠️
 - **Chosen:** `delta < 0` → use `STRESS (-)` leg; `delta ≥ 0` → use `STRESS (+)` leg,
