@@ -49,12 +49,19 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `getDataFrame` → `for { freq <- Seq(Quarterly, Yearly) }`.
 - Confirmed: [x]
 
-## Q5 — `FWL_TO_BE_APPLIED` source ✅
-- **Chosen:** read directly from PARAMETRAGE column `FWL_TO_BE_APPLIED`
+## Q5 — `FWL_TO_BE_APPLIED` source ✔️ ANSWERED
+- **DECISION (user):** read directly from PARAMETRAGE column `FWL_TO_BE_APPLIED`
   (`YES` → scenario shock; `NO` → all scenarios = Central). Config-driven, no hardcoding.
-- **Note:** required `PARAMETRAGE_corrected.xlsx` (CONSO set to `NO`, `MORTGAGE` row added)
-  to match the target's behaviour.
-- Confirmed: [ ]
+- **Code:** `parseParametrage` → `group.exists(_._6.equalsIgnoreCase(YES))`; consumed in
+  `matrixRows` (`centralRa` vs `scenarioRa`).
+- **PARAMETRAGE corrections** made to match the target (`PARAMETRAGE_corrected.xlsx`),
+  columns: `PERIMETER ; SEGMENT ; RATE_TYPE ; AGGREGATION ; AGGREGATED_SEGMENT_NAME ;
+  FWL_TO_BE_APPLIED ; MACRO_VARIABLE ; PROJECTION_HORIZON`:
+  - **CONSO row** — `FWL_TO_BE_APPLIED` changed `YES → NO`
+    (`BCEF ; CONSO ; TF ; NO ; <blank> ; NO ; IR_10Y_FR ; 3Y`).
+  - **MORTGAGE row ADDED** (was absent) —
+    `BCEF ; MORTGAGE ; TF ; NO ; <blank> ; YES ; IR_10Y_FR ; 3Y`.
+- Confirmed: [x]
 
 ## Q6 — Core RA formula ✅
 - **Chosen:** `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i` (BASELINE), reverse-engineered.
