@@ -156,12 +156,21 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - Confirmed: [ ]
 
 ## Q15 — Adverse vs Extreme differentiation ⛔
-- **Finding:** in the current scenario file Adverse and Extreme are **identical** at every
+- **Finding:** in the current scenario file Adverse and Extreme are **byte-identical** at every
   quarter and macro variable, so the engine cannot produce distinct A vs E.
-- **Chosen:** rely on each scenario's own macro delta to differentiate (works automatically
-  once the file has differing values). `ref_shock` does **not** affect A-vs-E, only magnitude.
-- **Needed:** the scenario file version where Adverse ≠ Extreme (you indicated this exists).
-- Confirmed: [ ]
+- **Evidence (BCEF_MORTGAGE_Q):**
+  - Target wants them different: term 1 A=`0.935146`, E=`0.942747`; term 10 A=`0.612215`, E=`0.620127`.
+  - Our output forces them equal: term 1 A=E=`0.941924`; term 10 A=E=`0.628110`.
+  - Cause — scenario file `IR_10Y_FR`: Adverse=Extreme=`0.006/0.006/0.007` at 2023Q4/2024Q4/2025Q4.
+- **Mechanism:** scenarios are differentiated only by `delta = MACRO[scen] − MACRO[Central]`;
+  equal macro ⇒ equal delta ⇒ equal output **by construction**. Independent of `ref_shock`
+  (it scales A and E equally). Not a code bug.
+- **Direction hint from target:** Extreme EAD > Adverse EAD (less loss) ⇒ Extreme's `IR_10Y_FR`
+  must sit **closer to Central** than Adverse's (smaller `|delta|`). Exact values must come from
+  the source file.
+- **Needed:** the scenario file version where Adverse ≠ Extreme. Engine handles them
+  independently already — it just needs different numbers.
+- Confirmed: [ ]   (pending corrected scenario file)
 
 ## Q16 — Output number format ✅
 - **Chosen:** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at 9 dp with trailing
