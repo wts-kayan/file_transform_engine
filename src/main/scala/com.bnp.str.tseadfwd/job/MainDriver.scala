@@ -47,6 +47,7 @@ object MainDriver {
       new PrimaryRunner(primaryReader, outputTableName)(sparkSession, config)
         .run_tseadfwd_runner()
 
+    logger.info(s"OUTPUT - $outputTableName (final term structure)")
     df.show(false)
 
     primaryWriter.write(df, outputTableName)(sparkSession, config)

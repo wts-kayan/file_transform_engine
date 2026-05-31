@@ -5,7 +5,7 @@ import com.bnp.str.tseadfwd.mapping.PrimaryView._
 import com.bnp.str.tseadfwd.utility.PrimaryConstants._
 import com.typesafe.config.Config
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
 import org.slf4j.LoggerFactory
 
 /**
@@ -38,6 +38,15 @@ class PrimaryMapper(
   /** Stress reference magnitude used to scale the macroData rate delta (FWL=YES calibration). */
   private val refShock: Double =
     if (appConf.hasPath("ref_shock")) appConf.getDouble("ref_shock") else 1.0
+  /** When true, log a titled `show()` of the inputs and a full per-term trace per matrix. */
+  private val debug: Boolean =
+    if (appConf.hasPath("debug")) appConf.getBoolean("debug") else false
+
+  /** Log a title, then show the DataFrame (used to label every debug dump). */
+  private def logShow(title: String, df: DataFrame, numRows: Int = 250): Unit = {
+    log.info(s"\n========== $title ==========")
+    df.show(numRows, truncate = false)
+  }
 
   // --- a single matrix to compute (one PARAMETRAGE group, before the Q/Y split) ---
   private case class MatrixDef(
@@ -57,6 +66,16 @@ class PrimaryMapper(
     val ra = collectRa(ra_bcef)
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
+
+    if (debug) {
+      logShow("INPUT - PARAMETRAGE", parametrage)
+      logShow("INPUT - MACRO_VARIABLE (scenario)", scenario.where(s"$COL_SCEN_DATE = '$projectionDate'"))
+      val raCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ monthColumns(ra_bcef).take(6)
+      logShow("INPUT - RA_BCEF (keys + first 6 months)", ra_bcef.select(raCols.head, raCols.tail: _*))
+      val matRows = matrices.map(m => Row(m.matrixId(Quarterly).dropRight(2), m.segments.mkString("+"), m.fwlApplied.toString, m.macroVar))
+      val matSchema = StructType(Seq("MATRIX", "SEGMENTS", "FWL_APPLIED", "MACRO_VAR").map(StructField(_, StringType)))
+      logShow("PARSED - matrix definitions", sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(matRows, 1), matSchema))
+    }
 
     val rows: Seq[Row] = for {
       m    <- matrices
@@ -108,9 +127,43 @@ class PrimaryMapper(
       }
 
     val vf = vectorFactored(ra_detail)
+
+    // Debug: show every intermediate calc per term. Skip the redundant A/O/E dumps for
+    // FWL=NO matrices (all scenarios equal Central there).
+    if (debug && (scenName == SCENARIO_CENTRAL || m.fwlApplied)) {
+      val delta = if (m.fwlApplied && scenName != SCENARIO_CENTRAL) macroDelta(macroData, scenName, m.macroVar) else 0.0
+      logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$delta, refShock=$refShock)",
+        buildTrace(freq, crd, raStat, raFiB, reB, ra_detail, vf))
+    }
+
     termSeries(vf, freq).map { case (term, value) =>
       Row(m.matrixId(freq), scenCode, fmtNumber(term, 2), fmtNumber(value, 9))
     }
+  }
+
+  /** Per-period intermediate-calc table: aggregated metrics, RA detail, vector, factored value. */
+  private def buildTrace(
+                          freq: Frequency,
+                          crd: Array[Double], raStat: Array[Double], raFi: Array[Double], re: Array[Double],
+                          ra: Vector[Double], vf: Vector[Double]
+                        ): DataFrame = {
+    def agg(a: Array[Double], p: Int, isCrd: Boolean): Double =
+      PrimaryView.aggregate(a, p, freq, isCrd).getOrElse(Double.NaN)
+    val rows = ra.indices.map { i =>
+      val p = i + 1
+      Row(p, (p - 1) * freq.step,
+        agg(crd, p, isCrd = true), agg(raStat, p, isCrd = false),
+        agg(raFi, p, isCrd = false), agg(re, p, isCrd = false),
+        ra(i), 1.0 - ra(i), vf(i))
+    }
+    val schema = StructType(Seq(
+      StructField("period", IntegerType), StructField("term", DoubleType),
+      StructField("CRD", DoubleType), StructField("RA_STAT", DoubleType),
+      StructField("RA_FI", DoubleType), StructField("RE", DoubleType),
+      StructField("RA", DoubleType), StructField("VECTOR", DoubleType),
+      StructField("EAD_RA_RATE", DoubleType)
+    ))
+    sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(rows, 1), schema)
   }
 
   /** macroData(scenario, projectionDate)[macroVar] - macroData(Central, projectionDate)[macroVar]. */
