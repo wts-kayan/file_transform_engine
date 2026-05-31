@@ -23,10 +23,16 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `MatrixDef.matrixId`, `parseParametrage` group key, `collectRa`/`aggregateSegments`.
 - Confirmed: [x]
 
-## Q2 — Aggregated segment name ✅
+## Q2 — Aggregated segment name ✔️ ANSWERED
 - **Chosen:** when `AGGREGATION = YES`, use `AGGREGATED_SEGMENT_NAME` (so `INVEST_PRO` +
   `INVEST_CORP` → `INVEST`). Matches target (`BCEF_INVEST_*`).
-- Confirmed: [ ]
+- **DECISION (user):** keep using `AGGREGATION` / `AGGREGATED_SEGMENT_NAME`.
+- **Why required:** INPUTS_RA has `INVEST_PRO` and `INVEST_CORP` separately (no `INVEST`
+  row); the target has a single `INVEST`. These two columns are the only bridge — without
+  them the output would be `BCEF_INVEST_PRO_TF_*` + `BCEF_INVEST_CORP_TF_*` (no `INVEST`),
+  diverging from the target. (If a future RA vintage already contains pre-aggregated
+  segments, the columns become a no-op and the mapping is 1:1.)
+- Confirmed: [x]
 
 ## Q3 — FWL flag for an **aggregated** matrix ⚠️
 - **Problem:** constituents disagree — `INVEST_PRO` = `NO`, `INVEST_CORP` = `YES`.
