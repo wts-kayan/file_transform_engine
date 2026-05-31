@@ -42,11 +42,12 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryMapper.parseParametrage` → `group.exists(_._6.equalsIgnoreCase(YES))`.
 - Confirmed: [ ]   Override (if any): ____________
 
-## Q4 — Emit both Q and Y for every matrix? ✅
+## Q4 — Emit both Q and Y for every matrix? ✔️ ANSWERED
 - **Spec:** `computation_frequency` selects `_Q` *or* `_Y`.
 - **Target shows:** both `_Q` and `_Y` for every matrix.
-- **Chosen:** always emit both frequencies. Matches target.
-- Confirmed: [ ]
+- **DECISION (user):** always emit **both** Q and Y, like the target.
+- **Code:** `getDataFrame` → `for { freq <- Seq(Quarterly, Yearly) }`.
+- Confirmed: [x]
 
 ## Q5 — `FWL_TO_BE_APPLIED` source ✅
 - **Chosen:** read directly from PARAMETRAGE column `FWL_TO_BE_APPLIED`
