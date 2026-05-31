@@ -98,10 +98,19 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryView.computeRa` (stop condition) + `termSeries` (flat fill).
 - Confirmed: [x]
 
-## Q10 — Stress leg selection (FWL=YES) ⚠️
-- **Chosen:** `delta < 0` → use `STRESS (-)` leg; `delta ≥ 0` → use `STRESS (+)` leg,
-  where `delta = MACRO[scenario][projection_date] − MACRO[Central][projection_date]`.
-- Confirmed: [ ]   Override (if any): ____________
+## Q10 — Stress leg selection (FWL=YES) ✔️ ANSWERED
+- **Needed?** Yes — there are two stress legs (`STRESS (+)`/`STRESS (-)`); the engine must
+  pick which to blend toward. The sign of the scenario's rate move selects it.
+- **DECISION:** `delta < 0` → `STRESS (-)`; `delta ≥ 0` → `STRESS (+)`, where
+  `delta = MACRO[scenario][projection_date] − MACRO[Central][projection_date]`.
+- **Evidence (target, MORTGAGE_Q, direction):** `STRESS(-)−baseline` raises RA (+),
+  `STRESS(+)−baseline` lowers it (−). Target Adverse/Extreme shocks are **+** (rates down →
+  STRESS(-) ✓); target Optimistic shock is **−** (rates up → STRESS(+) ✓). All three match.
+- **Caveat:** distinguishing Adverse from Extreme needs them to have different macro deltas
+  (current file has them equal → Q15); magnitude is `ref_shock` (Q12). Neither is a flaw in
+  this rule.
+- **Code:** `PrimaryMapper.matrixRows` (leg chosen by `delta` sign).
+- Confirmed: [x]
 
 ## Q11 — `projection_date` ⚠️
 - **Chosen:** `2025Q4` (from the output name `…25Q4…` and the last date in the scenario file).
