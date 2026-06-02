@@ -371,20 +371,25 @@ class PrimaryMapper(
   private def str(r: Row, i: Int): String = Option(r.get(i)).map(_.toString.trim).getOrElse("")
 
   /**
-   * Canonicalize a key field used to match RA rows: null-safe; replace the non-breaking
-   * (U+00A0) and narrow no-break (U+202F) spaces that POI emits on French-locale hosts with
-   * a regular space; collapse internal whitespace runs to a single space; trim; uppercase
-   * (Locale.ROOT). Java's `\s` does NOT match U+00A0/U+202F, so a plain `.trim` left them in
-   * place -> the (SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) lookup missed (e.g. "STRESS (+)" with
-   * an embedded NBSP != the "STRESS (+)" constant), the stress legs came back empty, and every
-   * non-Central FWL=YES scenario produced an EMPTY ra_detail (no rows). Applied to BOTH the map
-   * keys (collectRa) and the lookup tuple (aggregateSegments) so they normalize identically.
+   * Canonicalize a key field used to match RA rows so that cosmetic label differences between
+   * environments never break the (SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) lookup. Null-safe;
+   * uppercases (Locale.ROOT) then strips EVERY character that is not a letter, digit, or sign,
+   * which removes: regular spaces, the NBSP (U+00A0) / narrow no-break space (U+202F) POI emits
+   * on French-locale hosts, underscores, and parentheses — while keeping the `+`/`-` that
+   * distinguish the stress legs. So all of these collapse to one token and match:
+   *   "RA STAT" == "RA_STAT" == "ra stat"            -> "RASTAT"
+   *   "RA FI"   == "RA_FI"                            -> "RAFI"
+   *   "STRESS (+)" == "STRESS(+)" == "STRESS (+)" -> "STRESS+"
+   *   "STRESS (-)"                                    -> "STRESS-"
+   * This is why a French-locale BNP host (NBSP inside "STRESS (+)") or an underscore METRIC
+   * spelling ("RA_FI") made the stress legs miss -> empty ra_detail -> EMPTY non-Central
+   * scenarios, while single-token BASELINE/Central still matched. Applied to BOTH the collectRa
+   * map keys and the aggregateSegments lookup tuple so they normalize identically.
    */
   private def canon(s: String): String =
     Option(s).getOrElse("")
-      .replaceAll("[\\s\\u00A0\\u202F]+", " ")
-      .trim
       .toUpperCase(java.util.Locale.ROOT)
+      .replaceAll("[^A-Z0-9+-]", "")
 
   private def toDouble(v: Any): Double = v match {
     case null              => 0.0
