@@ -77,6 +77,8 @@ class PrimaryMapper(
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
 
+    logRaKeyDiagnostics(ra, matrices)
+
     if (debug) {
       // Exact parsed RA keys with series length. Each key is quoted with [|] delimiters so a
       // stray space or odd character in SEGMENT / RATE_TYPE / FWL_TYPE / METRIC is visible
@@ -260,14 +262,56 @@ class PrimaryMapper(
     val months = monthColumns(df)
     val cols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ months
     df.select(cols.head, cols.tail: _*).collect().map { r =>
-      // Trim key fields (null-safe): Excel cells frequently carry trailing spaces, which would
-      // make the lookup key (e.g. "STRESS (+) ") miss the constant ("STRESS (+)") and yield an
-      // empty series -> empty ra_detail. Matching uses the cleaned text.
-      def key0(i: Int): String = Option(r.get(i)).map(_.toString.trim).getOrElse("")
+      // Canonicalize key fields (null-safe): Excel cells frequently carry leading/trailing or
+      // embedded odd whitespace (incl. the NBSP/narrow no-break space POI emits on French-locale
+      // hosts), which would make the lookup key (e.g. "STRESS (+) ") miss the constant
+      // ("STRESS (+)") and yield an empty series -> empty ra_detail -> empty non-Central scenarios.
+      // canon() normalizes both this map's keys and the aggregateSegments lookup tuple identically.
+      def key0(i: Int): String = canon(Option(r.get(i)).map(_.toString).getOrElse(""))
       val key = (key0(0), key0(1), key0(2), key0(3))
       val series = months.indices.map(i => toDouble(r.get(4 + i))).toArray
       key -> series
     }.toMap
+  }
+
+  /**
+   * Surface the FWL_TYPE / METRIC label vocabulary actually present in the parsed RA input vs.
+   * what the FWL=YES shock path needs, and flag any FWL=YES matrix whose STRESS(+)/STRESS(-)
+   * legs are absent. A mismatch here (a stray NBSP, an alternate spelling, or simply missing
+   * stress rows in the source) is the usual reason non-Central scenarios come back EMPTY. Keys
+   * are already canon()ed, so what's printed is the normalized form actually used for matching.
+   * Always on (independent of the debug flag).
+   */
+  private def logRaKeyDiagnostics(
+                                   ra: Map[(String, String, String, String), Array[Double]],
+                                   matrices: Seq[MatrixDef]
+                                 ): Unit = {
+    val fwlPresent    = ra.keySet.map(_._3)
+    val metricPresent = ra.keySet.map(_._4)
+    log.info(s"RA key vocabulary (canonicalized): " +
+      s"FWL_TYPE=${fwlPresent.toSeq.sorted.mkString("{", ", ", "}")}  " +
+      s"METRIC=${metricPresent.toSeq.sorted.mkString("{", ", ", "}")}")
+
+    val missingFwl    = Seq(FWL_BASELINE, FWL_STRESS_PLUS, FWL_STRESS_MINUS).map(canon).filterNot(fwlPresent)
+    val missingMetric = Seq(METRIC_CRD, METRIC_RA_STAT, METRIC_RA_FI, METRIC_RE).map(canon).filterNot(metricPresent)
+    if (missingFwl.nonEmpty || missingMetric.nonEmpty)
+      log.warn(s"RA input is missing expected shock-path labels — " +
+        s"FWL_TYPE missing=${missingFwl.mkString("[", ", ", "]")} " +
+        s"METRIC missing=${missingMetric.mkString("[", ", ", "]")}. " +
+        s"Non-Central FWL=YES scenarios for affected matrices will be EMPTY. " +
+        s"Check the source cells for non-breaking spaces / spelling vs the constants.")
+
+    // Per-matrix: an FWL=YES matrix needs both stress legs (checked on RA FI) for >=1 segment.
+    for (m <- matrices if m.fwlApplied) {
+      def hasLeg(fwl: String): Boolean =
+        m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(fwl), canon(METRIC_RA_FI))))
+      val plus  = hasLeg(FWL_STRESS_PLUS)
+      val minus = hasLeg(FWL_STRESS_MINUS)
+      if (!plus || !minus)
+        log.warn(s"FWL=YES matrix ${m.outSegment}/${m.rateType} (segments=${m.segments.mkString(",")}) " +
+          s"is missing a stress leg (STRESS(+) present=$plus, STRESS(-) present=$minus); " +
+          s"its non-Central scenarios will be EMPTY.")
+    }
   }
 
   /** Element-wise sum of the monthly series across constituent segments (same rate type). */
@@ -275,7 +319,8 @@ class PrimaryMapper(
                                  ra: Map[(String, String, String, String), Array[Double]],
                                  segments: Seq[String], rateType: String, fwl: String, metric: String
                                ): Array[Double] = {
-    val present = segments.flatMap(s => ra.get((s, rateType, fwl, metric)))
+    // canon() the lookup tuple to match collectRa's canonicalized keys (whitespace/NBSP/case).
+    val present = segments.flatMap(s => ra.get((canon(s), canon(rateType), canon(fwl), canon(metric))))
     if (present.isEmpty) Array.empty
     else {
       val len = present.map(_.length).max
@@ -324,6 +369,22 @@ class PrimaryMapper(
   // ---- helpers --------------------------------------------------------------
 
   private def str(r: Row, i: Int): String = Option(r.get(i)).map(_.toString.trim).getOrElse("")
+
+  /**
+   * Canonicalize a key field used to match RA rows: null-safe; replace the non-breaking
+   * (U+00A0) and narrow no-break (U+202F) spaces that POI emits on French-locale hosts with
+   * a regular space; collapse internal whitespace runs to a single space; trim; uppercase
+   * (Locale.ROOT). Java's `\s` does NOT match U+00A0/U+202F, so a plain `.trim` left them in
+   * place -> the (SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) lookup missed (e.g. "STRESS (+)" with
+   * an embedded NBSP != the "STRESS (+)" constant), the stress legs came back empty, and every
+   * non-Central FWL=YES scenario produced an EMPTY ra_detail (no rows). Applied to BOTH the map
+   * keys (collectRa) and the lookup tuple (aggregateSegments) so they normalize identically.
+   */
+  private def canon(s: String): String =
+    Option(s).getOrElse("")
+      .replaceAll("[\\s\\u00A0\\u202F]+", " ")
+      .trim
+      .toUpperCase(java.util.Locale.ROOT)
 
   private def toDouble(v: Any): Double = v match {
     case null              => 0.0
