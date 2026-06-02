@@ -58,13 +58,18 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   (`YES` → scenario shock; `NO` → all scenarios = Central). Config-driven, no hardcoding.
 - **Code:** `parseParametrage` → `group.exists(_._6.equalsIgnoreCase(YES))`; consumed in
   `matrixRows` (`centralRa` vs `scenarioRa`).
-- **PARAMETRAGE corrections** made to match the target (`PARAMETRAGE_corrected.xlsx`),
-  columns: `PERIMETER ; SEGMENT ; RATE_TYPE ; AGGREGATION ; AGGREGATED_SEGMENT_NAME ;
-  FWL_TO_BE_APPLIED ; MACRO_VARIABLE ; PROJECTION_HORIZON`:
-  - **CONSO row** — `FWL_TO_BE_APPLIED` changed `YES → NO`
-    (`BCEF ; CONSO ; TF ; NO ; <blank> ; NO ; IR_10Y_FR ; 3Y`).
-  - **MORTGAGE row ADDED** (was absent) —
-    `BCEF ; MORTGAGE ; TF ; NO ; <blank> ; YES ; IR_10Y_FR ; 3Y`.
+- **PARAMETRAGE** (`PARAMETRAGE_corrected.xlsx`), columns: `PERIMETER ; SEGMENT ;
+  RATE_TYPE ; AGGREGATION ; AGGREGATED_SEGMENT_NAME ; FWL_TO_BE_APPLIED ; MACRO_VARIABLE ;
+  PROJECTION_HORIZON`. Current BCEF rows:
+  - **CONSO** — `BCEF ; CONSO ; TF ; NO ; <blank> ; YES ; IR_10Y_FR ; 3Y`.
+  - **MORTGAGE** (row added; was absent) — `BCEF ; MORTGAGE ; TF ; NO ; <blank> ; YES ;
+    IR_10Y_FR ; 3Y`.
+  - **INVEST_PRO / INVEST_CORP** — both `AGGREGATION=YES → INVEST`, `FWL=YES`.
+- **CONSO FWL — UPDATED 2026-06-02 (business confirmed `YES`):** CONSO is **forward-looking**,
+  so `FWL_TO_BE_APPLIED = YES` (was temporarily set to `NO` to mirror the *sample* target, which
+  shows CONSO identical across scenarios). The sample target is the stale vintage
+  ([[ead-fwd-input-vintage-mismatch]]); with `YES` the engine applies the scenario shock and
+  CONSO A/O/E **intentionally diverge from that sample**. Resolves the prior Q5/Q17 inconsistency.
 - Confirmed: [x]
 
 ## Q6 — Core RA formula ✔️ ANSWERED
@@ -183,16 +188,16 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 
 ## New questions (add yours here)
 
-## Q17 — Spec contradiction: "no difference between scenarios" under FWL=YES ⚠️
+## Q17 — Spec contradiction: "no difference between scenarios" under FWL=YES ✔️ ANSWERED
 - **Spec says:** both FWL=YES cases (3rd & 4th) end with *"There is no differences between
   scenarios — the same value will be considered for all scenarios."*
 - **Problem:** that is the FWL=**NO** behaviour and contradicts the FWL=YES purpose (scenario
   shock) and the target, where FWL=YES matrices (`MORTGAGE`, `INVEST`) **do** vary by scenario.
   Reads like a copy-paste from the FWL=NO cases.
-- **Ask:** confirm that for FWL=YES scenarios should differ (scenario-shocked), and that sentence
-  applies only to the FWL=NO cases.
-- **Engine assumption:** FWL=YES → scenario-shocked (scenarios differ). See [[ead-fwd-formula]].
-- Confirmed: [ ]
+- **DECISION (business, 2026-06-02):** for `FWL=YES`, scenarios **DO differ** (scenario-shocked);
+  that sentence applies only to the FWL=NO cases. Same call that confirmed CONSO=`YES` (see Q5).
+- **Engine:** FWL=YES → scenario-shocked (scenarios differ). See [[ead-fwd-formula]].
+- Confirmed: [x]
 
 ## Q18 — Role of `PROJECTION_HORIZON` (= "3Y" in PARAMETRAGE) ⚠️
 - **Finding:** the column exists in PARAMETRAGE but is **not consumed** by the engine. The
