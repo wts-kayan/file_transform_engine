@@ -288,9 +288,13 @@ class PrimaryMapper(
     case d: Double         => d
     case n: java.lang.Number => n.doubleValue()
     case s: String         =>
-      // spark-excel returns locale-formatted strings (e.g. "-8,128" with a thousands
-      // separator); inputs use '.' as the decimal mark, so commas are group separators.
-      val t = s.trim.replace(",", "").replace(" ", "")
+      // spark-excel returns locale-formatted strings. Under a French locale the cells
+      // look like "-92 924,788279": the comma is the DECIMAL mark and spaces group the
+      // thousands. Strip every kind of grouping space (plain, non-breaking U+00A0 and
+      // narrow no-break U+202F), then normalise the decimal comma to a dot before parsing.
+      val t = s.trim
+        .replaceAll("\\h", "") // drop horizontal whitespace separators incl. U+00A0 / U+202F
+        .replace(",", ".")
       if (t.isEmpty) 0.0 else try t.toDouble catch { case _: NumberFormatException => 0.0 }
     case other             => try other.toString.toDouble catch { case _: Throwable => 0.0 }
   }
