@@ -215,6 +215,12 @@ object PrimaryUtilities {
       .option("setErrorCellsToFallbackValues", "true")
       .option("treatEmptyValuesAsNulls", "true")
       .option("inferSchema", "false")
+      // With inferSchema=false, POI's DataFormatter renders cells using the JVM default
+      // locale, so large numbers pick up locale-specific grouping (e.g. a French work PC
+      // emits a non-breaking space "-8 128" and a comma decimal). usePlainNumberFormat
+      // forces a canonical, locale-independent rendering: '.' decimal, NO grouping, no
+      // scientific notation — so the same Excel parses identically on en-US and fr-FR hosts.
+      .option("usePlainNumberFormat", "true")
       .option("addColorColumns", "false")
       .load()
 

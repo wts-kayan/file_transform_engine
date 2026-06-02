@@ -78,6 +78,15 @@ class PrimaryMapper(
     val matrices = parseParametrage(parametrage, perimeters)
 
     if (debug) {
+      // Exact parsed RA keys with series length. Each key is quoted with [|] delimiters so a
+      // stray space or odd character in SEGMENT / RATE_TYPE / FWL_TYPE / METRIC is visible
+      // (e.g. "STRESS (+)" vs "STRESS (+) " vs "STRESS(+)"). An empty/missing key here is the
+      // direct cause of an EMPTY ra_detail downstream.
+      val keyLines = ra.toSeq
+        .map { case ((seg, rt, fwl, metric), arr) => s"[$seg|$rt|$fwl|$metric] len=${arr.length}" }
+        .sorted
+      log.info(s"PARSED - RA keys (${ra.size}):\n  " + keyLines.mkString("\n  "))
+
       logShow("INPUT - PARAMETRAGE", parametrage)
       logShow("INPUT - MACRO_VARIABLE (scenario, shock window)",
         scenario.where(s"$COL_SCEN_DATE IN (${shockWindow.map(q => s"'$q'").mkString(",")})"))
@@ -131,17 +140,46 @@ class PrimaryMapper(
       return Seq.empty
     }
 
+    val usesShock = m.fwlApplied && scenName != SCENARIO_CENTRAL
+
+    // Stress legs (only consumed for FWL=YES non-central scenarios). Named here so a debug
+    // run can report each leg's length — an empty leg makes scenarioRa's period-1 aggregate
+    // return None, which yields an EMPTY ra_detail (-> empty trace / no output rows).
+    val raFiPlus  = series(FWL_STRESS_PLUS, METRIC_RA_FI)
+    val rePlus    = series(FWL_STRESS_PLUS, METRIC_RE)
+    val raFiMinus = series(FWL_STRESS_MINUS, METRIC_RA_FI)
+    val reMinus   = series(FWL_STRESS_MINUS, METRIC_RE)
+
+    if (debug) {
+      def stat(name: String, a: Array[Double]): String =
+        s"$name=${a.length}" + (if (a.nonEmpty) s"(head=${a.head})" else "<EMPTY>")
+      log.info(s"SERIES ${m.matrixId(freq)} / $scenCode  fwl=${m.fwlApplied} usesShock=$usesShock  " +
+        Seq(stat("CRD", crd), stat("RA_STAT", raStat), stat("RA_FI_base", raFiB), stat("RE_base", reB),
+          stat("RA_FI+", raFiPlus), stat("RE+", rePlus), stat("RA_FI-", raFiMinus), stat("RE-", reMinus)
+        ).mkString("  "))
+    }
+
     val ra_detail: Vector[Double] =
-      if (!m.fwlApplied || scenName == SCENARIO_CENTRAL) {
+      if (!usesShock) {
         centralRa(crd, raStat, raFiB, reB, freq)
       } else {
         // term-varying shock: the macro delta path (vs Central) over the window selects the
         // stress leg and weight per term; both legs are supplied to scenarioRa.
         scenarioRa(crd, raStat, raFiB, reB,
-          series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE),
-          series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE),
+          raFiPlus, rePlus, raFiMinus, reMinus,
           freq, deltaPath(macroData, scenName, m.macroVar, freq), refShock)
       }
+
+    if (ra_detail.isEmpty) {
+      // period-1 aggregation failed: some input series is empty or too short to fill the
+      // first window. The SERIES log above (debug=true) shows which one. Most often a missing
+      // stress leg for an FWL=YES matrix, or a key mismatch (segment/rate-type/FWL spelling).
+      log.warn(s"EMPTY ra_detail for ${m.matrixId(freq)} / $scenCode " +
+        s"(usesShock=$usesShock); no rows emitted. Lengths: " +
+        s"crd=${crd.length} raStat=${raStat.length} raFiB=${raFiB.length} reB=${reB.length} " +
+        s"raFi+=${raFiPlus.length} re+=${rePlus.length} raFi-=${raFiMinus.length} re-=${reMinus.length}")
+      return Seq.empty
+    }
 
     val vf = vectorFactored(ra_detail)
 
@@ -222,7 +260,11 @@ class PrimaryMapper(
     val months = monthColumns(df)
     val cols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ months
     df.select(cols.head, cols.tail: _*).collect().map { r =>
-      val key = (r.getString(0), r.getString(1), r.getString(2), r.getString(3))
+      // Trim key fields (null-safe): Excel cells frequently carry trailing spaces, which would
+      // make the lookup key (e.g. "STRESS (+) ") miss the constant ("STRESS (+)") and yield an
+      // empty series -> empty ra_detail. Matching uses the cleaned text.
+      def key0(i: Int): String = Option(r.get(i)).map(_.toString.trim).getOrElse("")
+      val key = (key0(0), key0(1), key0(2), key0(3))
       val series = months.indices.map(i => toDouble(r.get(4 + i))).toArray
       key -> series
     }.toMap
@@ -290,7 +332,11 @@ class PrimaryMapper(
     case s: String         =>
       // spark-excel returns locale-formatted strings (e.g. "-8,128" with a thousands
       // separator); inputs use '.' as the decimal mark, so commas are group separators.
-      val t = s.trim.replace(",", "").replace(" ", "")
+      // Strip ALL grouping whitespace too — including the non-breaking space (U+00A0) and
+      // narrow no-break space (U+202F) that POI emits on French-locale hosts. Java's \s does
+      // NOT match those, so a plain .replace(" ", "") left them in and large values (e.g.
+      // "-8 128") threw NumberFormatException -> 0.0, firing the CRD==0 run-off guard.
+      val t = s.trim.replace(",", "").replaceAll("[\\s\\u00A0\\u202F]", "")
       if (t.isEmpty) 0.0 else try t.toDouble catch { case _: NumberFormatException => 0.0 }
     case other             => try other.toString.toDouble catch { case _: Throwable => 0.0 }
   }

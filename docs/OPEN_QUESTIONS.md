@@ -183,5 +183,63 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 
 ## New questions (add yours here)
 
-- Q__ —
-- Q__ —
+## Q17 — Spec contradiction: "no difference between scenarios" under FWL=YES ⚠️
+- **Spec says:** both FWL=YES cases (3rd & 4th) end with *"There is no differences between
+  scenarios — the same value will be considered for all scenarios."*
+- **Problem:** that is the FWL=**NO** behaviour and contradicts the FWL=YES purpose (scenario
+  shock) and the target, where FWL=YES matrices (`MORTGAGE`, `INVEST`) **do** vary by scenario.
+  Reads like a copy-paste from the FWL=NO cases.
+- **Ask:** confirm that for FWL=YES scenarios should differ (scenario-shocked), and that sentence
+  applies only to the FWL=NO cases.
+- **Engine assumption:** FWL=YES → scenario-shocked (scenarios differ). See [[ead-fwd-formula]].
+- Confirmed: [ ]
+
+## Q18 — Role of `PROJECTION_HORIZON` (= "3Y" in PARAMETRAGE) ⚠️
+- **Finding:** the column exists in PARAMETRAGE but is **not consumed** by the engine. The
+  flat-tail boundary was derived from input length (term 29.75 Q / 29 Y, see Q9), not from this
+  field; the grid runs to 50/100 regardless.
+- **Ask:** does `PROJECTION_HORIZON` drive anything (e.g. cap the computed curve at 3Y then hold
+  flat), or is it informational?
+- Confirmed: [ ]
+
+## Q19 — `EAD_MATRIX_ID` naming: spec vs target (canonical form for production) ⚠️
+- **Context:** Q1 chose the spec form `PERIMETER_SEGMENT_RATETYPE_(Q|Y)`; the target sample drops
+  `RATE_TYPE` (`BCEF_CONSO_Q`). Output IDs therefore deliberately differ from the sample.
+- **Ask:** for production, is the spec naming (with `RATE_TYPE`) the canonical ID, or should we
+  match the target file and omit it?
+- See Q1 (answered for the build; this confirms the production-canonical choice).
+- Confirmed: [ ]
+
+## Q20 — Multiple rate types: separate matrices or combined? ⚠️
+- **Context:** the sample only has `TF`. The engine treats each rate type as a separate matrix.
+- **Ask:** when `TV` (and others) exist, should each rate type be its own matrix, or combined per
+  segment?
+- Confirmed: [ ]
+
+## Q21 — FWL flag & shock scope for aggregated segments (INVEST = PRO + CORP) ⚠️
+- **Context:** constituents disagree (`PRO`=NO, `CORP`=YES); Q3 set FWL=YES if any is YES (matches
+  target). But the engine currently shocks the **combined** PRO+CORP series.
+- **Ask:** for an aggregated matrix, should only the FWL=YES constituent (`CORP`) be shocked, or the
+  whole aggregated series? This changes the shock magnitude.
+- **Link:** tied to Q3 open refinement and `ref_shock` calibration (Q12).
+- Confirmed: [ ]
+
+## Q22 — `computation_frequency`: Q, Y, or both? ⚠️
+- **Context:** Q4 decided to always emit both (matches target); spec text says the flag selects Q
+  *or* Y.
+- **Ask:** should output always contain both Q and Y, or is frequency selected per matrix by config?
+- See Q4 (answered for the build; this confirms the production rule).
+- Confirmed: [ ]
+
+## Q23 — The term 100 point ⚠️
+- **Context:** after 50 there is a single term 100 holding the flat value.
+- **Ask:** is term 100 a genuine reporting point (perpetuity proxy) or a sentinel? Confirm the grid
+  is `0.25…50` then `100` (Q) / `1…50` then `100` (Y).
+- See Q9 (flat-tail boundary).
+- Confirmed: [ ]
+
+## Q24 — Scenario `S` (Secto) scope ⚠️
+- **Context:** not implemented — no Secto data in the scenario file, no `S` rows in the target.
+- **Ask:** confirm Secto is out of scope for this delivery; one-line addition once data exists.
+- See Q14.
+- Confirmed: [ ]
