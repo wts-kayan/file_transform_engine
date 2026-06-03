@@ -30,6 +30,17 @@ object PrimaryView {
   /** Long tail term. */
   val TAIL_TERM = 100.0
 
+  /**
+   * Run-off cliff guard. `RA` is a per-period loss rate, so `RA >= 1` is non-physical: it only
+   * happens in the deep tail when the exposure amortizes to ~0 and `|CRD|` collapses faster than
+   * the numerator's (offset) aggregation window — `RA = -(STAT+FI+RE)/CRD` then explodes (e.g.
+   * CRD -1.9M -> -2.87 in one quarter while RA_STAT lags at 2547 -> RA ~ 895), driving the
+   * cumulative product negative. The documented `CRD == 0` guard misses it because CRD lands on a
+   * tiny non-zero value. When RA crosses this cap we treat the book as run off and FREEZE the curve
+   * (computeRa stops -> termSeries holds the last good value flat). See OPEN_QUESTIONS Q26.
+   */
+  val RUNOFF_RA_CAP = 1.0
+
   sealed trait Frequency { def suffix: String; def step: Double; def coreMax: Double }
   // Quarterly carries one extra step (..50.25) vs Yearly (..50), matching the target grid.
   case object Quarterly extends Frequency { val suffix = "Q"; val step = QUARTERLY_STEP; val coreMax = FLAT_MAX_Y + QUARTERLY_STEP }
@@ -109,12 +120,13 @@ object PrimaryView {
                  re: Array[Double],
                  freq: Frequency
                ): Vector[Double] = computeRa(freq) { period =>
-    for {
+    (for {
       c <- aggregate(crd, period, freq, isCrd = true)
       s <- aggregate(raStat, period, freq, isCrd = false)
       f <- aggregate(raFi, period, freq, isCrd = false)
       r <- aggregate(re, period, freq, isCrd = false)
     } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> exposure run off, no further loss
+    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
   }
 
   /**
@@ -142,7 +154,7 @@ object PrimaryView {
                   deltaAt: Int => Double,
                   refShock: Double
                 ): Vector[Double] = computeRa(freq) { period =>
-    for {
+    (for {
       c  <- aggregate(crd, period, freq, isCrd = true)
       s  <- aggregate(raStatBase, period, freq, isCrd = false)
       fb <- aggregate(raFiBase, period, freq, isCrd = false)
@@ -163,6 +175,7 @@ object PrimaryView {
         statDetail + fireBaseDetail + w * (fireStressDet - fireBaseDetail)
       }
     }
+    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
   }
 
   /** Build the RA prefix: keep periods while the window is valid and term <= horizon. */
@@ -181,10 +194,12 @@ object PrimaryView {
     buf.result()
   }
 
-  /** Cumulative product of (1 - RA). */
+  /** Cumulative product of (1 - RA), clamped to [0,1] (an exposure factor can't be <0 or >1). */
   def vectorFactored(ra: Vector[Double]): Vector[Double] = {
     var acc = 1.0
-    ra.map { x => acc *= (1.0 - x); acc }
+    // Emit the clamped value but keep `acc` as the true running product (the RUNOFF_RA_CAP guard
+    // already keeps each (1-RA) factor in (0,1]; this clamp is a cheap backstop for odd data).
+    ra.map { x => acc *= (1.0 - x); math.max(0.0, math.min(1.0, acc)) }
   }
 
   /**
