@@ -7,6 +7,13 @@ currently uses the answer **chosen to reproduce the target file**
 Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please confirm ·
 ⛔ blocked on data (cannot be reproduced from current inputs).
 
+> **STATUS 2026-06-04 — target file under review.** The user has flagged that
+> `target_output/TS_EAD_FWD_25Q4_v1_small.csv` may **not** be authoritative (it was built from
+> the old RA/scenario vintage). Items below whose only evidence was "matches the target" are
+> therefore *provisional* until a trusted reference exists; items confirmed by an explicit
+> **user/business DECISION** stand regardless. New inputs received this session:
+> `Inputs_RA_v2.xlsx` (RA, full precision) and `Scenario_EAD_FWD.xlsx` (per-scenario sheets).
+
 > How to use: add your own questions at the bottom under **New questions**. When you
 > answer one above, tick `Confirmed` and note any change needed.
 
@@ -128,7 +135,10 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   is still tiny (`ref_shock=1.0`, Q12) and the tail-vintage error dominates (Q15).
 - **Config:** `tseadfwd_app.shock_window_start` / `shock_window_end`.
 - **Code:** `PrimaryMapper.deltaPath` / `macroDeltaArray` / `shockWindow`; `PrimaryView.scenarioRa`.
-- Confirmed: [x]
+- **UPDATE 2026-06-04:** with `Scenario_EAD_FWD.xlsx` (coverage **2025Q1..2028Q4**), the window was
+  moved to `2025Q4..2028Q4`. The new scenario is **forward-looking** (no long history), so the
+  window/term-0 anchor must be re-confirmed — see **Q25**. Mechanism unchanged.
+- Confirmed: [x] (mechanism) · window anchor pending (Q25)
 
 ## Q12 — `ref_shock` calibration (FWL=YES shock magnitude) ⛔
 - **What it is:** the rate-shock magnitude the `STRESS (+)/(-)` legs represent;
@@ -144,7 +154,10 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   RA + scenario vintage arrive, then re-run this calibration (the `k` curve should flatten).
   Alternative on request: set `≈ 0.07` for a visible-but-approximate shock.
 - See [`MISSING_INPUTS.md`](../MISSING_INPUTS.md).
-- Confirmed value: ____________ (pending corrected inputs)
+- **UPDATE 2026-06-04:** corrected inputs (`Inputs_RA_v2.xlsx` + `Scenario_EAD_FWD.xlsx`) have now
+  arrived, so the calibration *can* be re-run — **but** it needs a trusted reference output, which
+  the current target may not be (see status note). Blocked on a trusted target, not on inputs.
+- Confirmed value: ____________ (pending a trusted reference output)
 
 ## Q13 — Macro-delta scaling (×100?) ✔️ ANSWERED
 - **Spec STEP 3:** `Rate = (MACRO_scen − MACRO_central) × 100`.
@@ -175,7 +188,13 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   the source file.
 - **Needed:** the scenario file version where Adverse ≠ Extreme. Engine handles them
   independently already — it just needs different numbers.
-- Confirmed: [ ]   (pending corrected scenario file)
+- **RESOLVED 2026-06-04 — corrected file received.** `Scenario_EAD_FWD.xlsx` makes Adverse ≠
+  Extreme. On `IR_10Y_FR` the deltas vs Central now ramp to **A ≈ −0.0048** and **E ≈ −0.0068**
+  by 2028Q4 (Optimistic ≈ +0.0030), so the engine emits **distinct A/O/E** (verified: INVEST &
+  MORTGAGE diverge across all four scenarios). Note the new file makes Extreme's `|delta|`
+  **larger** than Adverse's (Extreme further from Central ⇒ more loss) — the opposite of the old
+  *sample-target* hint above, which is moot now the target is under review.
+- Confirmed: [x] (engine produces distinct A vs E from the new file; magnitude still tied to Q12)
 
 ## Q16 — Output number format ✔️ ANSWERED
 - **DECISION (user): confirmed.** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at
@@ -213,7 +232,13 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Ask:** for production, is the spec naming (with `RATE_TYPE`) the canonical ID, or should we
   match the target file and omit it?
 - See Q1 (answered for the build; this confirms the production-canonical choice).
-- Confirmed: [ ]
+- **EVIDENCE 2026-06-04 (BNP run):** the real BNP production output emits `BCEF_CONSO_TF_Q`,
+  `BCEF_INVEST_TF_Q`, `BCEF_MORTGAGE_TF_Q` — i.e. **with `RATE_TYPE`**, matching the spec form, not
+  the no-`RATE_TYPE` sample target. This independently supports keeping `RATE_TYPE` in the id.
+- **Side effect:** the local `EadFwdValidationApp` keys on the target's no-`RATE_TYPE` ids, so its
+  per-matrix error is a **no-op** (no key overlap → prints `0.00e+00` without comparing). The
+  harness needs an id-mapping fix before its numbers mean anything (see **Q28**).
+- Confirmed: [x] (production uses `RATE_TYPE`, per real BNP output)
 
 ## Q20 — Multiple rate types: separate matrices or combined? ⚠️
 - **Context:** the sample only has `TF`. The engine treats each rate type as a separate matrix.
@@ -247,4 +272,76 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Context:** not implemented — no Secto data in the scenario file, no `S` rows in the target.
 - **Ask:** confirm Secto is out of scope for this delivery; one-line addition once data exists.
 - See Q14.
+- Confirmed: [ ]
+
+## Q25 — Scenario input is now a per-scenario Excel workbook + forward-looking window ⚠️ NEW
+- **Change 2026-06-04:** the scenario moved from a single CSV (one table with a `scenario` column,
+  history 1993Q1..2025Q4) to **`Scenario_EAD_FWD.xlsx` — one sheet per scenario** (`Central`,
+  `Adverse`, `Optimistic`, `Extreme`, plus a `_NOTES` sheet) covering only **2025Q1..2028Q4**.
+  Columns per sheet: lowercase `date`, `IR_10Y_BE/FR/IT`, `CPI_CORE_YOY_US`, `CPI_YOY_US`, and
+  (Adverse/Optimistic only) `CRE_PRICE_YOY*`. `readScenarioFromExcelSheets` reads each sheet,
+  renames `date`→`Date`, tags `scenario = sheet name`, and unions by name.
+- **Ask 1 (format):** is one-sheet-per-scenario the canonical production layout (vs the old single
+  table)? Sheet names map directly to `Scenario_ID` (Central→C, …). Confirm the sheet-name set.
+- **Ask 2 (window/term-0):** for a forward-looking scenario starting 2025Q1, what is **term 0** —
+  the first scenario quarter (2025Q1), the reporting date (2025Q4), or something else? This sets the
+  `shock_window_start` and how the macro delta path lines up with projection terms (see Q11).
+- **Ask 3 (extra macro vars):** the file carries CPI/CRE columns beyond `IR_10Y_FR`; only the
+  PARAMETRAGE `MACRO_VARIABLE` per matrix is used. Confirm that's intended (extras ignored).
+- **Code:** `PrimaryUtilities.readScenarioFromExcelSheets`; `PrimaryReader.macro_variable`; config
+  `MACRO_VARIABLE.sheetNames`.
+- Confirmed: [ ]
+
+## Q26 — Run-off when `CRD` plateaus at a NON-zero residual + constant `RA_FI`/`RE` ⛔ NEW — IMPORTANT
+- **Finding:** with `Inputs_RA_v2.xlsx`, MORTGAGE (and INVEST) carry **constant** `RA_FI`/`RE`
+  (e.g. MORTGAGE `RA_FI = 18.414`, `RE = 11.048` for all 361 months) instead of the old file's
+  **decaying** values (`18,13,11,…`). CONSO is unaffected (its `RA_FI`/`RE` are 0).
+- **Effect:** as the book amortizes, `CRD` runs down to a **constant residual** (MORTGAGE ≈
+  −1615.93), *not* to 0. The spec run-off rule (Q8) only fires at `CRD == 0`, so it never triggers.
+  With a near-constant numerator (`RA_STAT` small + constant `RA_FI+RE` ≈ 88) divided by a shrinking
+  `CRD`, `RA = −(STAT+FI+RE)/CRD` **balloons** (≈0.01 → 0.06) and the cumulative product keeps
+  decaying (MORTGAGE → ~0.04 by term 30) instead of plateauing.
+- **Two possible root causes — business must decide:**
+  1. **Data:** the constant `RA_FI`/`RE` in v2 is an artifact (forward-filled) and should *decay*
+     with the exposure like the old file. With decaying FI/RE the numerator shrinks with `CRD` and
+     `RA` stays ~0.01 (bounded) — no new rule needed.
+  2. **Rule:** the constant residual is intentional, and the engine needs a **new run-off rule** —
+     freeze `EAD_RA_RATE` (or force `RA = 0`) once the exposure stops amortizing (`CRD` reaches a
+     constant residual / `ΔCRD ≈ 0`), not only when `CRD == 0`.
+- **Note:** this is the same singularity that produced the earlier BNP `−387` blow-up on the *old*
+  file (there `CRD` got tiny and `RA` exploded). v2 keeps it bounded but still over-decaying.
+- **Ask:** in real production data, are MORTGAGE/INVEST `RA_FI` and `RE` **constant** across all
+  months, or do they **decay** with the balance? And should run-off freeze at a non-zero `CRD`
+  residual? See also Q18 (`PROJECTION_HORIZON`) — could a horizon cap be the intended plateau?
+- **Code:** `PrimaryView.centralRa` / `scenarioRa` run-off guard (`if (c == 0.0) 0.0`).
+- Confirmed: [ ]
+
+## Q27 — Input label / locale robustness (label vocabulary across environments) ⚠️ NEW
+- **Finding:** real inputs vary the key-column text by environment/locale, which silently broke the
+  `(SEGMENT, RATE_TYPE, FWL_TYPE, METRIC)` lookup until hardened:
+  - French-locale POI emits a **non-breaking space** (U+00A0) inside `STRESS (+)` / `STRESS (-)`.
+  - `METRIC` appears as `RA_STAT`/`RA_FI` (underscore) in some files vs `RA STAT`/`RA FI` (space).
+  - A BNP `PrimaryConstants` had the stress labels mis-typed as `BASELINE (+)/(−)` instead of
+    `STRESS (+)/(−)` — which canonicalized to `BASELINE+/BASELINE-` and made every non-Central
+    scenario empty until corrected.
+- **Mitigation in engine:** `PrimaryMapper.canon()` now uppercases and strips all non-`[A-Z0-9+-]`
+  (spaces, NBSP/NNBSP, underscores, parentheses) on both the map keys and the lookup tuple, plus
+  `logRaKeyDiagnostics` logs the present FWL_TYPE/METRIC vocabulary and warns on a missing stress leg.
+- **Ask:** confirm the canonical label vocabulary (`BASELINE`, `STRESS (+)`, `STRESS (-)`; `CRD`,
+  `RA STAT`, `RA FI`, `RE`) and that aggressive normalization is acceptable (it cannot, by design,
+  catch a *semantically wrong* label like the `BASELINE (+)` typo — only spacing/case/underscore).
+- **Code:** `PrimaryMapper.canon`, `collectRa`, `aggregateSegments`, `logRaKeyDiagnostics`.
+- Confirmed: [ ]
+
+## Q28 — Canonical names across environments + fix the validation harness ⚠️ NEW
+- **Finding (BNP vs sample):** the same logical inputs differ by name across environments:
+  - `RATE_TYPE`: `TF` (sample/local) vs `ITF` (BNP).
+  - `MACRO_VARIABLE`: `IR_10Y_FR` (local PARAMETRAGE) vs `IR_10Y_FRI` (BNP PARAMETRAGE).
+  - `SEGMENT`: `INVEST_PRO` (local/v2) vs `INVEST_PROD` (BNP).
+  - package/namespace differs (`com.bnp.str…` vs `com.bnpparibas.itg.fresh.str…`).
+- **Ask 1:** are these per-environment naming conventions expected (so the id legitimately becomes
+  `BCEF_*_ITF_*` on BNP), or should there be a canonical mapping (e.g. `ITF→TF`)?
+- **Ask 2 (harness):** `EadFwdValidationApp` compares against the sample target's no-`RATE_TYPE` ids
+  and so currently compares nothing (Q19). Fix it to map ids (strip/insert `RATE_TYPE`) so the error
+  table is meaningful — once a trusted reference output exists.
 - Confirmed: [ ]
