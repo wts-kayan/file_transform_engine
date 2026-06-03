@@ -240,6 +240,54 @@ object PrimaryUtilities {
       .csv(config.getString("path"))
   }
 
+  /**
+   * Read a scenario workbook that holds ONE SHEET PER SCENARIO (e.g. Central / Adverse /
+   * Optimistic / Extreme) and reshape it into the single CSV-style frame the mapper expects:
+   * a `scenario` column (= sheet name) + a `Date` column + one column per macro variable.
+   *
+   * `sheetNames` in the config is a LIST here (unlike the single-sheet readDataFrameFromExcel).
+   * Each sheet is read with the same locale-safe options (usePlainNumberFormat etc.); the date
+   * header — which the source writes lowercase ("date") — is normalized to the expected "Date",
+   * a `scenario` literal is stamped on every row, and the sheets are unioned BY NAME with
+   * allowMissingColumns=true (sheets may carry different macro columns, so absent ones become
+   * null). The result matches the old single-table scenario CSV, so collectScenario is unchanged.
+   */
+  def readScenarioFromExcelSheets(tableName: String)
+                                 (implicit sparkSession: SparkSession,
+                                  config: Config): DataFrame = {
+    import scala.collection.JavaConverters._
+
+    val cfg    = config.getConfig(s"${PrimaryConstants.APP_CONF}.$tableName")
+    val path   = cfg.getString("path")
+    val sheets = cfg.getStringList("sheetNames").asScala.toVector
+
+    val perSheet = sheets.map { sheet =>
+      log.info(s"Reading $tableName scenario sheet '$sheet' from path: $path")
+      val raw = sparkSession.read
+        .format("com.crealytics.spark.excel")
+        .option("path", path)
+        .option("location", path)
+        .option("dataAddress", s"'$sheet'!A1")
+        .option("header", "true")
+        .option("setErrorCellsToFallbackValues", "true")
+        .option("treatEmptyValuesAsNulls", "true")
+        .option("inferSchema", "false")
+        .option("usePlainNumberFormat", "true")
+        .option("addColorColumns", "false")
+        .load()
+
+      // Normalize the date header to "Date" (source uses lowercase "date") and tag the rows
+      // with their scenario (= sheet name), so the union mirrors the old CSV shape.
+      val dated = raw.columns
+        .find(c => c.equalsIgnoreCase(PrimaryConstants.COL_SCEN_DATE) && c != PrimaryConstants.COL_SCEN_DATE)
+        .foldLeft(raw)((df, c) => df.withColumnRenamed(c, PrimaryConstants.COL_SCEN_DATE))
+
+      dated.withColumn(PrimaryConstants.COL_SCEN_NAME, lit(sheet))
+    }
+
+    perSheet.reduce((a, b) => a.unionByName(b, allowMissingColumns = true))
+  }
+
   def writeDataframe(
                       dataframe: DataFrame,
                       tableName: String

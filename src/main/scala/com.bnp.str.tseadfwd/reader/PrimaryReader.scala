@@ -31,7 +31,7 @@ class PrimaryReader()(implicit sparkSession: SparkSession, conf: Config)
  */
 
   private lazy val macro_variable: DataFrame =
-    readDataFrameFromCsv(PrimaryConstants.MACRO_VARIABLE)(sparkSession, conf)
+    readScenarioFromExcelSheets(PrimaryConstants.MACRO_VARIABLE)(sparkSession, conf)
 
   private lazy val parametrage: DataFrame =
     readDataFrameFromExcel(PrimaryConstants.PARAMETRAGE)(sparkSession, conf)
