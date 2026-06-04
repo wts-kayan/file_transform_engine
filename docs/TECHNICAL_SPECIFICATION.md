@@ -24,7 +24,7 @@ debuggable without distributed-execution noise.
 MainDriver
   ├─ SparkSessionManager.fetchSparkSession
   ├─ read application.conf (HDFS reader)
-  ├─ PrimaryReader            → reads RA_BCEF (Excel), MACRO_VARIABLE (CSV), PARAMETRAGE (Excel)
+  ├─ PrimaryReader            → reads RA_BCEF (Excel), MACRO_VARIABLE (Excel, per-scenario sheets), PARAMETRAGE (Excel)
   ├─ PrimaryRunner            → wires reader → mapper
   │    └─ PrimaryMapper.getDataFrame
   │         ├─ parse PARAMETRAGE  → matrix definitions (aggregation, FWL flag, macro var)
@@ -89,6 +89,11 @@ Aggregation windows (1-based months):
 `computeRa` stops a series when the window exceeds available months or term > 30; the
 flat tail in `termSeries` covers the remaining grid points.
 
+> The **complete arithmetic** — segment aggregation, period windows, the Central and
+> FWL=YES `RA` formulas, the macro delta path, both run-off guards (`CRD==0` and the
+> `RA≥1` cliff freeze), the survival product, the term grid, and number formatting — is
+> consolidated in [§4 Arithmetic rules](#4-arithmetic-rules--complete-reference).
+
 ### 3.3 `PrimaryMapper` — orchestration
 
 - `parseParametrage` — groups rows by `(perimeter, output-segment, rate-type)`; output
@@ -122,23 +127,116 @@ one clean file. The decimal comma is safe because the field delimiter is `;`
 
 ---
 
-## 4. Configuration (`localRun/tseadfwd/application.conf`)
+## 4. Arithmetic rules — complete reference
+
+This is the full set of computations the engine performs, in order. Notation: monthly
+inputs `M1…M361` (1-based); period `p` (1-based); `term = (p-1)·step` with `step = 0.25`
+(Quarterly) or `1.0` (Yearly). All inputs are read from the **BASELINE** leg unless a
+**STRESS (+)/(-)** leg is named.
+
+### 4.1 Segment aggregation (before period aggregation)
+For an aggregated matrix (e.g. `INVEST = INVEST_PRO + INVEST_CORP`), each metric's monthly
+series is the **element-wise sum** of the constituent segments' monthly series of the same
+`RATE_TYPE`, computed per month **before** any period aggregation:
+```
+series_metric[m] = Σ_segment  RA[(segment, rateType, fwl, metric)][m]      (m = 1..361)
+```
+
+### 4.2 Period aggregation (monthly → period)  `aggregate(...)`
+**Quarterly** (`step = 0.25`):
+- RA metrics (`RA STAT`, `RA FI`, `RE`) — half-weight overlapping window:
+  - `Q1 = M1 + M2/2`
+  - `Qn (n≥2) = M[3n-4]/2 + M[3n-3] + M[3n-2] + M[3n-1]/2`
+- `CRD` — block average of 3 months: `Qi = (M[3i-2] + M[3i-1] + M[3i]) / 3`
+
+**Yearly** (`step = 1.0`):
+- window: `Y1` = months `M1…M6` (6 months); `Yn (n≥2)` = 12 months starting `M[6+12(n-2)+1]`
+- RA metrics = **sum** over the window; `CRD` = **mean** over the same window (÷6 for Y1, ÷12 for Yn)
+
+**Window validity:** a period value exists only if every month index in its window is within
+`1..361`; otherwise the period is `None` (the series stops — see §4.6).
+
+### 4.3 Per-period loss rate `RA`
+**Central scenario, and every scenario when FWL=NO** (`centralRa`):
+```
+RA_p = -(RA_STAT_p + RA_FI_p + RE_p) / CRD_p
+```
+**Non-Central scenario when FWL=YES** (`scenarioRa`) — only FI+RE are shocked, RA_STAT stays baseline:
+```
+delta_p    = deltaAt(p)                         (signed macro delta, §4.4)
+leg        = STRESS(-) if delta_p < 0 else STRESS(+)
+statDetail = -RA_STAT_base_p / CRD_p
+fireBase   = -(RA_FI_base_p + RE_base_p) / CRD_p
+fireStress = -(RA_FI_leg_p  + RE_leg_p ) / CRD_p
+w          = |delta_p| / ref_shock              (0 if ref_shock = 0)
+RA_p       = statDetail + fireBase + w·(fireStress - fireBase)
+```
+
+### 4.4 Macro delta path (FWL=YES)  `macroDeltaArray` / `deltaPath`
+```
+shockWindow      = ordered quarters [shock_window_start .. shock_window_end]
+macroDeltaArray  = [ MACRO[scenario][q] - MACRO[Central][q]  for q in shockWindow ]   (missing → 0)
+deltaPath(p)     = macroDeltaArray[ min((p-1)·s, len-1) ]      s = 1 (Q) or 4 (Y); empty → 0
+```
+Term 0 = window start; the last delta is **held flat** for periods past the window end.
+
+### 4.5 Run-off guards  (when the exposure has amortized)
+1. **Exact zero (spec):** `if CRD_p == 0 → RA_p = 0` (`VECTOR = 1`), avoiding `0/0`.
+2. **Run-off cliff (added 2026-06-04, `RUNOFF_RA_CAP = 1.0`):** a per-period loss rate
+   `RA_p ≥ 1` is non-physical — it only occurs when `|CRD|` collapses to ~0 in one quarter
+   while the offset RA-metric window (§4.2) still includes pre-cliff months, so
+   `RA = -(…)/CRD` explodes. When `RA_p ≥ 1` the series **stops** at `p-1` and the curve is
+   **frozen** (held flat) for all later terms. (See OPEN_QUESTIONS Q26/Q30 — the *plateau level*
+   still depends on whether `RA_FI`/`RE` are constant or decaying.)
+
+### 4.6 Series prefix  `computeRa`
+Iterate `p = 1, 2, …`; **stop** when `term > 30` (`COMPUTED_HORIZON_Y`) **or** the period is
+`None` (window exceeds 361 months §4.2, or run-off cliff §4.5). Keep the valid prefix.
+
+### 4.7 Survival factor  `vectorFactored`
+```
+VECTOR_p      = 1 - RA_p
+EAD_RA_RATE_p = Π_{k=1..p} VECTOR_k         (cumulative product; acc starts at 1)
+emitted value = min(1, max(0, EAD_RA_RATE_p))   (clamp backstop: an exposure factor ∈ [0,1])
+```
+
+### 4.8 Output term grid & flat tail  `termGrid` / `termSeries`
+- **Quarterly grid:** `0, 0.25, …, 50.25`, then `100` → 203 points.
+- **Yearly grid:** `0, 1, …, 50`, then `100` → 52 points.
+- For each grid term `t`: `idx = min(round(t/step)+1, len) - 1` → reads the computed vector,
+  **holding the last computed value flat** for every term beyond the last computed period
+  (and for the `100` tail term).
+
+### 4.9 Number formatting  `fmtNumber`
+- `EAD_RA_RATE`: `BigDecimal` half-up to **9 dp**, trailing zeros stripped, decimal point → **comma**;
+  non-finite (`NaN`/`Inf`) → `"0"`.
+- `TERM`: same formatter at **2 dp** (e.g. `0`, `0,25`, `100`).
+
+---
+
+## 5. Configuration (`localRun/tseadfwd/application.conf`)
 
 Under `tseadfwd_app`:
 
-| Key | Meaning | Default |
-|-----|---------|---------|
-| `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | — |
-| `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel (points to `PARAMETRAGE_corrected.xlsx`) | — |
-| `MACRO_VARIABLE.path` / `.header` / `.delimiter` | scenario CSV | — |
-| `shock_window_start` / `shock_window_end` | macro path window the FWL shock is read over (term 0 = start, step 1Q) | `"2021Q1"` / `"2025Q4"` |
+| Key | Meaning | Current value |
+|-----|---------|---------------|
+| `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | `Inputs_RA_v2.xlsx` / `RA_BCEF` |
+| `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel | `PARAMETRAGE_corrected.xlsx` / `PARAMETRAGE` |
+| `MACRO_VARIABLE.path` / `.sheetNames` | scenario **Excel workbook, one sheet per scenario** (read + unioned by `readScenarioFromExcelSheets`; sheet name → `Scenario_ID`) | `Scenario_EAD_FWD.xlsx` / `["Central","Adverse","Optimistic","Extreme"]` |
+| `shock_window_start` / `shock_window_end` | macro path window the FWL shock is read over (term 0 = start, step 1Q) | `"2025Q4"` / `"2028Q4"` |
 | `ref_shock` | stress-leg magnitude for FWL=YES scaling (calibration) | `1.0` |
 | `debug` | enable titled `show()` of inputs + per-term trace | `false` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
 
+> **Note (scenario input).** Earlier vintages used a single scenario **CSV** (`header`/`delimiter`,
+> one table with a `scenario` column). It is now a per-scenario **Excel workbook**: each sheet is one
+> scenario, `date`→`Date` is normalized, `scenario = sheet name` is stamped, and the sheets are
+> unioned by name. Only the `MACRO_VARIABLE` column referenced per matrix in PARAMETRAGE is used;
+> extra macro columns are ignored. See OPEN_QUESTIONS Q25.
+
 ---
 
-## 5. Debug / trace mode
+## 6. Debug / trace mode
 
 When `debug = true` (`PrimaryMapper`), `logShow(title, df)` logs a title line before
 each `show()`:
@@ -155,7 +253,7 @@ The TRACE is the row-by-row view of the 120-quarter / 31-year build described in
 
 ---
 
-## 6. Logging
+## 7. Logging
 
 `src/main/resources/log4j2.properties` quiets Spark/Hadoop to `WARN` and shows
 `com.bnp.str.tseadfwd` at `INFO` (Start/End/write/collapse/trace), which Spark's
@@ -165,7 +263,7 @@ overloads under Scala.
 
 ---
 
-## 7. Build & run
+## 8. Build & run
 
 ```bash
 # build
@@ -187,7 +285,7 @@ java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
 
 ---
 
-## 8. Validation & open items
+## 9. Validation & open items
 
 - Central / FWL=NO matches the target to ~`1e-5`.
 - Deep-tail deviation and FWL=YES magnitude are **data-dependent** open items — see
