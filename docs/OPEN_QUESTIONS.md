@@ -357,9 +357,12 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   BGL→`IR_10Y_BE`, BNL→`IR_10Y_IT`. Each referenced column must exist in the scenario workbook
   (`Scenario_EAD_FWD.xlsx` carries FR/BE/IT, so cross-currency is feasible).
 - **Ask 3 (BPLS / no rate type):** how should rows with a **numeric segment** and **no `RATE_TYPE`**
-  be named and handled? The current id template `PERIMETER_SEGMENT_RATETYPE_(Q|Y)` would yield a
-  double underscore (`BPLS_10276__Q`). FWL=NO, so no shock — but the id form must be decided.
-- Confirmed: [ ]
+  be named and handled? FWL=NO, so no shock — but the id form needed deciding.
+- **DECISION (user 2026-06-04):** drop a blank `RATE_TYPE` from the id (join only non-empty parts) →
+  **`BPLS_10276_Q`** (single underscore), not `BPLS_10276__Q`. Ids with a rate type are unchanged
+  (`BCEF_CONSO_TF_Q`). Scope (which perimeters) and the macro mapping (Asks 1–2) remain open.
+- **Code:** `MatrixDef.matrixId` (`Seq(perimeter, outSegment, rateType).filter(_.nonEmpty) :+ suffix`).
+- Confirmed: [ ] (Ask 3 decided; Asks 1–2 pending)
 
 ## Q30 — Run-off freeze rule on the deep-tail cliff (guard added 2026-06-04) ⚠️ NEW
 - **Context:** a one-quarter cliff (`|CRD|` collapses to ~0 while the *offset* RA-metric window still

@@ -22,7 +22,7 @@ import org.slf4j.LoggerFactory
  *   5. emit (EAD_MATRIX_ID, SCENARIO_ID, TERM, EAD_RA_RATE) rows, decimal-comma formatted
  */
 class PrimaryMapper(
-                     ra_bcef: DataFrame,
+                     raInput: DataFrame, // all RA perimeters, unioned (BCEF + any of BGL/BNL/FORTIS/LS present)
                      scenario: DataFrame,
                      parametrage: DataFrame,
                      outputTableName: String
@@ -66,14 +66,16 @@ class PrimaryMapper(
                                 macroVar: String
                               ) {
     def matrixId(freq: Frequency): String =
-      s"${perimeter}_${outSegment}_${rateType}_${freq.suffix}"
+      // Join only the non-empty parts so a blank RATE_TYPE (e.g. BPLS numeric segments) yields
+      // `BPLS_10276_Q`, not `BPLS_10276__Q`. With a rate type it stays `BCEF_CONSO_TF_Q`.
+      (Seq(perimeter, outSegment, rateType).filter(_.nonEmpty) :+ freq.suffix).mkString("_")
   }
 
   def getDataFrame: DataFrame = {
     log.info(s"Building $OUTPUT_EAD_FWD (shockWindow=$shockWindowStart..$shockWindowEnd, refShock=$refShock)")
 
-    val perimeters = ra_bcef.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
-    val ra = collectRa(ra_bcef)
+    val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
+    val ra = collectRa(raInput)
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
 
@@ -94,11 +96,11 @@ class PrimaryMapper(
         scenario.where(s"$COL_SCEN_DATE IN (${shockWindow.map(q => s"'$q'").mkString(",")})"))
       // M1..Mn are MONTHLY columns (METRIC is the separate key column). The full series is
       // used by collectRa; here we only preview the first/last 3 months to keep the table readable.
-      val allMonths = monthColumns(ra_bcef)
+      val allMonths = monthColumns(raInput)
       val sampleMonths = allMonths.take(3) ++ allMonths.takeRight(3)
       val raCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ sampleMonths
-      logShow(s"INPUT - RA_BCEF (keys + first/last months; ${allMonths.length} monthly cols used in full)",
-        ra_bcef.select(raCols.head, raCols.tail: _*))
+      logShow(s"INPUT - RA all perimeters (keys + first/last months; ${allMonths.length} monthly cols used in full)",
+        raInput.select(raCols.head, raCols.tail: _*))
       val matRows = matrices.map(m => Row(m.matrixId(Quarterly).dropRight(2), m.segments.mkString("+"), m.fwlApplied.toString, m.macroVar))
       val matSchema = StructType(Seq("MATRIX", "SEGMENTS", "FWL_APPLIED", "MACRO_VAR").map(StructField(_, StringType)))
       logShow("PARSED - matrix definitions", sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(matRows, 1), matSchema))

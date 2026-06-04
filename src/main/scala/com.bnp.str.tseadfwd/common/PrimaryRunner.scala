@@ -23,13 +23,7 @@ class PrimaryRunner(
     )
 
     new PrimaryMapper(
-      ra_bcef,
-/*      ra_bgl,
-      ra_bnl,
-      ra_fortis,
-      ra_ls,
-
- */
+      ra_all, // BCEF + any of BGL/BNL/FORTIS/LS present in the workbook (unioned; missing skipped)
       macro_variable,
       parametrage,
       outputTableName

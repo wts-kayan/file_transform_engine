@@ -99,7 +99,8 @@ flat tail in `termSeries` covers the remaining grid points.
 - `parseParametrage` — groups rows by `(perimeter, output-segment, rate-type)`; output
   segment = `AGGREGATED_SEGMENT_NAME` if aggregated else `SEGMENT`. Combined
   `fwlApplied = any(YES)`; `macroVar` = first non-`NONE`. Matrix id =
-  `PERIMETER_SEGMENT_RATETYPE_(Q|Y)`.
+  `PERIMETER_SEGMENT_RATETYPE_(Q|Y)` — a **blank `RATE_TYPE`** is dropped (only non-empty parts are
+  joined), so BPLS numeric segments yield `BPLS_10276_Q`, not `BPLS_10276__Q`.
 - `collectRa` — `(SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) → Array[Double]` of months.
 - `aggregateSegments` — element-wise sum of constituent segments' monthly series.
 - `collectScenario` — `(scenario, Date) → (macroVar → Double)`.

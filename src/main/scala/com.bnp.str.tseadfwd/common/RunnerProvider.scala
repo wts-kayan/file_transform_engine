@@ -7,21 +7,10 @@ import org.apache.spark.sql.DataFrame
 
 abstract class RunnerProvider(primaryReader: PrimaryReader) extends Serializable {
 
-  private[common] lazy val ra_bcef: DataFrame =
-    primaryReader.getMappingReader(PrimaryConstants.RA_BCEF)
-/*
-  private[common] lazy val ra_bgl: DataFrame =
-    primaryReader.getMappingReader(PrimaryConstants.RA_BGL)
+  /** All RA perimeters unioned (BCEF + any of BGL/BNL/FORTIS/LS present); missing sheets skipped. */
+  private[common] lazy val ra_all: DataFrame =
+    primaryReader.raInput
 
-  private[common] lazy val ra_bnl: DataFrame =
-    primaryReader.getMappingReader(PrimaryConstants.RA_BNL)
-
-  private[common] lazy val ra_fortis: DataFrame =
-    primaryReader.getMappingReader(PrimaryConstants.RA_FORTIS)
-
-  private[common] lazy val ra_ls: DataFrame =
-    primaryReader.getMappingReader(PrimaryConstants.RA_LS)
-*/
   private[common] lazy val macro_variable: DataFrame =
     primaryReader.getMappingReader(PrimaryConstants.MACRO_VARIABLE)
 
