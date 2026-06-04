@@ -168,9 +168,10 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryMapper.macroDeltaArray` (no ×100); `PrimaryView.scenarioRa` weight.
 - Confirmed: [x]
 
-## Q14 — Scenario `S` (Secto) ✅
-- **Chosen:** not implemented — no Secto data in the scenario file. Target has no `S` rows.
-- **Note:** one-line addition (`"Secto" -> "S"`) once data exists.
+## Q14 — Scenario `S` (Secto): out of scope? ⚠️ (merges former Q24)
+- **Context:** not implemented — no Secto data in the scenario file, no `S` rows in the target.
+- **Ask:** confirm Secto is **out of scope** for this delivery. It is a one-line addition
+  (`"Secto" -> "S"` in the scenario-code map) once Secto data exists.
 - Confirmed: [ ]
 
 ## Q15 — Adverse vs Extreme differentiation ⛔
@@ -268,11 +269,8 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - See Q9 (flat-tail boundary).
 - Confirmed: [ ]
 
-## Q24 — Scenario `S` (Secto) scope ⚠️
-- **Context:** not implemented — no Secto data in the scenario file, no `S` rows in the target.
-- **Ask:** confirm Secto is out of scope for this delivery; one-line addition once data exists.
-- See Q14.
-- Confirmed: [ ]
+## Q24 — (merged into Q14) ✅
+- Secto scope is now tracked in **Q14**. This number is retired to avoid a duplicate.
 
 ## Q25 — Scenario input is now a per-scenario Excel workbook + forward-looking window ⚠️ NEW
 - **Change 2026-06-04:** the scenario moved from a single CSV (one table with a `scenario` column,
@@ -344,4 +342,47 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Ask 2 (harness):** `EadFwdValidationApp` compares against the sample target's no-`RATE_TYPE` ids
   and so currently compares nothing (Q19). Fix it to map ids (strip/insert `RATE_TYPE`) so the error
   table is meaningful — once a trusted reference output exists.
+- Confirmed: [ ]
+
+## Q29 — Perimeter & product scope (BCEF only, or BGL/BNL/FORTIS/BPOST/BPLS too?) ⚠️ NEW
+- **Context:** `PrimaryReader` currently reads **only `RA_BCEF`** (RA_BGL/BNL/FORTIS/LS are commented
+  out). But `PARAMETRAGE_corrected` defines many more rows:
+  - **BCEF** — CONSO, INVEST_PRO, INVEST_CORP, MORTGAGE (FWL=YES, macro `IR_10Y_FR`).
+  - **BGL / BNL** — MORTGAGE, FWL=YES, macro `IR_10Y_BE` / `IR_10Y_IT`.
+  - **FORTIS / BPOST** — MORTGAGE/INVEST, FWL=NO, macro `NONE`.
+  - **~50 BPLS rows** — numeric segment codes (e.g. `10276`), **blank `RATE_TYPE`**, FWL=NO, macro `NONE`.
+- **Ask 1 (scope):** is this delivery **BCEF-only**, or must the other perimeters be produced? If so,
+  their RA Excel inputs (`RA_BGL`, `RA_BNL`, …) are needed (currently absent / reader disabled).
+- **Ask 2 (macro mapping):** confirm the per-perimeter macro variable — BCEF→`IR_10Y_FR`,
+  BGL→`IR_10Y_BE`, BNL→`IR_10Y_IT`. Each referenced column must exist in the scenario workbook
+  (`Scenario_EAD_FWD.xlsx` carries FR/BE/IT, so cross-currency is feasible).
+- **Ask 3 (BPLS / no rate type):** how should rows with a **numeric segment** and **no `RATE_TYPE`**
+  be named and handled? The current id template `PERIMETER_SEGMENT_RATETYPE_(Q|Y)` would yield a
+  double underscore (`BPLS_10276__Q`). FWL=NO, so no shock — but the id form must be decided.
+- Confirmed: [ ]
+
+## Q30 — Run-off freeze rule on the deep-tail cliff (guard added 2026-06-04) ⚠️ NEW
+- **Context:** a one-quarter cliff (`|CRD|` collapses to ~0 while the *offset* RA-metric window still
+  includes pre-cliff months — see Q7) makes `RA` spike >1 and flips the cumulative product negative
+  (observed `BCEF_INVEST_TF_Q` → −389). **Implemented guard:** `RA ≥ RUNOFF_RA_CAP (=1)` → treat as
+  run off → `computeRa` stops → `termSeries` **freezes** `EAD_RA_RATE` at the last good value; plus a
+  `[0,1]` clamp on `vectorFactored`. This bounds output and kills the negatives.
+- **Ask:** confirm **freeze-at-last-value** is the intended treatment, vs alternatives: (a) cap `RA`
+  just below 1 and keep accruing, (b) set `RA = 0` and continue flat (like the `CRD==0` rule), or
+  (c) cap the curve at a fixed **projection horizon** (ties to Q18). And: is the right trigger
+  `RA ≥ 1`, or a `CRD`-collapse / `ΔCRD` threshold?
+- **Root-cause sub-question:** the cliff spike exists because **`CRD` (block-avg of `M[3q-2..3q]`)** and
+  the **RA metrics (half-weight `M[3q-4..3q-1]`)** use **offset windows** (Q7), so a discontinuity hits
+  them in different quarters. Should the two windows be **aligned** so a cliff hits both at once
+  (removing the transient), or is the offset intentional? Linked to **Q26**.
+- **Code:** `PrimaryView.RUNOFF_RA_CAP`, `centralRa` / `scenarioRa` (`.filter(_ < RUNOFF_RA_CAP)`),
+  `vectorFactored` clamp.
+- Confirmed: [ ]
+
+## Q31 — PARAMETRAGE source of truth ⚠️ NEW
+- **Context:** two files exist — `PARAMETRAGE.xlsx` and `PARAMETRAGE_corrected.xlsx`; the config and
+  all runs use **`_corrected`** (it added the missing MORTGAGE row and carries full-precision values).
+- **Ask:** confirm `PARAMETRAGE_corrected.xlsx` is the production source (and what the "correction"
+  was), or specify how the authoritative PARAMETRAGE is delivered, so the config doesn't silently
+  depend on a hand-patched file.
 - Confirmed: [ ]
