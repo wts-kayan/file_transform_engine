@@ -3,6 +3,7 @@ package com.bnp.str.tseadfwd.mapping
 import com.bnp.str.tseadfwd.common.MapperProvider
 import com.bnp.str.tseadfwd.mapping.PrimaryView._
 import com.bnp.str.tseadfwd.utility.PrimaryConstants._
+import com.bnp.str.tseadfwd.validation.{ControlCheck, DataControl, Severity}
 import com.typesafe.config.Config
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
@@ -50,6 +51,10 @@ class PrimaryMapper(
   private val debug: Boolean =
     if (appConf.hasPath("debug")) appConf.getBoolean("debug") else false
 
+  /** When true (default), a failed pre-calculation data control aborts the run; otherwise it only warns. */
+  private val validationStrict: Boolean =
+    if (appConf.hasPath("validation.strict")) appConf.getBoolean("validation.strict") else true
+
   /** Log a title, then show the DataFrame (used to label every debug dump). */
   private def logShow(title: String, df: DataFrame, numRows: Int = 250): Unit = {
     log.info(s"\n========== $title ==========")
@@ -79,7 +84,9 @@ class PrimaryMapper(
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
 
-    logRaKeyDiagnostics(ra, matrices)
+    // Technical control: validate the inputs the calculation is about to consume. Logs a
+    // consolidated report, writes an auditable CSV, and (when validation.strict) aborts on a FAIL.
+    runDataControl(ra, macroData, matrices)
 
     if (debug) {
       // Exact parsed RA keys with series length. Each key is quoted with [|] delimiters so a
@@ -277,42 +284,162 @@ class PrimaryMapper(
   }
 
   /**
-   * Surface the FWL_TYPE / METRIC label vocabulary actually present in the parsed RA input vs.
-   * what the FWL=YES shock path needs, and flag any FWL=YES matrix whose STRESS(+)/STRESS(-)
-   * legs are absent. A mismatch here (a stray NBSP, an alternate spelling, or simply missing
-   * stress rows in the source) is the usual reason non-Central scenarios come back EMPTY. Keys
-   * are already canon()ed, so what's printed is the normalized form actually used for matching.
+   * Technical control run on the parsed inputs BEFORE the calculation. Builds a list of
+   * PASS/WARN/FAIL checks (label vocabulary, French-number integrity, stress legs, scenario
+   * coverage, cross-consistency), logs a consolidated report, writes an auditable CSV next to
+   * the output, and — when `validation.strict` (default true) — aborts the run on any FAIL.
    * Always on (independent of the debug flag).
    */
-  private def logRaKeyDiagnostics(
-                                   ra: Map[(String, String, String, String), Array[Double]],
-                                   matrices: Seq[MatrixDef]
-                                 ): Unit = {
-    val fwlPresent    = ra.keySet.map(_._3)
+  private def runDataControl(
+                              ra: Map[(String, String, String, String), Array[Double]],
+                              macroData: Map[(String, String), Map[String, Double]],
+                              matrices: Seq[MatrixDef]
+                            ): Unit = {
+    val checks = buildControlChecks(ra, macroData, matrices)
+
+    val report = DataControl.renderReport(checks)
+    if (checks.exists(_.failed)) log.error("\n" + report)
+    else if (checks.exists(_.warned)) log.warn("\n" + report)
+    else log.info("\n" + report)
+
+    try {
+      val outCfg = appConf.getConfig(OUTPUT_EAD_FWD)
+      val dir = if (outCfg.hasPath("tmpPath")) outCfg.getString("tmpPath") else "."
+      val tbl = if (outCfg.hasPath("tableName")) outCfg.getString("tableName") else OUTPUT_EAD_FWD
+      val path = DataControl.writeCsv(dir, s"DATA_CONTROL_$tbl.csv", checks)
+      log.info(s"DATA CONTROL report written to $path")
+    } catch {
+      case e: Throwable => log.warn(s"Could not write DATA CONTROL report file: ${e.getMessage}")
+    }
+
+    val failures = checks.filter(_.failed)
+    if (failures.nonEmpty && validationStrict)
+      throw new IllegalStateException(
+        s"Pre-calculation data control FAILED (${failures.size} check(s)); aborting before calculation. " +
+          s"Set $APP_CONF.validation.strict=false to override.\n" +
+          failures.map(c => s"  - ${c.name}: ${c.detail}").mkString("\n"))
+  }
+
+  /** All technical-control checks on the parsed inputs (keys already canon()ed). */
+  private def buildControlChecks(
+                                  ra: Map[(String, String, String, String), Array[Double]],
+                                  macroData: Map[(String, String), Map[String, Double]],
+                                  matrices: Seq[MatrixDef]
+                                ): Seq[ControlCheck] = {
+    val checks = scala.collection.mutable.ListBuffer.empty[ControlCheck]
+    def add(name: String, sev: String, detail: String): Unit = checks += ControlCheck(name, sev, detail)
+
+    // --- structural: required columns + monthly grid ---
+    val raCols = raInput.columns.toSet
+    val requiredRaCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
+    val missingCols = requiredRaCols.filterNot(raCols.contains)
+    if (missingCols.isEmpty) add("RA.columns", Severity.Pass, s"key columns present: ${requiredRaCols.mkString(", ")}")
+    else add("RA.columns", Severity.Fail, s"missing RA key column(s): ${missingCols.mkString(", ")}")
+
+    val months = monthColumns(raInput)
+    if (months.isEmpty) add("RA.months", Severity.Fail, "no monthly M<n> columns detected in RA input")
+    else {
+      val nums = months.map(_.drop(1).toInt)
+      val gaps = (nums.min to nums.max).filterNot(nums.toSet)
+      if (gaps.isEmpty) add("RA.months", Severity.Pass, s"${months.length} contiguous monthly columns M${nums.min}..M${nums.max}")
+      else add("RA.months", Severity.Warn, s"${months.length} monthly columns with gaps at: ${gaps.take(10).map("M" + _).mkString(", ")}")
+    }
+
+    if (ra.isEmpty) add("RA.rows", Severity.Fail, "RA input parsed to zero series")
+    else add("RA.rows", Severity.Pass, s"${ra.size} RA series parsed")
+
+    // --- label vocabulary (canonicalized) ---
+    val fwlPresent = ra.keySet.map(_._3)
     val metricPresent = ra.keySet.map(_._4)
-    log.info(s"RA key vocabulary (canonicalized): " +
-      s"FWL_TYPE=${fwlPresent.toSeq.sorted.mkString("{", ", ", "}")}  " +
-      s"METRIC=${metricPresent.toSeq.sorted.mkString("{", ", ", "}")}")
+    val missingFwl = Seq(FWL_BASELINE, FWL_STRESS_PLUS, FWL_STRESS_MINUS).filterNot(f => fwlPresent.contains(canon(f)))
+    val missingMetric = Seq(METRIC_CRD, METRIC_RA_STAT, METRIC_RA_FI, METRIC_RE).filterNot(m => metricPresent.contains(canon(m)))
+    if (missingFwl.isEmpty && missingMetric.isEmpty)
+      add("RA.labels", Severity.Pass, s"FWL_TYPE=${fwlPresent.toSeq.sorted.mkString("{", ", ", "}")} METRIC=${metricPresent.toSeq.sorted.mkString("{", ", ", "}")}")
+    else
+      add("RA.labels", Severity.Fail, s"missing FWL_TYPE=${missingFwl.mkString("[", ", ", "]")} METRIC=${missingMetric.mkString("[", ", ", "]")} (check spelling / non-breaking spaces vs the constants)")
 
-    val missingFwl    = Seq(FWL_BASELINE, FWL_STRESS_PLUS, FWL_STRESS_MINUS).map(canon).filterNot(fwlPresent)
-    val missingMetric = Seq(METRIC_CRD, METRIC_RA_STAT, METRIC_RA_FI, METRIC_RE).map(canon).filterNot(metricPresent)
-    if (missingFwl.nonEmpty || missingMetric.nonEmpty)
-      log.warn(s"RA input is missing expected shock-path labels — " +
-        s"FWL_TYPE missing=${missingFwl.mkString("[", ", ", "]")} " +
-        s"METRIC missing=${missingMetric.mkString("[", ", ", "]")}. " +
-        s"Non-Central FWL=YES scenarios for affected matrices will be EMPTY. " +
-        s"Check the source cells for non-breaking spaces / spelling vs the constants.")
+    // --- numeric integrity: French decimal comma not canonicalized at read time ---
+    // toDouble strips commas as grouping separators, so a raw cell that still carries a ',' is a
+    // French decimal that would be silently inflated (x10^n). usePlainNumberFormat should remove it.
+    val (scanned, commaCells, sample) = scanRawNumericCells(months)
+    if (commaCells == 0) add("RA.numeric", Severity.Pass, s"$scanned numeric cells scanned; none carry a decimal comma")
+    else add("RA.numeric", Severity.Fail, s"$commaCells/$scanned numeric cell(s) carry a decimal comma and would be corrupted on parse, e.g. ${sample.mkString(", ")} — store cells as numbers (usePlainNumberFormat), not French text")
 
-    // Per-matrix: an FWL=YES matrix needs both stress legs (checked on RA FI) for >=1 segment.
-    for (m <- matrices if m.fwlApplied) {
-      def hasLeg(fwl: String): Boolean =
-        m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(fwl), canon(METRIC_RA_FI))))
-      val plus  = hasLeg(FWL_STRESS_PLUS)
-      val minus = hasLeg(FWL_STRESS_MINUS)
-      if (!plus || !minus)
-        log.warn(s"FWL=YES matrix ${m.outSegment}/${m.rateType} (segments=${m.segments.mkString(",")}) " +
-          s"is missing a stress leg (STRESS(+) present=$plus, STRESS(-) present=$minus); " +
-          s"its non-Central scenarios will be EMPTY.")
+    val nonFinite = ra.count { case (_, arr) => arr.exists(d => d.isNaN || d.isInfinite) }
+    if (nonFinite == 0) add("RA.finite", Severity.Pass, "all parsed RA values are finite")
+    else add("RA.finite", Severity.Warn, s"$nonFinite RA series contain NaN/Infinite values")
+
+    // --- per-matrix stress legs for FWL=YES ---
+    val legIssues = for {
+      m <- matrices if m.fwlApplied
+      plus = m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_STRESS_PLUS), canon(METRIC_RA_FI))))
+      minus = m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_STRESS_MINUS), canon(METRIC_RA_FI))))
+      if !plus || !minus
+    } yield s"${m.outSegment}/${m.rateType}(+=$plus,-=$minus)"
+    if (matrices.exists(_.fwlApplied)) {
+      if (legIssues.isEmpty) add("RA.stressLegs", Severity.Pass, "every FWL=YES matrix has both stress legs")
+      else add("RA.stressLegs", Severity.Fail, s"FWL=YES matrix(es) missing a stress leg: ${legIssues.mkString("; ")} -> their non-Central scenarios would be EMPTY")
+    }
+
+    // --- PARAMETRAGE -> matrices + segment cross-consistency ---
+    if (matrices.isEmpty) add("PARAMETRAGE.matrices", Severity.Fail, "no matrices resolved from PARAMETRAGE (no perimeter overlap with RA?)")
+    else add("PARAMETRAGE.matrices", Severity.Pass, s"${matrices.size} matrices resolved")
+
+    val orphanSegs = matrices.flatMap(m =>
+      m.segments.filterNot(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_BASELINE), canon(METRIC_CRD))))).distinct
+    if (orphanSegs.isEmpty) add("PARAMETRAGE.segments", Severity.Pass, "all referenced segments have BASELINE/CRD in RA")
+    else add("PARAMETRAGE.segments", Severity.Warn, s"segment(s) referenced by PARAMETRAGE but absent from RA BASELINE/CRD: ${orphanSegs.mkString(", ")}")
+
+    // --- scenario coverage ---
+    val scenNames = macroData.keySet.map(_._1)
+    val missingScen = SCENARIO_CODES.map(_._1).filterNot(scenNames.contains)
+    if (missingScen.isEmpty) add("SCENARIO.names", Severity.Pass, s"scenarios present: ${scenNames.toSeq.sorted.mkString(", ")}")
+    else if (missingScen.contains(SCENARIO_CENTRAL)) add("SCENARIO.names", Severity.Fail, s"Central scenario missing (required); also missing: ${missingScen.filterNot(_ == SCENARIO_CENTRAL).mkString(", ")}")
+    else add("SCENARIO.names", Severity.Warn, s"scenario(s) missing (their output is skipped): ${missingScen.mkString(", ")}")
+
+    val allMacroVars = macroData.values.flatMap(_.keys).toSet
+    val missingVars = matrices.filter(_.fwlApplied).map(_.macroVar).filter(_.nonEmpty).distinct.filterNot(allMacroVars.contains)
+    if (missingVars.isEmpty) add("SCENARIO.macroVars", Severity.Pass, "all referenced MACRO_VARIABLEs present in scenario data")
+    else add("SCENARIO.macroVars", Severity.Fail, s"MACRO_VARIABLE(s) referenced by PARAMETRAGE but absent from scenario data: ${missingVars.mkString(", ")} (FWL shock would be 0)")
+
+    val centralDates = macroData.keySet.collect { case (s, d) if s == SCENARIO_CENTRAL => d }
+    val missingQ = shockWindow.filterNot(centralDates.contains)
+    if (centralDates.isEmpty) add("SCENARIO.window", Severity.Warn, "no Central scenario dates found to check the shock window against")
+    else if (missingQ.isEmpty) add("SCENARIO.window", Severity.Pass, s"all ${shockWindow.size} shock-window quarters present (${shockWindow.head}..${shockWindow.last})")
+    else add("SCENARIO.window", Severity.Warn, s"${missingQ.size} shock-window quarter(s) missing (delta holds last available): ${missingQ.take(8).mkString(", ")}")
+
+    checks.toList
+  }
+
+  /**
+   * Scan the raw (string) monthly cells for French decimal commas that `toDouble` would strip.
+   * Returns (cells scanned, cells containing a comma, up to 5 offending samples).
+   */
+  private def scanRawNumericCells(months: Seq[String]): (Int, Int, Seq[String]) = {
+    if (months.isEmpty) (0, 0, Nil)
+    else {
+      val rows = raInput.select(months.head, months.tail: _*).collect()
+      var scanned = 0
+      var comma = 0
+      val examples = scala.collection.mutable.ListBuffer.empty[String]
+      rows.foreach { r =>
+        var i = 0
+        while (i < months.length) {
+          val v = r.get(i)
+          if (v != null) {
+            val s = v.toString.trim
+            if (s.nonEmpty) {
+              scanned += 1
+              if (s.indexOf(',') >= 0) {
+                comma += 1
+                if (examples.size < 5) examples += s
+              }
+            }
+          }
+          i += 1
+        }
+      }
+      (scanned, comma, examples.toList)
     }
   }
 
