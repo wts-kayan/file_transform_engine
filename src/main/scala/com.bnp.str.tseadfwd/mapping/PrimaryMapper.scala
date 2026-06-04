@@ -358,12 +358,12 @@ class PrimaryMapper(
     else
       add("RA.labels", Severity.Fail, s"missing FWL_TYPE=${missingFwl.mkString("[", ", ", "]")} METRIC=${missingMetric.mkString("[", ", ", "]")} (check spelling / non-breaking spaces vs the constants)")
 
-    // --- numeric integrity: French decimal comma not canonicalized at read time ---
-    // toDouble strips commas as grouping separators, so a raw cell that still carries a ',' is a
-    // French decimal that would be silently inflated (x10^n). usePlainNumberFormat should remove it.
-    val (scanned, commaCells, sample) = scanRawNumericCells(months)
-    if (commaCells == 0) add("RA.numeric", Severity.Pass, s"$scanned numeric cells scanned; none carry a decimal comma")
-    else add("RA.numeric", Severity.Fail, s"$commaCells/$scanned numeric cell(s) carry a decimal comma and would be corrupted on parse, e.g. ${sample.mkString(", ")} — store cells as numbers (usePlainNumberFormat), not French text")
+    // --- numeric integrity: every non-empty raw cell must parse to a number ---
+    // tryDouble is locale-tolerant (strips space/NBSP/narrow-NBSP grouping, comma -> dot), so
+    // French-formatted cells are fine; this flags only genuinely non-numeric content.
+    val (scanned, badCells, sample) = scanRawNumericCells(months)
+    if (badCells == 0) add("RA.numeric", Severity.Pass, s"$scanned numeric cells scanned; all parse to a number")
+    else add("RA.numeric", Severity.Fail, s"$badCells/$scanned numeric cell(s) do not parse to a number, e.g. ${sample.mkString(", ")}")
 
     val nonFinite = ra.count { case (_, arr) => arr.exists(d => d.isNaN || d.isInfinite) }
     if (nonFinite == 0) add("RA.finite", Severity.Pass, "all parsed RA values are finite")
@@ -412,15 +412,15 @@ class PrimaryMapper(
   }
 
   /**
-   * Scan the raw (string) monthly cells for French decimal commas that `toDouble` would strip.
-   * Returns (cells scanned, cells containing a comma, up to 5 offending samples).
+   * Scan the raw (string) monthly cells and check each parses via `tryDouble` (locale-tolerant).
+   * Returns (non-empty cells scanned, cells that fail to parse, up to 5 offending samples).
    */
   private def scanRawNumericCells(months: Seq[String]): (Int, Int, Seq[String]) = {
     if (months.isEmpty) (0, 0, Nil)
     else {
       val rows = raInput.select(months.head, months.tail: _*).collect()
       var scanned = 0
-      var comma = 0
+      var bad = 0
       val examples = scala.collection.mutable.ListBuffer.empty[String]
       rows.foreach { r =>
         var i = 0
@@ -430,8 +430,8 @@ class PrimaryMapper(
             val s = v.toString.trim
             if (s.nonEmpty) {
               scanned += 1
-              if (s.indexOf(',') >= 0) {
-                comma += 1
+              if (tryDouble(s).isEmpty) {
+                bad += 1
                 if (examples.size < 5) examples += s
               }
             }
@@ -439,7 +439,7 @@ class PrimaryMapper(
           i += 1
         }
       }
-      (scanned, comma, examples.toList)
+      (scanned, bad, examples.toList)
     }
   }
 
@@ -520,21 +520,24 @@ class PrimaryMapper(
       .toUpperCase(java.util.Locale.ROOT)
       .replaceAll("[^A-Z0-9+-]", "")
 
-  private def toDouble(v: Any): Double = v match {
-    case null              => 0.0
-    case d: Double         => d
-    case n: java.lang.Number => n.doubleValue()
-    case s: String         =>
-      // spark-excel returns locale-formatted strings (e.g. "-8,128" with a thousands
-      // separator); inputs use '.' as the decimal mark, so commas are group separators.
-      // Strip ALL grouping whitespace too — including the non-breaking space (U+00A0) and
-      // narrow no-break space (U+202F) that POI emits on French-locale hosts. Java's \s does
-      // NOT match those, so a plain .replace(" ", "") left them in and large values (e.g.
-      // "-8 128") threw NumberFormatException -> 0.0, firing the CRD==0 run-off guard.
-      val t = s.trim.replace(",", "").replaceAll("[\\s\\u00A0\\u202F]", "")
-      if (t.isEmpty) 0.0 else try t.toDouble catch { case _: NumberFormatException => 0.0 }
-    case other             => try other.toString.toDouble catch { case _: Throwable => 0.0 }
+  /**
+   * Locale-tolerant numeric parse. Returns None for empty / non-numeric input.
+   * spark-excel returns cell values as strings; on a French-locale host (or for text-typed cells)
+   * they look like "-92 924,788279": spaces / non-breaking spaces (U+00A0) / narrow no-break
+   * spaces (U+202F) group the thousands and the COMMA is the decimal mark. We strip every kind of
+   * horizontal-whitespace grouping (\h) and normalise the decimal comma to a dot. Canonical numeric
+   * cells (dot, no grouping, via usePlainNumberFormat) carry no comma and pass through unchanged.
+   */
+  private def tryDouble(v: Any): Option[Double] = v match {
+    case null                => None
+    case d: Double           => Some(d)
+    case n: java.lang.Number => Some(n.doubleValue())
+    case other               =>
+      val t = other.toString.trim.replaceAll("\\h", "").replace(",", ".")
+      if (t.isEmpty) None else try Some(t.toDouble) catch { case _: NumberFormatException => None }
   }
+
+  private def toDouble(v: Any): Double = tryDouble(v).getOrElse(0.0)
 
   /** Decimal-comma formatting, half-up at `maxScale`, trailing zeros stripped (e.g. 0.5 -> "0,5"). */
   private def fmtNumber(value: Double, maxScale: Int): String = {
