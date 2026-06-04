@@ -386,3 +386,36 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   was), or specify how the authoritative PARAMETRAGE is delivered, so the config doesn't silently
   depend on a hand-patched file.
 - Confirmed: [ ]
+
+## Q32 — Ticket FWL=NO STEP 3: `DET RA FI` / `DET RE` computed but not used ⚠️ NEW (ticket defect)
+- **Finding (ticket cases 1 & 2, FWL=NO):** STEP 2 computes three details — `DET RA STAT_Qi`,
+  `DET RA FI_Qi`, `DET RE_Qi` (ticket lines 80–84) — but STEP 3 builds the vector from **only** RA STAT:
+  `VECTOR_RA_Qi = 1 − DET RA STAT_Qi` (line 90). As written, `DET RA FI` and `DET RE` are dead
+  calculations.
+- **Engine / target:** the value that reproduces the target sums all three (Q6):
+  `RA = −(RA_STAT + RA_FI + RE) / CRD`, i.e. `VECTOR = 1 − (DET RA STAT + DET RA FI + DET RE)`.
+- **Ask:** confirm STEP 3 should be `VECTOR = 1 − (DET RA STAT + DET RA FI + DET RE)` (all three details
+  are part of the loss rate), not RA STAT alone. The engine already does this; this is a **ticket-text**
+  correction.
+- **Code:** `PrimaryView.centralRa`. **Related:** Q6.
+- Confirmed: [ ]
+
+## Q33 — Ticket FWL=YES STEP 4/5: scenario FI+RE detail undefined; `(CENTRAL)` base + missing sign ⚠️ NEW (ticket defect)
+- **Finding (ticket cases 3 & 4, FWL=YES):**
+  1. STEP 4 defines `RA FI RE_Qi (CENTRAL)` **only** (line 212–213); STEP 5 (line 219) then consumes
+     `RA FI RE_Qi (SCENARIO)` — but the **shocked** FI+RE detail for Adverse/Optimistic/Extreme is
+     **never defined** in the ticket.
+  2. The shock **base** should be labelled `(CENTRAL)`, not `(BASELINE)`. They are the *same value*
+     (Central applies no shock, so its FI+RE detail is built from the BASELINE input leg) — but
+     `BASELINE` is a `FWL_TYPE` *input leg* whereas `CENTRAL` is the *scenario*; use `(CENTRAL)` for
+     clarity and consistency with STEP 4/5.
+  3. `RA FI RE (CENTRAL)` (line 213) is **missing the leading minus** that `RA STAT` has (line 210):
+     it should read `−[RA FI_base + RE_base] / CRD_base`.
+- **Engine:** `scenarioRa` defines the scenario detail as `fireBase + weight·(fireStress − fireBase)`,
+  with `fireBase = −(RA_FI_base + RE_base)/CRD_base` (= the Central detail) and the leg chosen by the
+  sign of the macro delta (Q10).
+- **Ask:** confirm the explicit scenario FI+RE formula (Central detail adjusted by the stress-leg
+  shock), the `(CENTRAL)` base label, and the leading minus sign.
+- **Related:** Q6 (core formula), Q10 (leg selection), Q17 ("no difference between scenarios"
+  copy-paste), Q26 (shock / FI-RE behaviour).
+- Confirmed: [ ]
