@@ -413,26 +413,35 @@ class PrimaryMapper(
 
   /**
    * Scan the raw (string) monthly cells and check each parses via `tryDouble` (locale-tolerant).
-   * Returns (non-empty cells scanned, cells that fail to parse, up to 5 offending samples).
+   * Returns (non-empty cells scanned, cells that fail to parse, up to 8 located samples of the
+   * form `row <n> [SEGMENT|RATE_TYPE|FWL_TYPE|METRIC] <Mcol>='<raw>'`).
    */
   private def scanRawNumericCells(months: Seq[String]): (Int, Int, Seq[String]) = {
     if (months.isEmpty) (0, 0, Nil)
     else {
-      val rows = raInput.select(months.head, months.tail: _*).collect()
+      val keyCols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
+      val sel = keyCols ++ months
+      val rows = raInput.select(sel.head, sel.tail: _*).collect()
+      val k = keyCols.length
       var scanned = 0
       var bad = 0
       val examples = scala.collection.mutable.ListBuffer.empty[String]
+      var rowIdx = 0
       rows.foreach { r =>
+        rowIdx += 1 // 1-based RA data row (Excel row = rowIdx + 1 for the header)
         var i = 0
         while (i < months.length) {
-          val v = r.get(i)
+          val v = r.get(k + i)
           if (v != null) {
             val s = v.toString.trim
             if (s.nonEmpty) {
               scanned += 1
               if (tryDouble(s).isEmpty) {
                 bad += 1
-                if (examples.size < 5) examples += s
+                if (examples.size < 8) {
+                  val key = (0 until k).map(j => Option(r.get(j)).map(_.toString).getOrElse("")).mkString("|")
+                  examples += s"row $rowIdx [$key] ${months(i)}='$s'"
+                }
               }
             }
           }
@@ -534,7 +543,9 @@ class PrimaryMapper(
     case n: java.lang.Number => Some(n.doubleValue())
     case other               =>
       val t = other.toString.trim.replaceAll("\\h", "").replace(",", ".")
-      if (t.isEmpty) None else try Some(t.toDouble) catch { case _: NumberFormatException => None }
+      if (t.isEmpty) None
+      else if (t == "-" || t == "–" || t == "—") Some(0.0) // accounting / French nil -> zero
+      else try Some(t.toDouble) catch { case _: NumberFormatException => None }
   }
 
   private def toDouble(v: Any): Double = tryDouble(v).getOrElse(0.0)
