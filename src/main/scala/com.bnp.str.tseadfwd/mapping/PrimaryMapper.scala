@@ -39,6 +39,16 @@ class PrimaryMapper(
   private val shockWindowEnd: String =
     if (appConf.hasPath("shock_window_end")) appConf.getString("shock_window_end") else "2025Q4"
 
+  /**
+   * FWL=YES scenario shock scaling (schema interpretation toggle, default true):
+   *  - true  → multiply the stress-vs-baseline shock by the macro `Rate/100` (= per-term delta),
+   *            so Adverse ≠ Extreme and the magnitude follows the macro path (schema STEP 3 + 4).
+   *  - false → apply the shock at full size with NO `Rate` factor (the literal STEP-4 cells); this
+   *            makes Adverse = Extreme (both STRESS(-)) — kept so we can compare both readings.
+   */
+  private val applyRateToShock: Boolean =
+    if (appConf.hasPath("apply_rate_to_shock")) appConf.getBoolean("apply_rate_to_shock") else true
+
   /** Ordered list of "yyyyQq" labels from start to end inclusive. */
   private lazy val shockWindow: Vector[String] = {
     def ord(q: String): Int = { val p = q.split("Q"); p(0).toInt * 4 + (p(1).toInt - 1) }
@@ -181,8 +191,11 @@ class PrimaryMapper(
         val (crdLeg, fiLeg, reLeg) =
           if (scenName == SCENARIO_OPTIMISTIC) (crdPlus, raFiPlus, rePlus)
           else (crdMinus, raFiMinus, reMinus)
-        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg,
-          freq, deltaPath(macroData, scenName, m.macroVar, freq))
+        // Shock multiplier: Rate/100 (per-term macro delta) when applyRateToShock, else 1.0 (full
+        // shock, literal STEP-4 reading). See OPEN_QUESTIONS Q33.
+        val mult: Int => Double =
+          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq) else (_ => 1.0)
+        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
       }
 
     if (ra_detail.isEmpty) {
