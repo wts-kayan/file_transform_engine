@@ -1,7 +1,7 @@
 // Package declaration which organizes the code modules, similar to a folder structure.
 package com.bnp.str.tseadfwd.sessionmanager
 
-// Importing SparkSession from Spark SQL library.
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
 /**
@@ -10,41 +10,64 @@ import org.apache.spark.sql.SparkSession
  * @author Mehdi TAJMOUATI
  * @note Big Data/Cloud Trainer at WyTaSoft.
  *       For queries, training or further information, contact mehdi.tajmouati@wytasoft.com
- *       This design ensures that only one instance of SparkSession is used throughout the application.
- *       The SparkSession is configured with enhanced settings for performance and efficiency.
+ *
+ * One factory for BOTH local and cluster — no `isLocalhost` flag. The runtime environment
+ * decides: when the job is launched via `spark-submit` the cluster sets `spark.master` (yarn,
+ * k8s, …) and provides the Hive metastore / warehouse, so those are kept untouched. When no
+ * master is supplied (IDE run, unit test, laptop) or it is an explicit `local[…]`, a
+ * self-contained local session is built (in-memory Derby metastore, local warehouse). The same
+ * `enableHiveSupport()` works in both cases.
  * @see <a href="https://www.wytasoft.com/wytasoft-group/">Visit WyTaSoft for more information on courses and training sessions.</a>
  */
 object SparkSessionManager {
 
   /**
-   * Fetches or creates a SparkSession with specified application name and configuration settings.
+   * Fetches or creates a SparkSession suited to wherever it runs (local or cluster), decided from
+   * the environment rather than a caller-supplied flag.
    *
    * @param appName The name of the application. This name will be displayed in the Spark UI.
-   * @return An instance of SparkSession tailored for the application, ensuring optimal performance.
+   * @return An instance of SparkSession tailored for the detected environment.
    */
   def fetchSparkSession(appName: String): SparkSession = {
 
-    // Builder pattern to construct a SparkSession with specific configurations.
-    SparkSession
+    // `new SparkConf()` loads the `spark.*` system properties / SPARK_ env that spark-submit sets.
+    // No master, or an explicit `local[…]` master, means a local run; anything else is a cluster.
+    val isLocal = new SparkConf().getOption("spark.master").forall(_.startsWith("local"))
+
+    val builder = SparkSession
       .builder()
-      .appName(appName)                                         // Application name in Spark UI
-      .master("local[*]")                                       // Run locally on all cores
+      .appName(appName)
+      // ---- common to both environments ----
       .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-      .config("spark.sql.tungsten.enabled", "true")
-      .config("spark.rdd.compress", "true")
-      .config("spark.io.compression.codec", "snappy")
-      .config("spark.sql.broadcastTimeout", 1200)
-      .config("spark.sql.warehouse.dir",  "file:///tmp/spark-warehouse")
-      .config("hive.metastore.warehouse.dir", "file:///tmp/spark-warehouse")
-      .config("spark.driver.bindAddress", "0.0.0.0")  // listen on all interfaces
-      .config("spark.driver.host", "127.0.0.1")      // advertise localhost to the UI
-      .config("spark.ui.enabled", "true")           // (default) ensure UI is on
-      .config("spark.ui.port", "4040")              // pick a fixed port
-      .config("spark.eventLog.enabled", "true")
-      .config("spark.eventLog.dir","file:///tmp/spark-events")
-      .enableHiveSupport()                                      // Hive support with local warehouse
+      .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+      .config("hive.exec.dynamic.partition", "true")
+      .config("hive.exec.dynamic.partition.mode", "nonstrict")
+
+    val tuned =
+      if (isLocal) {
+        // ---- self-contained local run: embedded Derby metastore + local warehouse, no cluster deps ----
+        val warehouse = s"${System.getProperty("user.dir")}/out/warehouse"
+        builder
+          .master("local[*]")
+          .config("spark.driver.bindAddress", "0.0.0.0")
+          .config("spark.driver.host", "127.0.0.1")
+          .config("spark.broadcast.compress", "false")
+          .config("spark.sql.codegen.wholeStage", "false")
+          .config("spark.debug.maxToStringFields", 1000)
+          .config("javax.jdo.option.ConnectionURL", "jdbc:derby:memory:db;create=true")
+          .config("spark.sql.warehouse.dir", warehouse)
+          .config("hive.metastore.warehouse.dir", warehouse)
+      } else {
+        // ---- cluster: spark-submit provides master / queue / metastore; only set engine tuning ----
+        builder
+          .config("hive.execution.engine", "spark")
+          .config("spark.sql.autoBroadcastJoinThreshold", 1073741824L)
+      }
+
+    tuned
+      .enableHiveSupport()
       .getOrCreate()
-    // The getOrCreate method is critical for managing resource efficiency and ensuring application stability.
+    // getOrCreate manages resource efficiency and ensures a single session per JVM.
   }
 
 }
