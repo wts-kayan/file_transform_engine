@@ -17,6 +17,11 @@ import org.apache.spark.sql.functions._
  *                                    (PERIMETER_SEGMENT_TF_Q -> PERIMETER_SEGMENT_Q) so it
  *                                    aligns with a target that omits RATE_TYPE
  *   3 tol          default 1e-6   — abs-error threshold counted as "matching"
+ *   4 comparePath  default localRun/tseadfwd/output/COMPARE_TS_EAD_FWD.csv — per-key result CSV
+ *
+ * Besides the console report, writes a single `;`-delimited, decimal-comma CSV of every joined key
+ * (EAD_MATRIX_ID;SCENARIO_ID;TERM;OUTPUT;TARGET;ABS_ERROR;STATUS) where STATUS ∈
+ * {MATCH, DIFF, ONLY_OUTPUT, ONLY_TARGET}.
  */
 object EadFwdCompare {
 
@@ -25,6 +30,7 @@ object EadFwdCompare {
     val targetPath = args.lift(1).getOrElse("localRun/tseadfwd/target_output/TS_EAD_FWD_25Q4_v1_small.csv")
     val stripRateType = args.lift(2).forall(_.toBoolean) // default true
     val tol = args.lift(3).map(_.toDouble).getOrElse(1e-6)
+    val comparePath = args.lift(4).getOrElse("localRun/tseadfwd/output/COMPARE_TS_EAD_FWD.csv")
 
     val spark = SparkSession.builder()
       .appName("ead-fwd-compare").master("local[*]")
@@ -33,12 +39,12 @@ object EadFwdCompare {
       .getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
-    compare(spark, outputPath, targetPath, stripRateType, tol)
+    compare(spark, outputPath, targetPath, stripRateType, tol, comparePath)
     spark.stop()
   }
 
   def compare(spark: SparkSession, outputPath: String, targetPath: String,
-              stripRateType: Boolean, tol: Double): Unit = {
+              stripRateType: Boolean, tol: Double, comparePath: String): Unit = {
     import spark.implicits._
 
     // decimal-comma string -> Double (null-safe; returns java.lang.Double so null is allowed)
@@ -102,6 +108,44 @@ object EadFwdCompare {
       joined.filter($"outRate".isNull || $"tgtRate".isNull)
         .select("mid", "scen", "term", "outRate", "tgtRate").show(10, truncate = false)
     }
+
+    // ---- write the full per-key comparison to a single clean CSV (driver-side; data is small) ----
+    val rows = joined.select(
+      $"mid", $"scen", $"term", $"outRate", $"tgtRate", $"absErr",
+      when($"outRate".isNull, lit("ONLY_TARGET"))
+        .when($"tgtRate".isNull, lit("ONLY_OUTPUT"))
+        .when($"absErr" <= tol, lit("MATCH"))
+        .otherwise(lit("DIFF")).as("status"))
+      .collect()
+
+    // decimal-comma formatting (9 dp for rates is plenty; null/NaN -> empty)
+    def num(v: Any): String = v match {
+      case null                                  => ""
+      case d: Double if d.isNaN || d.isInfinite  => ""
+      case d: Double =>
+        BigDecimal(d).setScale(12, BigDecimal.RoundingMode.HALF_UP)
+          .bigDecimal.stripTrailingZeros.toPlainString.replace(".", ",")
+      case o => o.toString
+    }
+    def termNum(s: String): Double =
+      try s.replace(",", ".").toDouble catch { case _: Throwable => Double.MaxValue }
+
+    val sorted = rows.sortBy(r => (r.getString(0), r.getString(1), termNum(r.getString(2))))
+    val f = new java.io.File(comparePath)
+    Option(f.getParentFile).foreach(_.mkdirs())
+    val pw = new java.io.PrintWriter(f, "UTF-8")
+    try {
+      pw.println("EAD_MATRIX_ID;SCENARIO_ID;TERM;OUTPUT;TARGET;ABS_ERROR;STATUS")
+      sorted.foreach { r =>
+        pw.println(Seq(r.getString(0), r.getString(1), r.getString(2),
+          num(r.get(3)), num(r.get(4)), num(r.get(5)), r.getString(6)).mkString(";"))
+      }
+    } finally pw.close()
+
+    val nDiff = sorted.count(r => r.getString(6) == "DIFF")
+    val nOnly = sorted.count(r => r.getString(6).startsWith("ONLY"))
+    println(f"\n>>> comparison written to $comparePath (${sorted.length}%d rows: $nDiff%d DIFF, $nOnly%d only-one-side)")
+
     joined.unpersist()
   }
 }
