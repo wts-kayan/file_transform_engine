@@ -55,13 +55,31 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
     aggregate(ramp, period = 3, Yearly, isCrd = false) shouldBe None          // needs M19..M30
   }
 
+  // ---- schema preamble r1: forward-fill short series to M361 -------------------------------
+
+  test("padForward fills a short series flat with the last value; no-op when long enough") {
+    padForward(Array(1.0, 2.0, 3.0), 6) shouldBe Array(1.0, 2.0, 3.0, 3.0, 3.0, 3.0)
+    padForward(Array(1.0, 2.0, 3.0), 3) shouldBe Array(1.0, 2.0, 3.0) // already >= target
+    padForward(Array(1.0, 2.0, 3.0), 2) shouldBe Array(1.0, 2.0, 3.0) // never truncates
+    padForward(Array.empty[Double], 5) shouldBe Array.empty[Double]
+  }
+
   // ---- §4.3 central RA formula -------------------------------------------------------------
 
-  test("centralRa = -(RA_STAT + RA_FI + RE) / CRD at period 1") {
+  test("centralRa = -(RA_STAT + RA_FI + RE) / CRD at period 1 (FWL=YES Central)") {
     val crd = Array.fill(12)(-100.0)
     val ra  = centralRa(crd, Array.fill(12)(10.0), Array.fill(12)(0.0), Array.fill(12)(0.0), Quarterly)
     // STAT_Q1 = 10 + 5 = 15 ; FI = RE = 0 ; RA = -(15)/-100 = 0.15
     ra.head shouldBe (0.15 +- tol)
+  }
+
+  test("statOnlyRa (FWL=NO) uses RA_STAT only — FI and RE are excluded") {
+    val crd  = Array.fill(12)(-100.0)
+    val stat = Array.fill(12)(10.0)
+    val fi   = Array.fill(12)(20.0) // present, but the FWL=NO path must ignore it
+    statOnlyRa(crd, stat, Quarterly).head shouldBe (0.15 +- tol) // -STAT/CRD = -15/-100
+    // centralRa WOULD include FI (FI_Q1 = 30) -> -(15+30)/-100 = 0.45, proving the paths differ
+    centralRa(crd, stat, fi, Array.fill(12)(0.0), Quarterly).head shouldBe (0.45 +- tol)
   }
 
   test("centralRa run-off guard: CRD == 0 -> RA = 0") {
@@ -90,22 +108,23 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
     val crd  = Array.fill(12)(-100.0)
     val stat = Array.fill(12)(8.0); val fib = Array.fill(12)(2.0); val reb = Array.fill(12)(1.0)
     val central  = centralRa(crd, stat, fib, reb, Quarterly)
+    // leg series arbitrary; delta=0 => shock contributes nothing => RA = STAT+FI+RE detail = central
     val scenario = scenarioRa(crd, stat, fib, reb,
-      Array.fill(12)(99.0), Array.fill(12)(99.0), Array.fill(12)(-99.0), Array.fill(12)(-99.0),
-      Quarterly, _ => 0.0, refShock = 1.0)
+      Array.fill(12)(-100.0), Array.fill(12)(99.0), Array.fill(12)(99.0), Quarterly, _ => 0.0)
     scenario.length shouldBe central.length
     central.zip(scenario).foreach { case (c, s) => s shouldBe (c +- tol) }
   }
 
-  test("scenarioRa selects the stress leg by the sign of the macro delta") {
-    val crd = Array.fill(9)(-100.0)
+  test("scenarioRa applies the schema shock: RA_FI_RE_base - (shockFI + shockRE) * delta") {
+    val crd  = Array.fill(9)(-100.0)
     val zero = Array.fill(9)(0.0)
-    val fiPlus  = Array.fill(9)(30.0)   // FI+_Q1 = 30 + 15 = 45 -> fireStress = 0.45
-    val fiMinus = Array.fill(9)(-30.0)  // FI-_Q1 = -45         -> fireStress = -0.45
-    def ra(delta: Double) = scenarioRa(crd, zero, zero, zero, fiPlus, zero, fiMinus, zero,
-      Quarterly, _ => delta, refShock = 1.0).head
-    ra(+2.0) shouldBe (0.90 +- tol)  // w=2, STRESS(+): 2 * 0.45
-    ra(-2.0) shouldBe (-0.90 +- tol) // w=2, STRESS(-): 2 * -0.45
+    // base STAT/FI/RE = 0 -> statDet = fireBaseDet = 0; leg FI = 30 with its own CRD -100:
+    // FI_leg_Q1 = 30 + 15 = 45 ; det(fl,cl) = -45/-100 = 0.45 ; shockFI = 0.45 - 0 = 0.45
+    val fiLeg = Array.fill(9)(30.0)
+    def ra(delta: Double) =
+      scenarioRa(crd, zero, zero, zero, crd, fiLeg, zero, Quarterly, _ => delta).head
+    ra(2.0) shouldBe (-0.90 +- tol)  // 0 - (0.45 + 0) * 2
+    ra(-2.0) shouldBe (0.90 +- tol)  // 0 - (0.45 + 0) * -2
   }
 
   // ---- §4.7 survival factor + clamp --------------------------------------------------------

@@ -41,6 +41,20 @@ object PrimaryView {
    */
   val RUNOFF_RA_CAP = 1.0
 
+  /** Expected monthly input length (30y horizon = 30*12 + 1). Schema preamble: a shorter series is
+   *  forward-filled to this length with its last month's value (see `padForward`). */
+  val INPUT_MONTHS = 361
+
+  /**
+   * Schema preamble rule (top of "… Freq - COMPUTATION"): *"IF LAST_MONTH in INPUTS RA_XX is less
+   * than M361 THEN INTERPOLATION to M_361 with equal values to LAST_MONTH."* I.e. forward-fill the
+   * last observed month flat up to `months` (= [[INPUT_MONTHS]]). No-op when the series already has
+   * at least `months` points (or is empty).
+   */
+  def padForward(series: Array[Double], months: Int = INPUT_MONTHS): Array[Double] =
+    if (series.isEmpty || series.length >= months) series
+    else series ++ Array.fill(months - series.length)(series.last)
+
   sealed trait Frequency { def suffix: String; def step: Double; def coreMax: Double }
   // Quarterly carries one extra step (..50.25) vs Yearly (..50), matching the target grid.
   case object Quarterly extends Frequency { val suffix = "Q"; val step = QUARTERLY_STEP; val coreMax = FLAT_MAX_Y + QUARTERLY_STEP }
@@ -130,49 +144,58 @@ object PrimaryView {
   }
 
   /**
-   * Per-period RA detail for a non-central scenario under FWL=YES.
-   *
-   * RA_i(scen) = RA_STAT_detail_i(BASELINE) + RA_FIRE_detail_i(scen)
-   * where the FI+RE detail is linearly interpolated from BASELINE towards a STRESS leg by
-   * the macro rate delta, which is read **per period** from the scenario path (`deltaAt`):
-   *   delta_i = deltaAt(period_i)                         (signed)
-   *   leg     = STRESS(-) if delta_i < 0 else STRESS(+)   (direction of the rate move)
-   *   weight  = |delta_i| / refShock
-   *   FIRE_detail_i(scen) = FIRE_base + weight * (FIRE_leg - FIRE_base)
-   *
-   * NOTE: the exact shock scaling is the calibration point for FWL=YES (`refShock`).
-   * Both stress legs are passed in; `deltaAt` selects the leg and weight per term, so a
-   * ramping macro path naturally produces a term-varying shock.
+   * FWL=NO loss rate (business schema "… Freq - COMPUTATION", FWL=NO block, STEP 2/3):
+   *   RA_i = -RA_STAT_i / CRD_i      — **FI and RE are NOT included for FWL=NO**.
+   * Contrast `centralRa`, which is the FWL=YES Central case (STAT + FI + RE).
+   */
+  def statOnlyRa(crd: Array[Double], raStat: Array[Double], freq: Frequency): Vector[Double] =
+    computeRa(freq) { period =>
+      (for {
+        c <- aggregate(crd, period, freq, isCrd = true)
+        s <- aggregate(raStat, period, freq, isCrd = false)
+      } yield if (c == 0.0) 0.0 else -s / c
+      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+    }
+
+  /**
+   * Per-period RA detail for a non-Central scenario under FWL=YES, per the business schema
+   * (FWL=YES STEP 2/4/5). The CALLER selects the stress leg by scenario — Adverse/Extreme ->
+   * STRESS(-), Optimistic -> STRESS(+) — and passes that leg's CRD/FI/RE series. Per period:
+   * {{{
+   *   RA_STAT       = -RA_STAT_base / CRD_base
+   *   RA_FI_RE_base = -(FI_base + RE_base) / CRD_base
+   *   Shock_FI      = (-FI_leg / CRD_leg) - (-FI_base / CRD_base)     // each leg's own CRD
+   *   Shock_RE      = (-RE_leg / CRD_leg) - (-RE_base / CRD_base)
+   *   RA_FI_RE_scen = RA_FI_RE_base - (Shock_FI + Shock_RE) * delta   // delta = Rate/100
+   *   RA            = RA_STAT + RA_FI_RE_scen
+   * }}}
+   * `deltaAt(period)` is the per-term macro delta on the shock-window path: `Rate/100`, i.e. the
+   * raw `Macro(scenario) - Macro(Central)` (the schema's ×100 and the /100 here cancel).
    */
   def scenarioRa(
-                  crd: Array[Double],
-                  raStatBase: Array[Double],
+                  crdBase: Array[Double], raStatBase: Array[Double],
                   raFiBase: Array[Double], reBase: Array[Double],
-                  raFiPlus: Array[Double], rePlus: Array[Double],
-                  raFiMinus: Array[Double], reMinus: Array[Double],
+                  crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
                   freq: Frequency,
-                  deltaAt: Int => Double,
-                  refShock: Double
+                  deltaAt: Int => Double
                 ): Vector[Double] = computeRa(freq) { period =>
     (for {
-      c  <- aggregate(crd, period, freq, isCrd = true)
+      cb <- aggregate(crdBase, period, freq, isCrd = true)
       s  <- aggregate(raStatBase, period, freq, isCrd = false)
       fb <- aggregate(raFiBase, period, freq, isCrd = false)
       rb <- aggregate(reBase, period, freq, isCrd = false)
-      fp <- aggregate(raFiPlus, period, freq, isCrd = false)
-      rp <- aggregate(rePlus, period, freq, isCrd = false)
-      fm <- aggregate(raFiMinus, period, freq, isCrd = false)
-      rm <- aggregate(reMinus, period, freq, isCrd = false)
+      cl <- aggregate(crdLeg, period, freq, isCrd = true)
+      fl <- aggregate(raFiLeg, period, freq, isCrd = false)
+      rl <- aggregate(reLeg, period, freq, isCrd = false)
     } yield {
-      if (c == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
+      if (cb == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
       else {
-        val delta = deltaAt(period)
-        val (fs, rs) = if (delta < 0) (fm, rm) else (fp, rp) // leg by sign of the rate move
-        val statDetail     = -s / c
-        val fireBaseDetail = -(fb + rb) / c
-        val fireStressDet  = -(fs + rs) / c
-        val w = if (refShock == 0.0) 0.0 else math.abs(delta) / refShock
-        statDetail + fireBaseDetail + w * (fireStressDet - fireBaseDetail)
+        def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
+        val statDet     = det(s, cb)
+        val fireBaseDet = det(fb, cb) + det(rb, cb)
+        val shockFi     = det(fl, cl) - det(fb, cb)
+        val shockRe     = det(rl, cl) - det(rb, cb)
+        statDet + fireBaseDet - (shockFi + shockRe) * deltaAt(period)
       }
     }
     ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value

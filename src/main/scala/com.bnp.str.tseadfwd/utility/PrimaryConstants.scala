@@ -59,6 +59,8 @@ object PrimaryConstants {
     "Extreme"    -> "E"
   )
   final val SCENARIO_CENTRAL = "Central"
+  /** Scenario whose FWL=YES shock blends toward STRESS (+); all others (Adverse/Extreme) use STRESS (-). */
+  final val SCENARIO_OPTIMISTIC = "Optimistic"
 
   // ---- output columns ----
   final val OUT_MATRIX_ID = "EAD_MATRIX_ID"

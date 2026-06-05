@@ -38,9 +38,6 @@ class PrimaryMapper(
     if (appConf.hasPath("shock_window_start")) appConf.getString("shock_window_start") else "2021Q1"
   private val shockWindowEnd: String =
     if (appConf.hasPath("shock_window_end")) appConf.getString("shock_window_end") else "2025Q4"
-  /** Stress reference magnitude used to scale the macroData rate delta (FWL=YES calibration). */
-  private val refShock: Double =
-    if (appConf.hasPath("ref_shock")) appConf.getDouble("ref_shock") else 1.0
 
   /** Ordered list of "yyyyQq" labels from start to end inclusive. */
   private lazy val shockWindow: Vector[String] = {
@@ -77,7 +74,7 @@ class PrimaryMapper(
   }
 
   def getDataFrame: DataFrame = {
-    log.info(s"Building $OUTPUT_EAD_FWD (shockWindow=$shockWindowStart..$shockWindowEnd, refShock=$refShock)")
+    log.info(s"Building $OUTPUT_EAD_FWD (shockWindow=$shockWindowStart..$shockWindowEnd)")
 
     val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
     val ra = collectRa(raInput)
@@ -158,8 +155,10 @@ class PrimaryMapper(
     // return None, which yields an EMPTY ra_detail (-> empty trace / no output rows).
     val raFiPlus  = series(FWL_STRESS_PLUS, METRIC_RA_FI)
     val rePlus    = series(FWL_STRESS_PLUS, METRIC_RE)
+    val crdPlus   = series(FWL_STRESS_PLUS, METRIC_CRD)
     val raFiMinus = series(FWL_STRESS_MINUS, METRIC_RA_FI)
     val reMinus   = series(FWL_STRESS_MINUS, METRIC_RE)
+    val crdMinus  = series(FWL_STRESS_MINUS, METRIC_CRD)
 
     if (debug) {
       def stat(name: String, a: Array[Double]): String =
@@ -172,13 +171,18 @@ class PrimaryMapper(
 
     val ra_detail: Vector[Double] =
       if (!usesShock) {
-        centralRa(crd, raStat, raFiB, reB, freq)
+        // FWL=YES Central -> STAT+FI+RE; FWL=NO -> RA_STAT only (per the business schema).
+        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq)
+        else statOnlyRa(crd, raStat, freq)
       } else {
-        // term-varying shock: the macro delta path (vs Central) over the window selects the
-        // stress leg and weight per term; both legs are supplied to scenarioRa.
-        scenarioRa(crd, raStat, raFiB, reB,
-          raFiPlus, rePlus, raFiMinus, reMinus,
-          freq, deltaPath(macroData, scenName, m.macroVar, freq), refShock)
+        // FWL=YES non-Central: the stress leg is fixed by scenario (Optimistic -> STRESS(+);
+        // Adverse/Extreme -> STRESS(-)); the per-term macro delta (Rate/100) scales the
+        // stress-vs-baseline shock on FI+RE.
+        val (crdLeg, fiLeg, reLeg) =
+          if (scenName == SCENARIO_OPTIMISTIC) (crdPlus, raFiPlus, rePlus)
+          else (crdMinus, raFiMinus, reMinus)
+        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg,
+          freq, deltaPath(macroData, scenName, m.macroVar, freq))
       }
 
     if (ra_detail.isEmpty) {
@@ -202,7 +206,7 @@ class PrimaryMapper(
           val arr = macroDeltaArray(macroData, scenName, m.macroVar)
           if (arr.isEmpty) "0" else f"path ${arr.head}%.4f..${arr.last}%.4f"
         } else "0"
-      logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$deltaInfo, refShock=$refShock)",
+      logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$deltaInfo)",
         buildTrace(freq, crd, raStat, raFiB, reB, ra_detail, vf))
     }
 
@@ -278,7 +282,8 @@ class PrimaryMapper(
       // canon() normalizes both this map's keys and the aggregateSegments lookup tuple identically.
       def key0(i: Int): String = canon(Option(r.get(i)).map(_.toString).getOrElse(""))
       val key = (key0(0), key0(1), key0(2), key0(3))
-      val series = months.indices.map(i => toDouble(r.get(4 + i))).toArray
+      // Schema preamble (r1): forward-fill a short series flat to M361 with its last month's value.
+      val series = padForward(months.indices.map(i => toDouble(r.get(4 + i))).toArray)
       key -> series
     }.toMap
   }
@@ -530,22 +535,32 @@ class PrimaryMapper(
       .replaceAll("[^A-Z0-9+-]", "")
 
   /**
-   * Locale-tolerant numeric parse. Returns None for empty / non-numeric input.
-   * spark-excel returns cell values as strings; on a French-locale host (or for text-typed cells)
-   * they look like "-92 924,788279": spaces / non-breaking spaces (U+00A0) / narrow no-break
-   * spaces (U+202F) group the thousands and the COMMA is the decimal mark. We strip every kind of
-   * horizontal-whitespace grouping (\h) and normalise the decimal comma to a dot. Canonical numeric
-   * cells (dot, no grouping, via usePlainNumberFormat) carry no comma and pass through unchanged.
+   * Locale-tolerant, format-agnostic numeric parse. Returns None for empty / non-numeric input.
+   * spark-excel returns cell values as strings whose thousands/decimal punctuation varies by the
+   * host locale and the source file:
+   *   - French:  "-92 924,788279"  (space/NBSP grouping, COMMA decimal)
+   *   - US:      "-92,924.788279"  (COMMA grouping, DOT decimal)
+   *   - canonical (usePlainNumberFormat): "-92924.788279" (no grouping, DOT decimal)
+   * We strip every horizontal-whitespace grouping (`\h` = space / U+00A0 / U+202F), then resolve the
+   * decimal mark: when BOTH ',' and '.' are present the LAST one is the decimal and the other is
+   * grouping; a lone ',' is a decimal comma; a lone '.' is already canonical.
    */
   private def tryDouble(v: Any): Option[Double] = v match {
     case null                => None
     case d: Double           => Some(d)
     case n: java.lang.Number => Some(n.doubleValue())
     case other               =>
-      val t = other.toString.trim.replaceAll("\\h", "").replace(",", ".")
+      val t = other.toString.trim.replaceAll("\\h", "")
       if (t.isEmpty) None
       else if (t == "-" || t == "–" || t == "—") Some(0.0) // accounting / French nil -> zero
-      else try Some(t.toDouble) catch { case _: NumberFormatException => None }
+      else {
+        val lc = t.lastIndexOf(','); val ld = t.lastIndexOf('.')
+        val norm =
+          if (lc >= 0 && ld >= 0) { if (lc > ld) t.replace(".", "").replace(',', '.') else t.replace(",", "") }
+          else if (lc >= 0) t.replace(',', '.')
+          else t
+        try Some(norm.toDouble) catch { case _: NumberFormatException => None }
+      }
   }
 
   private def toDouble(v: Any): Double = tryDouble(v).getOrElse(0.0)
