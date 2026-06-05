@@ -110,7 +110,10 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryView.computeRa` (stop condition) + `termSeries` (flat fill).
 - Confirmed: [x]
 
-## Q10 — Stress leg selection (FWL=YES) ✔️ ANSWERED
+## Q10 — Stress leg selection (FWL=YES) ⚠️ SUPERSEDED by Q33 (schema)
+- **SUPERSEDED 2026-06-05:** the schema fixes the leg **by scenario** — Adverse/Extreme → STRESS(-),
+  Optimistic → STRESS(+) — **not** by the macro-delta sign. The engine now selects the leg by
+  scenario name (`PrimaryMapper.matrixRows`). The delta-sign rule below is retained for history.
 - **Needed?** Yes — there are two stress legs (`STRESS (+)`/`STRESS (-)`); the engine must
   pick which to blend toward. The sign of the scenario's rate move selects it.
 - **DECISION:** `delta < 0` → `STRESS (-)`; `delta ≥ 0` → `STRESS (+)`, where
@@ -140,7 +143,7 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   window/term-0 anchor must be re-confirmed — see **Q25**. Mechanism unchanged.
 - Confirmed: [x] (mechanism) · window anchor pending (Q25)
 
-## Q12 — `ref_shock` calibration (FWL=YES shock magnitude) ⛔
+## Q12 — `ref_shock` calibration (FWL=YES shock magnitude) ✔️ RESOLVED (schema)
 - **What it is:** the rate-shock magnitude the `STRESS (+)/(-)` legs represent;
   `weight = |delta| / ref_shock`, `fire_scen = fire_base + weight·(fire_stress − fire_base)`.
 - **Calibration attempt (against target, MORTGAGE_Q Optimistic):** backed out the implied
@@ -157,7 +160,13 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **UPDATE 2026-06-04:** corrected inputs (`Inputs_RA_v2.xlsx` + `Scenario_EAD_FWD.xlsx`) have now
   arrived, so the calibration *can* be re-run — **but** it needs a trusted reference output, which
   the current target may not be (see status note). Blocked on a trusted target, not on inputs.
-- Confirmed value: ____________ (pending a trusted reference output)
+- **RESOLVED 2026-06-05 (`Schema_EAD_FWD_20260601_v4.xlsx`):** there is **no `ref_shock` knob**. The
+  schema fixes the shock magnitude as `RA_FI_RE_scen = RA_FI_RE_base − (ShockFI+ShockRE)·Rate/100`,
+  where `Rate = (Macro_scen − Macro_Central)·100`, i.e. the magnitude is the per-term macro delta
+  times the stress-vs-baseline detail difference. `ref_shock` removed from the engine
+  (`scenarioRa` no longer takes it). The remaining judgement is the ×`Rate/100` itself — see the
+  interpretation note in Q33.
+- Confirmed: [x] (magnitude defined by the schema; no calibration parameter)
 
 ## Q13 — Macro-delta scaling (×100?) ✔️ ANSWERED
 - **Spec STEP 3:** `Rate = (MACRO_scen − MACRO_central) × 100`.
@@ -174,7 +183,7 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   (`"Secto" -> "S"` in the scenario-code map) once Secto data exists.
 - Confirmed: [ ]
 
-## Q15 — Adverse vs Extreme differentiation ⛔
+## Q15 — Adverse vs Extreme differentiation ✔️ RESOLVED
 - **Finding:** in the current scenario file Adverse and Extreme are **byte-identical** at every
   quarter and macro variable, so the engine cannot produce distinct A vs E.
 - **Evidence (BCEF_MORTGAGE_Q):**
@@ -195,7 +204,8 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   MORTGAGE diverge across all four scenarios). Note the new file makes Extreme's `|delta|`
   **larger** than Adverse's (Extreme further from Central ⇒ more loss) — the opposite of the old
   *sample-target* hint above, which is moot now the target is under review.
-- Confirmed: [x] (engine produces distinct A vs E from the new file; magnitude still tied to Q12)
+- Confirmed: [x] (engine produces distinct A vs E from the new file; magnitude now fixed by the
+  schema's `Rate/100`, no `ref_shock` — Q12. Verified: term-10 INVEST C/O/A/E all distinct.)
 
 ## Q16 — Output number format ✔️ ANSWERED
 - **DECISION (user): confirmed.** `;` delimiter, decimal **comma**, `EAD_RA_RATE` half-up at
@@ -390,35 +400,37 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
   depend on a hand-patched file.
 - Confirmed: [ ]
 
-## Q32 — Ticket FWL=NO STEP 3: `DET RA FI` / `DET RE` computed but not used ⚠️ NEW (ticket defect)
-- **Finding (ticket cases 1 & 2, FWL=NO):** STEP 2 computes three details — `DET RA STAT_Qi`,
-  `DET RA FI_Qi`, `DET RE_Qi` (ticket lines 80–84) — but STEP 3 builds the vector from **only** RA STAT:
-  `VECTOR_RA_Qi = 1 − DET RA STAT_Qi` (line 90). As written, `DET RA FI` and `DET RE` are dead
+## Q32 — FWL=NO uses RA STAT only (FI/RE excluded) ✔️ RESOLVED (schema)
+- **Finding (ticket cases 1 & 2, FWL=NO):** STEP 2 computes three details but STEP 3 builds the
+  vector from **only** RA STAT (`VECTOR = 1 − DET RA STAT`); `DET RA FI`/`DET RE` looked like dead
   calculations.
-- **Engine / target:** the value that reproduces the target sums all three (Q6):
-  `RA = −(RA_STAT + RA_FI + RE) / CRD`, i.e. `VECTOR = 1 − (DET RA STAT + DET RA FI + DET RE)`.
-- **Ask:** confirm STEP 3 should be `VECTOR = 1 − (DET RA STAT + DET RA FI + DET RE)` (all three details
-  are part of the loss rate), not RA STAT alone. The engine already does this; this is a **ticket-text**
-  correction.
-- **Code:** `PrimaryView.centralRa`. **Related:** Q6.
-- Confirmed: [ ]
+- **RESOLVED 2026-06-05 (`Schema_EAD_FWD_20260601_v4.xlsx`, FWL=NO block STEP 2/3):** the schema is
+  explicit — for **FWL=NO** the loss rate is **`RA = −RA_STAT/CRD`**; FI and RE are aggregated but
+  **not** included. So the ticket's STEP 3 was correct, and the engine's old `centralRa` (which
+  always added FI+RE) was **wrong for FWL=NO**. It went unnoticed because the sample/target only has
+  BCEF (all FWL=YES, where FI+RE *are* included).
+- **Fix:** added `PrimaryView.statOnlyRa` (`−RA_STAT/CRD`); `matrixRows` now routes FWL=NO →
+  `statOnlyRa`, FWL=YES Central → `centralRa` (STAT+FI+RE). Unit-tested.
+- **Code:** `PrimaryView.statOnlyRa`, `PrimaryMapper.matrixRows`. **Related:** Q6.
+- Confirmed: [x]
 
-## Q33 — Ticket FWL=YES STEP 4/5: scenario FI+RE detail undefined; `(CENTRAL)` base + missing sign ⚠️ NEW (ticket defect)
-- **Finding (ticket cases 3 & 4, FWL=YES):**
-  1. STEP 4 defines `RA FI RE_Qi (CENTRAL)` **only** (line 212–213); STEP 5 (line 219) then consumes
-     `RA FI RE_Qi (SCENARIO)` — but the **shocked** FI+RE detail for Adverse/Optimistic/Extreme is
-     **never defined** in the ticket.
-  2. The shock **base** should be labelled `(CENTRAL)`, not `(BASELINE)`. They are the *same value*
-     (Central applies no shock, so its FI+RE detail is built from the BASELINE input leg) — but
-     `BASELINE` is a `FWL_TYPE` *input leg* whereas `CENTRAL` is the *scenario*; use `(CENTRAL)` for
-     clarity and consistency with STEP 4/5.
-  3. `RA FI RE (CENTRAL)` (line 213) is **missing the leading minus** that `RA STAT` has (line 210):
-     it should read `−[RA FI_base + RE_base] / CRD_base`.
-- **Engine:** `scenarioRa` defines the scenario detail as `fireBase + weight·(fireStress − fireBase)`,
-  with `fireBase = −(RA_FI_base + RE_base)/CRD_base` (= the Central detail) and the leg chosen by the
-  sign of the macro delta (Q10).
-- **Ask:** confirm the explicit scenario FI+RE formula (Central detail adjusted by the stress-leg
-  shock), the `(CENTRAL)` base label, and the leading minus sign.
-- **Related:** Q6 (core formula), Q10 (leg selection), Q17 ("no difference between scenarios"
-  copy-paste), Q26 (shock / FI-RE behaviour).
-- Confirmed: [ ]
+## Q33 — FWL=YES scenario FI+RE shock formula ✔️ RESOLVED (schema)
+- **Finding (ticket):** the shocked `RA FI RE (SCENARIO)` for A/O/E was never explicitly defined;
+  the base label and the leading minus sign were ambiguous.
+- **RESOLVED 2026-06-05 (`Schema_EAD_FWD_20260601_v4.xlsx`, FWL=YES STEP 2/4/5):** the schema gives
+  the full formula, now implemented in `PrimaryView.scenarioRa`:
+  ```
+  Shock_FI(leg)  = (-FI_leg/CRD_leg) - (-FI_base/CRD_base)      # each leg's OWN CRD (STEP 2)
+  RA_FI_RE_base  = -(FI_base + RE_base)/CRD_base                # leading minus confirmed (STEP 4)
+  RA_FI_RE_scen  = RA_FI_RE_base - (Shock_FI + Shock_RE)*Rate/100
+  RA             = RA_STAT_base + RA_FI_RE_scen                 # RA_STAT always baseline (STEP 5)
+  ```
+  - **Leg is fixed by scenario** (Adverse/Extreme → STRESS(-), Optimistic → STRESS(+)), **not** by
+    the macro-delta sign — this **supersedes Q10**.
+  - The base is the BASELINE-leg detail (schema labels it `(BASELINE)`; = the Central detail).
+- **One interpretation (flagged):** the schema's STEP 4 cells show the shock *without* `Rate`, while
+  STEP 3 computes it. The engine multiplies by `Rate/100` (so Adverse ≠ Extreme and the magnitude
+  follows the macro path; no `ref_shock` — Q12). Confirm the business intends `×Rate/100`.
+- **Code:** `PrimaryView.scenarioRa`, `PrimaryMapper.matrixRows`. **Related:** Q6, Q10 (superseded),
+  Q12, Q15, Q17.
+- Confirmed: [x] (formula implemented; `×Rate/100` interpretation pending business confirmation)

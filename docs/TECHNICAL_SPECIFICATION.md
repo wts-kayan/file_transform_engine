@@ -130,10 +130,15 @@ one clean file. The decimal comma is safe because the field delimiter is `;`
 
 ## 4. Arithmetic rules — complete reference
 
-This is the full set of computations the engine performs, in order. Notation: monthly
-inputs `M1…M361` (1-based); period `p` (1-based); `term = (p-1)·step` with `step = 0.25`
+This is the full set of computations the engine performs, in order — mirroring the business
+schema `docs/Schema_EAD_FWD_20260601_v4.xlsx` ("Quaterly / Annual Freq - COMPUTATION"). Notation:
+monthly inputs `M1…M361` (1-based); period `p` (1-based); `term = (p-1)·step` with `step = 0.25`
 (Quarterly) or `1.0` (Yearly). All inputs are read from the **BASELINE** leg unless a
 **STRESS (+)/(-)** leg is named.
+
+**Preamble (schema r1) — input length:** if a monthly series is shorter than `M361`, it is
+**forward-filled** flat with its last month's value up to `M361` (`PrimaryView.padForward`) before
+any aggregation.
 
 ### 4.1 Segment aggregation (before period aggregation)
 For an aggregated matrix (e.g. `INVEST = INVEST_PRO + INVEST_CORP`), each metric's monthly
@@ -158,20 +163,29 @@ series_metric[m] = Σ_segment  RA[(segment, rateType, fwl, metric)][m]      (m =
 `1..361`; otherwise the period is `None` (the series stops — see §4.6).
 
 ### 4.3 Per-period loss rate `RA`
-**Central scenario, and every scenario when FWL=NO** (`centralRa`):
+**FWL=NO** (`statOnlyRa`) — RA_STAT only; FI and RE are **not** included:
+```
+RA_p = -RA_STAT_p / CRD_p
+```
+**FWL=YES, Central scenario** (`centralRa`):
 ```
 RA_p = -(RA_STAT_p + RA_FI_p + RE_p) / CRD_p
 ```
-**Non-Central scenario when FWL=YES** (`scenarioRa`) — only FI+RE are shocked, RA_STAT stays baseline:
+**FWL=YES, non-Central scenario** (`scenarioRa`) — RA_STAT stays baseline; only FI+RE are shocked.
+The stress leg is fixed by scenario: **Adverse/Extreme → STRESS(-)**, **Optimistic → STRESS(+)**:
 ```
-delta_p    = deltaAt(p)                         (signed macro delta, §4.4)
-leg        = STRESS(-) if delta_p < 0 else STRESS(+)
-statDetail = -RA_STAT_base_p / CRD_p
-fireBase   = -(RA_FI_base_p + RE_base_p) / CRD_p
-fireStress = -(RA_FI_leg_p  + RE_leg_p ) / CRD_p
-w          = |delta_p| / ref_shock              (0 if ref_shock = 0)
-RA_p       = statDetail + fireBase + w·(fireStress - fireBase)
+det(x, c)     = if c == 0 then 0 else -x / c
+RA_STAT       = det(RA_STAT_base, CRD_base)
+RA_FI_RE_base = det(FI_base, CRD_base) + det(RE_base, CRD_base)          # = -(FI+RE)/CRD_base
+Shock_FI      = det(FI_leg, CRD_leg) - det(FI_base, CRD_base)            # each leg's OWN CRD
+Shock_RE      = det(RE_leg, CRD_leg) - det(RE_base, CRD_base)
+RA_FI_RE_scen = RA_FI_RE_base - (Shock_FI + Shock_RE) · delta_p          # delta = Rate/100 (§4.4)
+RA_p          = RA_STAT + RA_FI_RE_scen
 ```
+> **One interpretation (flagged):** the schema's STEP 4 cells show the shock *without* the `Rate`
+> factor, while STEP 3 computes `Rate`. The engine multiplies by `delta = Rate/100`, so Adverse ≠
+> Extreme and the magnitude follows the macro path (matches the agreed formula; there is no
+> `ref_shock` knob). See OPEN_QUESTIONS Q12/Q15/Q33.
 
 ### 4.4 Macro delta path (FWL=YES)  `macroDeltaArray` / `deltaPath`
 ```
@@ -179,7 +193,8 @@ shockWindow      = ordered quarters [shock_window_start .. shock_window_end]
 macroDeltaArray  = [ MACRO[scenario][q] - MACRO[Central][q]  for q in shockWindow ]   (missing → 0)
 deltaPath(p)     = macroDeltaArray[ min((p-1)·s, len-1) ]      s = 1 (Q) or 4 (Y); empty → 0
 ```
-Term 0 = window start; the last delta is **held flat** for periods past the window end.
+Term 0 = window start; the last delta is **held flat** for periods past the window end. This raw
+delta is the schema's `Rate/100` (the STEP 3 ×100 and the §4.3 /100 cancel).
 
 ### 4.5 Run-off guards  (when the exposure has amortized)
 1. **Exact zero (spec):** `if CRD_p == 0 → RA_p = 0` (`VECTOR = 1`), avoiding `0/0`.
