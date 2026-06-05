@@ -1,7 +1,11 @@
 package com.bnp.str.tseadfwd.job
 
+import com.bnp.str.tseadfwd.utility.PrimaryConstants
+import com.typesafe.config.ConfigFactory
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+
+import java.io.File
 
 /**
  * Spark job that compares an EAD FWD output CSV against the target CSV and reports the
@@ -10,14 +14,14 @@ import org.apache.spark.sql.functions._
  * Both files are `;`-delimited with a decimal comma; the join key is
  * (EAD_MATRIX_ID, SCENARIO_ID, TERM) and EAD_RA_RATE is compared numerically.
  *
- * Args (all optional):
- *   0 outputPath   default localRun/tseadfwd/output/TS_EAD_FWD_25Q4_v1_small.csv
- *   1 targetPath   default localRun/tseadfwd/target_output/TS_EAD_FWD_25Q4_v1_small.csv
- *   2 stripRateType  default true  — drop the RATE_TYPE token from the output id
- *                                    (PERIMETER_SEGMENT_TF_Q -> PERIMETER_SEGMENT_Q) so it
- *                                    aligns with a target that omits RATE_TYPE
- *   3 tol          default 1e-6   — abs-error threshold counted as "matching"
- *   4 comparePath  default localRun/tseadfwd/output/COMPARE_TS_EAD_FWD.csv — per-key result CSV
+ * Single argument: the path to `application.conf`. All parameters are read from the
+ * `tseadfwd_app.COMPARE` block:
+ *   outputPath    — the EAD FWD output CSV to check
+ *   targetPath    — the reference CSV to compare against
+ *   stripRateType — drop the RATE_TYPE token from the output id (BCEF_CONSO_TF_Q ->
+ *                   BCEF_CONSO_Q) so it aligns with a target that omits RATE_TYPE
+ *   tol           — abs-error threshold counted as "matching"
+ *   comparePath   — per-key result CSV to write
  *
  * Besides the console report, writes a single `;`-delimited, decimal-comma CSV of every joined key
  * (EAD_MATRIX_ID;SCENARIO_ID;TERM;OUTPUT;TARGET;ABS_ERROR;STATUS) where STATUS ∈
@@ -26,11 +30,15 @@ import org.apache.spark.sql.functions._
 object EadFwdCompare {
 
   def main(args: Array[String]): Unit = {
-    val outputPath = args.lift(0).getOrElse("localRun/tseadfwd/output/TS_EAD_FWD_25Q4_v1_small.csv")
-    val targetPath = args.lift(1).getOrElse("localRun/tseadfwd/target_output/TS_EAD_FWD_25Q4_v1_small.csv")
-    val stripRateType = args.lift(2).forall(_.toBoolean) // default true
-    val tol = args.lift(3).map(_.toDouble).getOrElse(1e-6)
-    val comparePath = args.lift(4).getOrElse("localRun/tseadfwd/output/COMPARE_TS_EAD_FWD.csv")
+    val confPath = args.lift(0).getOrElse("localRun/tseadfwd/application.conf")
+    val cfg = ConfigFactory.parseFile(new File(confPath)).resolve()
+      .getConfig(s"${PrimaryConstants.APP_CONF}.COMPARE")
+
+    val outputPath    = cfg.getString("outputPath")
+    val targetPath    = cfg.getString("targetPath")
+    val stripRateType = cfg.getBoolean("stripRateType")
+    val tol           = cfg.getDouble("tol")
+    val comparePath   = cfg.getString("comparePath")
 
     val spark = SparkSession.builder()
       .appName("ead-fwd-compare").master("local[*]")
