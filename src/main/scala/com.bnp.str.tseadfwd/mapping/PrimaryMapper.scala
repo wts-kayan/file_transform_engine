@@ -3,7 +3,7 @@ package com.bnp.str.tseadfwd.mapping
 import com.bnp.str.tseadfwd.common.MapperProvider
 import com.bnp.str.tseadfwd.mapping.PrimaryView._
 import com.bnp.str.tseadfwd.utility.PrimaryConstants._
-import com.bnp.str.tseadfwd.validation.{ControlCheck, DataControl, Severity}
+import com.bnp.str.tseadfwd.validation.{ControlCheck, DataControlView, Severity}
 import com.typesafe.config.Config
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
@@ -138,7 +138,7 @@ class PrimaryMapper(
 
   /**
    * Term-0 (period 1) computation breakdown per (matrix, scenario), for the analysis generator job
-   * ([[com.bnp.str.tseadfwd.job.Term0Analysis]]). Reuses the SAME validated input parsing
+   * ([[com.bnp.str.tseadfwd.job.Term0AnalysisDriver]]). Reuses the SAME validated input parsing
    * (`collectRa` / `collectScenario` / `parseParametrage`) and [[PrimaryView]] formula core as
    * [[getDataFrame]], so every number matches the production output AT TERM 0 by construction.
    *
@@ -146,7 +146,7 @@ class PrimaryMapper(
    * A matrix/scenario whose first-period aggregation window is empty (no RA data, or a missing
    * FWL=YES stress leg) is silently dropped — exactly as `matrixRows` emits no rows for it.
    */
-  def term0AnalysisRows(freq: Frequency = Quarterly): Seq[Term0Row] = {
+  def term0AnalysisRows(freq: Frequency = Quarterly): Seq[Term0RowView] = {
     val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
     val ra = collectRa(raInput)
     val macroData = collectScenario(scenario)
@@ -164,7 +164,7 @@ class PrimaryMapper(
                         m: MatrixDef, freq: Frequency, scenName: String, scenCode: String,
                         ra: Map[(String, String, String, String), Array[Double]],
                         macroData: Map[(String, String), Map[String, Double]]
-                      ): Option[Term0Row] = {
+                      ): Option[Term0RowView] = {
     def series(fwl: String, metric: String): Array[Double] =
       aggregateSegments(ra, m.segments, m.rateType, fwl, metric)
 
@@ -197,7 +197,7 @@ class PrimaryMapper(
       PrimaryView.aggregate(a, 1, freq, isCrd).getOrElse(Double.NaN)
     val delta0 = if (usesShock) deltaPath(macroData, scenName, m.macroVar, freq)(1) else 0.0
 
-    Some(Term0Row(
+    Some(Term0RowView(
       matrixId = m.matrixId(freq), scenarioName = scenName, scenarioCode = scenCode,
       fwlApplied = m.fwlApplied, macroVar = m.macroVar, usesShock = usesShock,
       segments = m.segments, rateType = m.rateType,
@@ -391,7 +391,7 @@ class PrimaryMapper(
                             ): Unit = {
     val checks = buildControlChecks(ra, macroData, matrices)
 
-    val report = DataControl.renderReport(checks)
+    val report = DataControlView.renderReport(checks)
     if (checks.exists(_.failed)) log.error("\n" + report)
     else if (checks.exists(_.warned)) log.warn("\n" + report)
     else log.info("\n" + report)
@@ -400,7 +400,7 @@ class PrimaryMapper(
       val outCfg = appConf.getConfig(OUTPUT_EAD_FWD)
       val dir = if (outCfg.hasPath("tmpPath")) outCfg.getString("tmpPath") else "."
       val tbl = if (outCfg.hasPath("tableName")) outCfg.getString("tableName") else OUTPUT_EAD_FWD
-      val path = DataControl.writeCsv(dir, s"DATA_CONTROL_$tbl.csv", checks)
+      val path = DataControlView.writeCsv(dir, s"DATA_CONTROL_$tbl.csv", checks)
       log.info(s"DATA CONTROL report written to $path")
     } catch {
       case e: Throwable => log.warn(s"Could not write DATA CONTROL report file: ${e.getMessage}")

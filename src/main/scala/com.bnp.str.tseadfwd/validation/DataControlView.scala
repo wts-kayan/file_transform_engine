@@ -23,7 +23,7 @@ final case class ControlCheck(name: String, severity: String, detail: String) {
 }
 
 /** Rendering + persistence of the consolidated DATA CONTROL report. */
-object DataControl {
+object DataControlView {
 
   /** Multi-line, log-friendly report block. */
   def renderReport(checks: Seq[ControlCheck]): String = {

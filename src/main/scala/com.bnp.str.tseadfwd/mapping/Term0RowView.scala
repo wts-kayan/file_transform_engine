@@ -3,7 +3,7 @@ package com.bnp.str.tseadfwd.mapping
 /**
  * One Term-0 (period 1) computation breakdown for a single (matrix, scenario), produced by
  * [[PrimaryMapper.term0AnalysisRows]] and consumed by the analysis generator job
- * ([[com.bnp.str.tseadfwd.job.Term0Analysis]]).
+ * ([[com.bnp.str.tseadfwd.job.Term0AnalysisDriver]]).
  *
  * Term 0 maps to the first quarter Q1 (Quarterly) — the aggregation uses `Q1 = M1 + M2/2` for the
  * RA metrics and `mean(M1,M2,M3)` for CRD (see [[PrimaryView.aggregate]]). For the Central scenario
@@ -14,7 +14,7 @@ package com.bnp.str.tseadfwd.mapping
  * Every numeric field is computed through the same validated parsing + [[PrimaryView]] formulas as
  * the production output, so `ead0` equals the production `EAD_RA_RATE` at TERM 0.
  */
-case class Term0Row(
+case class Term0RowView(
                      matrixId: String,
                      scenarioName: String,
                      scenarioCode: String,
