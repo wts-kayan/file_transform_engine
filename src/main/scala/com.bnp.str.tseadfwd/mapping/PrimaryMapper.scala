@@ -136,6 +136,82 @@ class PrimaryMapper(
     sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(rows, 1), schema)
   }
 
+  /**
+   * Term-0 (period 1) computation breakdown per (matrix, scenario), for the analysis generator job
+   * ([[com.bnp.str.tseadfwd.job.Term0Analysis]]). Reuses the SAME validated input parsing
+   * (`collectRa` / `collectScenario` / `parseParametrage`) and [[PrimaryView]] formula core as
+   * [[getDataFrame]], so every number matches the production output AT TERM 0 by construction.
+   *
+   * Default frequency is Quarterly (Term 0 = Q1), matching `docs/ANALYSIS_TERM0_COMPUTATION.md`.
+   * A matrix/scenario whose first-period aggregation window is empty (no RA data, or a missing
+   * FWL=YES stress leg) is silently dropped — exactly as `matrixRows` emits no rows for it.
+   */
+  def term0AnalysisRows(freq: Frequency = Quarterly): Seq[Term0Row] = {
+    val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
+    val ra = collectRa(raInput)
+    val macroData = collectScenario(scenario)
+    val matrices = parseParametrage(parametrage, perimeters)
+
+    for {
+      m                    <- matrices
+      (scenName, scenCode) <- SCENARIO_CODES
+      row                  <- term0Row(m, freq, scenName, scenCode, ra, macroData)
+    } yield row
+  }
+
+  /** Build the Term-0 breakdown for one matrix / scenario, or None if there are no rows to compute. */
+  private def term0Row(
+                        m: MatrixDef, freq: Frequency, scenName: String, scenCode: String,
+                        ra: Map[(String, String, String, String), Array[Double]],
+                        macroData: Map[(String, String), Map[String, Double]]
+                      ): Option[Term0Row] = {
+    def series(fwl: String, metric: String): Array[Double] =
+      aggregateSegments(ra, m.segments, m.rateType, fwl, metric)
+
+    val crd    = series(FWL_BASELINE, METRIC_CRD)
+    val raStat = series(FWL_BASELINE, METRIC_RA_STAT)
+    val raFiB  = series(FWL_BASELINE, METRIC_RA_FI)
+    val reB    = series(FWL_BASELINE, METRIC_RE)
+    if (crd.isEmpty) return None
+
+    val usesShock = m.fwlApplied && scenName != SCENARIO_CENTRAL
+    // Stress leg fixed by scenario (Optimistic -> STRESS(+); Adverse/Extreme -> STRESS(-)), as in matrixRows.
+    val (crdLeg, fiLeg, reLeg) =
+      if (scenName == SCENARIO_OPTIMISTIC)
+        (series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE))
+      else
+        (series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE))
+
+    val raDetail: Vector[Double] =
+      if (!usesShock) {
+        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
+      } else {
+        val mult: Int => Double =
+          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq) else (_ => 1.0)
+        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
+      }
+    if (raDetail.isEmpty) return None
+
+    val vf = vectorFactored(raDetail)
+    def agg(a: Array[Double], isCrd: Boolean): Double =
+      PrimaryView.aggregate(a, 1, freq, isCrd).getOrElse(Double.NaN)
+    val delta0 = if (usesShock) deltaPath(macroData, scenName, m.macroVar, freq)(1) else 0.0
+
+    Some(Term0Row(
+      matrixId = m.matrixId(freq), scenarioName = scenName, scenarioCode = scenCode,
+      fwlApplied = m.fwlApplied, macroVar = m.macroVar, usesShock = usesShock,
+      segments = m.segments, rateType = m.rateType,
+      crdMonths = crd.take(3).toSeq, statMonths = raStat.take(3).toSeq,
+      fiMonths = raFiB.take(3).toSeq, reMonths = reB.take(3).toSeq,
+      crdQ1 = agg(crd, isCrd = true), statQ1 = agg(raStat, isCrd = false),
+      fiQ1 = agg(raFiB, isCrd = false), reQ1 = agg(reB, isCrd = false),
+      legCrdQ1 = if (usesShock) agg(crdLeg, isCrd = true) else Double.NaN,
+      legFiQ1  = if (usesShock) agg(fiLeg, isCrd = false) else Double.NaN,
+      legReQ1  = if (usesShock) agg(reLeg, isCrd = false) else Double.NaN,
+      delta0 = delta0, ra0 = raDetail.head, vector0 = 1.0 - raDetail.head, ead0 = vf.head
+    ))
+  }
+
   /** Compute the term-structure rows for one matrix / frequency / scenario. */
   private def matrixRows(
                           m: MatrixDef,
