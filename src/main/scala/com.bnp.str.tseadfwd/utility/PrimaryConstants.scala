@@ -43,6 +43,8 @@ object PrimaryConstants {
   final val COL_AGG_SEGMENT_NAME = "AGGREGATED_SEGMENT_NAME"
   final val COL_FWL_TO_BE_APPLIED = "FWL_TO_BE_APPLIED"
   final val COL_MACRO_VARIABLE = "MACRO_VARIABLE"
+  /** Per-matrix projection horizon (relative, e.g. "3Y" / "12Q"); drives the shock-window end. */
+  final val COL_PROJECTION_HORIZON = "PROJECTION_HORIZON"
 
   final val YES = "YES"
   final val NO = "NO"

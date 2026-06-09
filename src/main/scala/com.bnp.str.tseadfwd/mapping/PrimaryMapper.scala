@@ -33,11 +33,19 @@ class PrimaryMapper(
   private val log = LoggerFactory.getLogger(this.getClass)
 
   private val appConf = config.getConfig(APP_CONF)
-  /** FWL=YES shock reads the scenario macro path over this window (term 0 = start, step 1Q). */
-  private val shockWindowStart: String =
-    if (appConf.hasPath("shock_window_start")) appConf.getString("shock_window_start") else "2021Q1"
-  private val shockWindowEnd: String =
-    if (appConf.hasPath("shock_window_end")) appConf.getString("shock_window_end") else "2025Q4"
+  /**
+   * Projection start quarter = term 0 (the as-of date). The FWL=YES shock reads the scenario macro
+   * path from here, one step per quarter. (Renamed from `shock_window_start`.)
+   */
+  private val asOfDateQuarter: String =
+    if (appConf.hasPath("as_of_date_quarter")) appConf.getString("as_of_date_quarter") else "2021Q1"
+  /**
+   * Fallback last quarter of the projection horizon, used ONLY when a matrix's PARAMETRAGE
+   * `PROJECTION_HORIZON` cell is blank/unparseable. Normally each matrix's shock-window end is
+   * derived as `as_of_date_quarter + PROJECTION_HORIZON` (e.g. "3Y"). (Renamed from `shock_window_end`.)
+   */
+  private val lastQuarterProjectionHorizon: String =
+    if (appConf.hasPath("last_quarter_projection_horizon")) appConf.getString("last_quarter_projection_horizon") else "2025Q4"
 
   /**
    * FWL=YES scenario shock scaling (schema interpretation toggle, default true):
@@ -49,11 +57,48 @@ class PrimaryMapper(
   private val applyRateToShock: Boolean =
     if (appConf.hasPath("apply_rate_to_shock")) appConf.getBoolean("apply_rate_to_shock") else true
 
+  /** Quarter "yyyyQq" -> ordinal (quarters since year 0); inverse is [[qLabel]]. */
+  private def qOrd(q: String): Int = { val p = q.split("Q"); p(0).trim.toInt * 4 + (p(1).trim.toInt - 1) }
+  private def qLabel(o: Int): String = s"${o / 4}Q${o % 4 + 1}"
+
   /** Ordered list of "yyyyQq" labels from start to end inclusive. */
-  private lazy val shockWindow: Vector[String] = {
-    def ord(q: String): Int = { val p = q.split("Q"); p(0).toInt * 4 + (p(1).toInt - 1) }
-    (ord(shockWindowStart) to ord(shockWindowEnd)).map { o => s"${o / 4}Q${o % 4 + 1}" }.toVector
+  private def quartersBetween(startQ: String, endQ: String): Vector[String] =
+    (qOrd(startQ) to qOrd(endQ)).map(qLabel).toVector
+
+  /**
+   * Parse a PROJECTION_HORIZON cell into a number of QUARTERS to offset from the as-of date:
+   * "3Y" -> 12, "12Q" -> 12, a bare number -> years. None when blank or non-numeric.
+   */
+  private def parseHorizonQuarters(h: String): Option[Int] = {
+    val t = h.trim.toUpperCase
+    if (t.isEmpty) None
+    else {
+      val (numPart, isYears) =
+        if (t.endsWith("Y")) (t.dropRight(1), true)
+        else if (t.endsWith("Q")) (t.dropRight(1), false)
+        else (t, true) // bare number -> years
+      try { val n = numPart.trim.toInt; Some(if (isYears) n * 4 else n) }
+      catch { case _: NumberFormatException => None }
+    }
   }
+
+  /**
+   * The shock-window quarters for a matrix: from `as_of_date_quarter` to the projection-horizon end
+   * INCLUSIVE. The end is `as_of + PROJECTION_HORIZON` (e.g. as-of 2025Q4 + "3Y" -> 2028Q4) when the
+   * PARAMETRAGE column carries a value; otherwise it falls back to the
+   * `last_quarter_projection_horizon` config quarter.
+   */
+  private def shockWindowFor(projectionHorizon: String): Vector[String] = {
+    val endQ = parseHorizonQuarters(projectionHorizon) match {
+      case Some(qs) => qLabel(qOrd(asOfDateQuarter) + qs)
+      case None     => lastQuarterProjectionHorizon
+    }
+    quartersBetween(asOfDateQuarter, endQ)
+  }
+
+  /** Union of every FWL=YES matrix's shock window (for the data-control coverage check / debug), ascending. */
+  private def allShockQuarters(matrices: Seq[MatrixDef]): Vector[String] =
+    matrices.filter(_.fwlApplied).flatMap(m => shockWindowFor(m.projectionHorizon)).distinct.sortBy(qOrd).toVector
   /** When true, log a titled `show()` of the inputs and a full per-term trace per matrix. */
   private val debug: Boolean =
     if (appConf.hasPath("debug")) appConf.getBoolean("debug") else false
@@ -75,7 +120,8 @@ class PrimaryMapper(
                                 rateType: String,
                                 segments: Seq[String], // constituent RA segments (>1 when aggregated)
                                 fwlApplied: Boolean,
-                                macroVar: String
+                                macroVar: String,
+                                projectionHorizon: String // e.g. "3Y"; drives the shock-window end (blank -> config fallback)
                               ) {
     def matrixId(freq: Frequency): String =
       // Join only the non-empty parts so a blank RATE_TYPE (e.g. BPLS numeric segments) yields
@@ -84,7 +130,7 @@ class PrimaryMapper(
   }
 
   def getDataFrame: DataFrame = {
-    log.info(s"Building $OUTPUT_EAD_FWD (shockWindow=$shockWindowStart..$shockWindowEnd)")
+    log.info(s"Building $OUTPUT_EAD_FWD (as_of=$asOfDateQuarter; shock-window end per PARAMETRAGE PROJECTION_HORIZON, fallback $lastQuarterProjectionHorizon)")
 
     val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
     val ra = collectRa(raInput)
@@ -106,8 +152,8 @@ class PrimaryMapper(
       log.info(s"PARSED - RA keys (${ra.size}):\n  " + keyLines.mkString("\n  "))
 
       logShow("INPUT - PARAMETRAGE", parametrage)
-      logShow("INPUT - MACRO_VARIABLE (scenario, shock window)",
-        scenario.where(s"$COL_SCEN_DATE IN (${shockWindow.map(q => s"'$q'").mkString(",")})"))
+      logShow("INPUT - MACRO_VARIABLE (scenario, union of shock windows)",
+        scenario.where(s"$COL_SCEN_DATE IN (${allShockQuarters(matrices).map(q => s"'$q'").mkString(",")})"))
       // M1..Mn are MONTHLY columns (METRIC is the separate key column). The full series is
       // used by collectRa; here we only preview the first/last 3 months to keep the table readable.
       val allMonths = monthColumns(raInput)
@@ -197,14 +243,14 @@ class PrimaryMapper(
         if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
       } else {
         val mult: Int => Double =
-          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq) else (_ => 1.0)
+          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
         scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
       }
     if (raDetail.isEmpty) return Seq.empty
 
     val vf = vectorFactored(raDetail)
     // Macro delta path (raw Rate/100 per term); only meaningful for an FWL=YES non-Central scenario.
-    val deltaFn = deltaPath(macroData, scenName, m.macroVar, freq)
+    val deltaFn = deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon))
     def agg(a: Array[Double], p: Int, isCrd: Boolean): Double =
       PrimaryView.aggregate(a, p, freq, isCrd).getOrElse(Double.NaN)
 
@@ -293,7 +339,7 @@ class PrimaryMapper(
         // Shock multiplier: Rate/100 (per-term macro delta) when applyRateToShock, else 1.0 (full
         // shock, literal STEP-4 reading). See OPEN_QUESTIONS Q33.
         val mult: Int => Double =
-          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq) else (_ => 1.0)
+          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
         scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
       }
 
@@ -315,7 +361,7 @@ class PrimaryMapper(
     if (debug && (scenName == SCENARIO_CENTRAL || m.fwlApplied)) {
       val deltaInfo =
         if (m.fwlApplied && scenName != SCENARIO_CENTRAL) {
-          val arr = macroDeltaArray(macroData, scenName, m.macroVar)
+          val arr = macroDeltaArray(macroData, scenName, m.macroVar, shockWindowFor(m.projectionHorizon))
           if (arr.isEmpty) "0" else f"path ${arr.head}%.4f..${arr.last}%.4f"
         } else "0"
       logShow(s"TRACE - ${m.matrixId(freq)} / $scenCode  (delta=$deltaInfo)",
@@ -352,26 +398,27 @@ class PrimaryMapper(
     sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(rows, 1), schema)
   }
 
-  /** Signed macro delta (scenario - Central) for `macroVar` at each quarter of the shock window. */
+  /** Signed macro delta (scenario - Central) for `macroVar` at each quarter of the given shock window. */
   private def macroDeltaArray(
                                macroData: Map[(String, String), Map[String, Double]],
-                               scenName: String, macroVar: String
+                               scenName: String, macroVar: String, window: Vector[String]
                              ): Array[Double] =
-    shockWindow.map { q =>
+    window.map { q =>
       def v(scen: String): Double = macroData.get((scen, q)).flatMap(_.get(macroVar)).getOrElse(0.0)
       v(scenName) - v(SCENARIO_CENTRAL)
     }.toArray
 
   /**
-   * Maps a 1-based projection period to its macro delta on the window path:
+   * Maps a 1-based projection period to its macro delta on the shock-window path:
    * term 0 = window start, step 1 quarter (quarterly) or 1 year = 4 quarters (yearly);
-   * past the window end the last delta is held.
+   * past the window end (the projection horizon) the last delta is held — i.e. the shock STOPS
+   * advancing at the horizon. `window` is the matrix's [[shockWindowFor]] result.
    */
   private def deltaPath(
                          macroData: Map[(String, String), Map[String, Double]],
-                         scenName: String, macroVar: String, freq: Frequency
+                         scenName: String, macroVar: String, freq: Frequency, window: Vector[String]
                        ): Int => Double = {
-    val arr = macroDeltaArray(macroData, scenName, macroVar)
+    val arr = macroDeltaArray(macroData, scenName, macroVar, window)
     val step = if (freq == Quarterly) 1 else 4
     (period: Int) => if (arr.isEmpty) 0.0 else arr(math.min((period - 1) * step, arr.length - 1))
   }
@@ -527,9 +574,13 @@ class PrimaryMapper(
     else add("SCENARIO.macroVars", Severity.Fail, s"MACRO_VARIABLE(s) referenced by PARAMETRAGE but absent from scenario data: ${missingVars.mkString(", ")} (FWL shock would be 0)")
 
     val centralDates = macroData.keySet.collect { case (s, d) if s == SCENARIO_CENTRAL => d }
-    val missingQ = shockWindow.filterNot(centralDates.contains)
-    if (centralDates.isEmpty) add("SCENARIO.window", Severity.Warn, "no Central scenario dates found to check the shock window against")
-    else if (missingQ.isEmpty) add("SCENARIO.window", Severity.Pass, s"all ${shockWindow.size} shock-window quarters present (${shockWindow.head}..${shockWindow.last})")
+    // Coverage is checked over the UNION of every FWL=YES matrix's shock window (as_of -> per-matrix
+    // PROJECTION_HORIZON end, or the config fallback).
+    val shockQuarters = allShockQuarters(matrices)
+    val missingQ = shockQuarters.filterNot(centralDates.contains)
+    if (shockQuarters.isEmpty) add("SCENARIO.window", Severity.Pass, "no FWL=YES matrices -> no shock window to check")
+    else if (centralDates.isEmpty) add("SCENARIO.window", Severity.Warn, "no Central scenario dates found to check the shock window against")
+    else if (missingQ.isEmpty) add("SCENARIO.window", Severity.Pass, s"all ${shockQuarters.size} shock-window quarters present (${shockQuarters.head}..${shockQuarters.last})")
     else add("SCENARIO.window", Severity.Warn, s"${missingQ.size} shock-window quarter(s) missing (delta holds last available): ${missingQ.take(8).mkString(", ")}")
 
     checks.toList
@@ -607,16 +658,16 @@ class PrimaryMapper(
 
   private def parseParametrage(df: DataFrame, perimeters: Set[String]): Seq[MatrixDef] = {
     val cols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_AGGREGATION,
-      COL_AGG_SEGMENT_NAME, COL_FWL_TO_BE_APPLIED, COL_MACRO_VARIABLE)
+      COL_AGG_SEGMENT_NAME, COL_FWL_TO_BE_APPLIED, COL_MACRO_VARIABLE, COL_PROJECTION_HORIZON)
     val recs = df.select(cols.head, cols.tail: _*).collect()
       .map { r =>
-        (str(r, 0), str(r, 1), str(r, 2), str(r, 3), str(r, 4), str(r, 5), str(r, 6))
+        (str(r, 0), str(r, 1), str(r, 2), str(r, 3), str(r, 4), str(r, 5), str(r, 6), str(r, 7))
       }
-      .filter { case (perim, seg, _, _, _, _, _) => perimeters.contains(perim) && seg.nonEmpty }
+      .filter { case (perim, seg, _, _, _, _, _, _) => perimeters.contains(perim) && seg.nonEmpty }
 
     // group by (perimeter, output segment, rate type) so INVEST_PRO + INVEST_CORP collapse
     // into INVEST while distinct rate types (TF/TV) stay separate matrices.
-    recs.groupBy { case (perim, seg, rateType, agg, aggName, _, _) =>
+    recs.groupBy { case (perim, seg, rateType, agg, aggName, _, _, _) =>
       val out = if (agg.equalsIgnoreCase(YES) && aggName.nonEmpty) aggName else seg
       (perim, out, rateType)
     }.map { case ((perim, out, rateType), group) =>
@@ -624,7 +675,9 @@ class PrimaryMapper(
       // combined FWL flag for an aggregated matrix: YES if ANY constituent applies FWL.
       val fwlApplied = group.exists(_._6.equalsIgnoreCase(YES))
       val macroVar = group.map(_._7).find(v => v.nonEmpty && !v.equalsIgnoreCase("NONE")).getOrElse("")
-      MatrixDef(perim, out, rateType, segments, fwlApplied, macroVar)
+      // per-matrix projection horizon (first non-empty in the group); blank -> config fallback later.
+      val projectionHorizon = group.map(_._8).find(_.nonEmpty).getOrElse("")
+      MatrixDef(perim, out, rateType, segments, fwlApplied, macroVar, projectionHorizon)
     }.toSeq.sortBy(m => (m.perimeter, m.outSegment, m.rateType))
   }
 

@@ -30,10 +30,10 @@ object PerimeterKeyCheck {
 
     // PARAMETRAGE: a MORTGAGE matrix per perimeter, FWL=NO (stat-only, no shock/scenario needed).
     val parametrage = Seq(
-      ("BCEF", "MORTGAGE", "TF", "NO", "", "NO", ""),
-      ("BGL",  "MORTGAGE", "TF", "NO", "", "NO", "")
+      ("BCEF", "MORTGAGE", "TF", "NO", "", "NO", "", "3Y"),
+      ("BGL",  "MORTGAGE", "TF", "NO", "", "NO", "", "3Y")
     ).toDF("PERIMETER", "SEGMENT", "RATE_TYPE", "AGGREGATION", "AGGREGATED_SEGMENT_NAME",
-      "FWL_TO_BE_APPLIED", "MACRO_VARIABLE")
+      "FWL_TO_BE_APPLIED", "MACRO_VARIABLE", "PROJECTION_HORIZON")
 
     val scenario = Seq(("2025Q4", "Central")).toDF("Date", "scenario")
 

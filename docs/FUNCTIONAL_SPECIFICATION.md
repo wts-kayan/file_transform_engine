@@ -24,16 +24,18 @@ The engine reads them and produces the final **EAD FWD Term Structure** file: fo
 ## 2. Inputs
 
 ### 2.1 Scenario (macro variables)
-CSV, `;`-delimited. One row per (date, scenario).
+Excel workbook with **one sheet per scenario** (`Central`, `Adverse`, `Optimistic`, `Extreme`); the
+sheet name becomes the scenario and the sheets are unioned. One row per quarter.
 
 | Column | Meaning |
 |--------|---------|
 | `Date` | Quarter, e.g. `2025Q4` |
-| `scenario` | `Central`, `Adverse`, `Optimistic`, `Extreme` (`Secto` not yet provided) |
+| (scenario) | the **sheet name** — `Central`, `Adverse`, `Optimistic`, `Extreme` (`Secto` not yet provided) |
 | `IR_10Y_FR`, `IR_10Y_BE`, `IR_10Y_IT` | Macro variables (10Y interest rates per country) |
 
-The shock for a scenario is read along the macro **path** over a configured window
-(`shock_window_start..shock_window_end`, e.g. `2021Q1..2025Q4`).
+The shock for a scenario is read along the macro **path** over a per-matrix window from
+`as_of_date_quarter` to `as_of_date_quarter + PROJECTION_HORIZON` (the PARAMETRAGE column,
+e.g. `2025Q4 + "3Y" = 2028Q4`; a blank cell falls back to `last_quarter_projection_horizon`).
 
 ### 2.2 PARAMETRAGE
 Excel. One row per (perimeter, segment, rate type).
@@ -47,10 +49,12 @@ Excel. One row per (perimeter, segment, rate type).
 | `AGGREGATED_SEGMENT_NAME` | Target segment name when aggregated (e.g. `INVEST`) |
 | `FWL_TO_BE_APPLIED` | `YES`/`NO` — whether forward-looking (scenario) shock applies |
 | `MACRO_VARIABLE` | Macro variable driving the shock (e.g. `IR_10Y_FR`) |
-| `PROJECTION_HORIZON` | **Not used by the engine** (see §6) |
+| `PROJECTION_HORIZON` | Relative shock horizon (e.g. `3Y`) — sets the FWL=YES shock-window **end** per matrix (`as_of + horizon`); blank → config fallback (see §4.7, §6) |
 
 ### 2.3 INPUTS_RA
-Excel (sheet per perimeter, e.g. `RA_BCEF`). One row per (segment, rate type, FWL type, metric).
+Excel (sheet per perimeter, e.g. `RA_BCEF`). One row per (perimeter, segment, rate type, FWL type,
+metric) — the **perimeter is part of the key**, so a segment name shared across entities (e.g.
+`MORTGAGE` in BCEF and BGL) does not collide.
 
 | Column | Meaning |
 |--------|---------|
@@ -133,35 +137,40 @@ For each case the value is computed for every
 - RA metrics — **sum** over the window (`Y1` = 6 months, `Yn` = 12 months).
 - `CRD` — **mean** over the same window.
 
-### 4.6 Core computation (Central, and all FWL = NO scenarios)
-1. `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i` (BASELINE values).
+### 4.6 Core computation (Central scenario, and every scenario when FWL = NO)
+No macro shock applies here, so all four scenarios share one curve. Per period (BASELINE values):
+1. Loss rate:
+   - **FWL = YES, Central:** `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i`
+   - **FWL = NO:** `RA_i = -(RA_STAT_i) / CRD_i` — `RA_FI` and `RE` are **excluded**.
 2. `VECTOR_i = 1 - RA_i`.
 3. `EAD_RA_RATE = cumulative product of VECTOR` (factored vector).
 4. Held flat from term 30.
 
 **Run-off rule:** when `CRD_i = 0` (exposure fully run off) the period contributes
-`RA_i = 0` (`VECTOR_i = 1`), so the curve flattens instead of dividing by zero.
+`RA_i = 0` (`VECTOR_i = 1`), so the curve flattens instead of dividing by zero. (A second guard
+freezes the curve if a per-period `RA_i ≥ 1` cliff appears in the deep run-off tail.)
 
 For **FWL = NO**, all scenarios equal the Central value (no scenario differentiation).
 
 ### 4.7 FWL = YES — scenario shock (macro path)
 For non-Central scenarios the shock is **term-varying**, read from the scenario macro path
-over a window (`shock_window_start..shock_window_end`, default `2021Q1..2025Q4`):
-term 0 = window start, step 1 quarter (yearly steps 1 year); past the window end the last
-delta is held.
-1. `delta_i(scenario) = MACRO[scenario][date_i] − MACRO[Central][date_i]` (per term `i`).
-2. Stress leg = `STRESS (-)` if `delta_i < 0`, else `STRESS (+)`.
-3. Per period:
-   - `stat_detail = -RA_STAT_baseline / CRD`
-   - `fire_base = -(RA_FI_baseline + RE_baseline) / CRD`
-   - `fire_stress = -(RA_FI_stress + RE_stress) / CRD`
-   - `weight = |delta| / ref_shock`
-   - `fire_scen = fire_base + weight × (fire_stress − fire_base)`
-   - `RA_i = stat_detail + fire_scen`
+over the matrix's window (`as_of_date_quarter .. as_of_date_quarter + PROJECTION_HORIZON`):
+term 0 = window start, step 1 quarter (yearly steps 1 year); past the window end (the projection
+horizon) the last delta is held.
+1. `delta_i = MACRO[scenario][q_i] − MACRO[Central][q_i]` — the raw macro delta (`Rate/100`), per term `i`.
+2. Stress leg is fixed by **scenario**: **Adverse / Extreme → STRESS (-)**, **Optimistic → STRESS (+)**.
+3. `RA_STAT` stays baseline; only FI + RE are shocked. Per period (`det(x,c) = -x/c`, `0` if `c = 0`):
+   - `stat       = det(RA_STAT_base, CRD_base)`
+   - `fire_base  = det(RA_FI_base, CRD_base) + det(RE_base, CRD_base)`
+   - `shock_FI   = det(RA_FI_leg, CRD_leg) − det(RA_FI_base, CRD_base)`  (each leg uses its **own** CRD)
+   - `shock_RE   = det(RE_leg, CRD_leg)   − det(RE_base, CRD_base)`
+   - `fire_scen  = fire_base − (shock_FI + shock_RE) · delta_i`
+   - `RA_i       = stat + fire_scen`
 4. Then `VECTOR`, factored product, flat tail as in §4.6.
 
-`ref_shock` is the magnitude the STRESS legs represent; it is a configurable
-**calibration** parameter (see §7).
+The shock is scaled by the macro `delta` (`Rate/100`) when `apply_rate_to_shock = true` (default), so
+Adverse ≠ Extreme and the magnitude follows the macro path; with `false` it is applied full-size
+(factor `1.0`), making Adverse = Extreme. There is **no `ref_shock` calibration knob**.
 
 ### 4.8 Aggregation (e.g. INVEST)
 When several PARAMETRAGE rows share an `AGGREGATED_SEGMENT_NAME`, their monthly metric
@@ -178,17 +187,30 @@ series are **summed element-wise** before the formula is applied. The combined
 
 ## 6. Decisions / assumptions
 
-- `PROJECTION_HORIZON` is **not** used; the projection uses a fixed term horizon (30y)
-  and reads the scenario shock along the macro path over the configured window
-  (`shock_window_start..shock_window_end`).
+- `PROJECTION_HORIZON` (PARAMETRAGE, per matrix) sets the shock-window **end**: the macro
+  shock path runs from `as_of_date_quarter` to `as_of + PROJECTION_HORIZON` and is held flat
+  beyond it; a blank cell falls back to `last_quarter_projection_horizon`. (The term-structure
+  output still spans the fixed 30y grid; only the shock path stops at the horizon.)
 - Computation always emits **both** Q and Y matrices.
 - Scenario `S` (Secto) is omitted until data is available.
 
-## 7. Open items (data-dependent)
+## 7. Data control & auditability
+
+- **Pre-calculation data control.** Before any computation the engine validates the parsed inputs
+  (required columns, the monthly grid, label vocabulary, numeric integrity, FWL=YES stress legs,
+  scenario coverage, the shock-window quarters). It logs a consolidated PASS/WARN/FAIL report and
+  writes an auditable `DATA_CONTROL_<table>.csv`. When `validation.strict = true` (default) any FAIL
+  **aborts the run** before calculation; otherwise it only warns.
+- **Analysis generator.** A separate job (`Term0AnalysisDriver`) regenerates the worked computation
+  breakdown per *(matrix, scenario, term)* — a Markdown narrative and a CSV — from the same inputs and
+  the **same** formulas as production, optionally **reconciled** against the real output (`MATCH` /
+  `DIFF` / `MISSING`). It is the auditable, machine-generated equivalent of the manual worked example.
+
+## 8. Open items (data-dependent)
 
 Tracked in [`MISSING_INPUTS.md`](../MISSING_INPUTS.md):
-1. **Scenario file** — current sample has Adverse and Extreme *identical*, so distinct
-   A vs E cannot be produced; and the `ref_shock` calibration constant is needed.
+1. **Scenario file** — distinct Adverse vs Extreme now follow the macro path
+   (`apply_rate_to_shock = true`); confirm the supplied macro values differentiate them as intended.
 2. **INPUTS_RA vintage** — current sample's exposure does not run off like the target,
    causing deep-tail deviation; the 25Q4-matching RA series is needed.
 

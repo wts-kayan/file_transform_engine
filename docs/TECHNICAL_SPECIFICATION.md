@@ -24,11 +24,12 @@ debuggable without distributed-execution noise.
 MainDriver
   ├─ SparkSessionManager.fetchSparkSession
   ├─ read application.conf (HDFS reader)
-  ├─ PrimaryReader            → reads RA_BCEF (Excel), MACRO_VARIABLE (Excel, per-scenario sheets), PARAMETRAGE (Excel)
+  ├─ PrimaryReader            → reads RA perimeters (Excel, unioned), MACRO_VARIABLE (Excel, per-scenario sheets), PARAMETRAGE (Excel)
   ├─ PrimaryRunner            → wires reader → mapper
   │    └─ PrimaryMapper.getDataFrame
-  │         ├─ parse PARAMETRAGE  → matrix definitions (aggregation, FWL flag, macro var)
-  │         ├─ collect RA + scenario to driver maps
+  │         ├─ parse PARAMETRAGE  → matrix definitions (aggregation, FWL flag, macro var, projection horizon)
+  │         ├─ collect RA + scenario to driver maps  (RA key includes PERIMETER)
+  │         ├─ pre-calculation data control (DataControlView; aborts on FAIL when validation.strict)
   │         ├─ per matrix × {Q,Y} × scenario:
   │         │     PrimaryView aggregation → RA → vector-factored → flat tail
   │         └─ build output DataFrame (decimal-comma strings)
@@ -38,15 +39,23 @@ MainDriver
 
 | File | Responsibility |
 |------|----------------|
-| `job/MainDriver.scala` | Entry point; builds session, reads config, runs pipeline, writes output |
-| `sessionmanager/SparkSessionManager.scala` | SparkSession factory (local config) |
+| `job/MainDriver.scala` | Production entry point; builds session, reads config, runs pipeline, writes output |
+| `job/Term0AnalysisDriver.scala` | Analysis generator job — per-(matrix, scenario, term) breakdown (Markdown + CSV) with optional engine reconciliation |
+| `job/EadFwdCompare.scala` | Compare job — diffs an output CSV against a target CSV (per-key error report + CSV) |
+| `sessionmanager/SparkSessionManager.scala` | SparkSession factory (one for local **and** cluster) |
 | `reader/PrimaryReader.scala` | Reads RA / scenario / PARAMETRAGE via Typesafe config |
 | `common/RunnerProvider.scala`, `common/PrimaryRunner.scala` | Lazy inputs; invoke mapper |
 | `common/MapperProvider.scala` | Mapper interface (`getMapping_tseadfwd`) |
 | `mapping/PrimaryView.scala` | **Pure computation core** (no Spark) |
-| `mapping/PrimaryMapper.scala` | Spark glue: parse, aggregate, compute, build output DF, debug trace |
+| `mapping/PrimaryMapper.scala` | Spark glue: parse, aggregate, compute, build output DF, debug trace; exposes `term0AnalysisRows` for the analysis job |
+| `mapping/Term0RowView.scala` | Per-(matrix, scenario, term) breakdown record consumed by the analysis job |
+| `validation/DataControlView.scala` | Pre-calculation data-control report render + CSV (`ControlCheck` / `Severity`) |
 | `writer/PrimaryWriter.scala`, `utility/PrimaryUtilities.scala` | Write + single-file collapse, Excel/CSV readers, HDFS helpers |
 | `utility/PrimaryConstants.scala` | Column/value names, scenario codes, output columns |
+
+> `MainDriver` is the production pipeline (above). `Term0AnalysisDriver` and `EadFwdCompare` are
+> separate jobs in the same jar (pick with `--class`); the analysis job reuses `PrimaryReader` +
+> `PrimaryMapper`, so its numbers are computed by the same validated code. See §10.
 
 ---
 
@@ -76,8 +85,9 @@ Pure functions, no Spark dependency:
 | `Frequency` (`Quarterly`/`Yearly`) | suffix, term step, core max term |
 | `termGrid(freq)` | output term grid (0..coreMax by step, then `100`) |
 | `aggregate(m, period, freq, isCrd)` | monthly → period value; `Option` (None if window exceeds data) |
-| `centralRa(crd, raStat, raFi, re, freq)` | per-period `RA = -(STAT+FI+RE)/CRD`; run-off guard `CRD==0 → 0` |
-| `scenarioRa(... both stress legs, deltaAt, refShock)` | FWL=YES RA; `deltaAt(period)` selects leg + weight per term |
+| `centralRa(crd, raStat, raFi, re, freq)` | FWL=YES Central per-period `RA = -(STAT+FI+RE)/CRD`; run-off guard `CRD==0 → 0` |
+| `statOnlyRa(crd, raStat, freq)` | FWL=NO per-period `RA = -(STAT)/CRD` (FI/RE excluded) |
+| `scenarioRa(crdBase, raStatBase, raFiBase, reBase, crdLeg, raFiLeg, reLeg, freq, deltaAt)` | FWL=YES non-Central RA; caller fixes the stress leg by scenario, `deltaAt(period)` is the per-term macro delta |
 | `vectorFactored(ra)` | cumulative product of `1 - RA` |
 | `termSeries(vf, freq)` | maps the output grid to `vf`, holding the last value flat |
 
@@ -101,13 +111,16 @@ flat tail in `termSeries` covers the remaining grid points.
   `fwlApplied = any(YES)`; `macroVar` = first non-`NONE`. Matrix id =
   `PERIMETER_SEGMENT_RATETYPE_(Q|Y)` — a **blank `RATE_TYPE`** is dropped (only non-empty parts are
   joined), so BPLS numeric segments yield `BPLS_10276_Q`, not `BPLS_10276__Q`.
-- `collectRa` — `(SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) → Array[Double]` of months.
-- `aggregateSegments` — element-wise sum of constituent segments' monthly series.
+- `collectRa` — `(PERIMETER, SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) → Array[Double]` of months.
+  (PERIMETER is in the key: the same SEGMENT name recurs across entities, so without it the rows
+  would collide and only the last would survive.)
+- `aggregateSegments` — element-wise sum of constituent segments' monthly series (same perimeter).
 - `collectScenario` — `(scenario, Date) → (macroVar → Double)`.
-- `shockWindow` / `macroDeltaArray` / `deltaPath` — build the macro delta path
-  (`scenario − Central`) over `shock_window_start..shock_window_end`, then map a 1-based
-  projection period to it (term 0 = window start, step 1 quarter; yearly step = 4 quarters;
-  held past the window end).
+- `shockWindowFor` / `macroDeltaArray` / `deltaPath` — build the macro delta path
+  (`scenario − Central`) over each matrix's window `as_of_date_quarter .. (as_of + PROJECTION_HORIZON)`,
+  then map a 1-based projection period to it (term 0 = window start, step 1 quarter; yearly step =
+  4 quarters; held past the window end / projection horizon). PROJECTION_HORIZON comes from
+  PARAMETRAGE per matrix (e.g. `"3Y"`); a blank cell falls back to `last_quarter_projection_horizon`.
 - `matrixRows` — selects `centralRa` (FWL=NO or Central) or `scenarioRa` (FWL=YES,
   non-Central), then `vectorFactored` + `termSeries`; emits output rows.
 - `fmtNumber` — decimal-comma formatting (half-up, trailing zeros stripped; non-finite → `0`).
@@ -125,6 +138,14 @@ with dot would corrupt every large value ~1000× and blow up the cumulative prod
 `$tmpPath/$tableName.csv`, deletes the Spark directory and the `.crc` sidecar, leaving
 one clean file. The decimal comma is safe because the field delimiter is `;`
 (no quoting triggered).
+
+### 3.6 Pre-calculation data control
+`PrimaryMapper.runDataControl` runs **before** the calculation and builds a list of `ControlCheck`s
+(structural columns, monthly grid, label vocabulary, locale-tolerant numeric integrity, FWL=YES
+stress legs, scenario coverage, and the union of shock-window quarters). `DataControlView` renders a
+consolidated PASS/WARN/FAIL report (logged) and writes `DATA_CONTROL_<table>.csv` next to the output.
+When `validation.strict = true` (default) any **FAIL aborts** the run before calculation; otherwise it
+logs warnings and proceeds. Always on (independent of `debug`).
 
 ---
 
@@ -189,12 +210,15 @@ RA_p          = RA_STAT + RA_FI_RE_scen
 
 ### 4.4 Macro delta path (FWL=YES)  `macroDeltaArray` / `deltaPath`
 ```
-shockWindow      = ordered quarters [shock_window_start .. shock_window_end]
-macroDeltaArray  = [ MACRO[scenario][q] - MACRO[Central][q]  for q in shockWindow ]   (missing → 0)
-deltaPath(p)     = macroDeltaArray[ min((p-1)·s, len-1) ]      s = 1 (Q) or 4 (Y); empty → 0
+shockWindowFor(m) = ordered quarters [as_of_date_quarter .. end]
+                    end = as_of_date_quarter + PROJECTION_HORIZON(m)   (blank → last_quarter_projection_horizon)
+macroDeltaArray   = [ MACRO[scenario][q] - MACRO[Central][q]  for q in shockWindowFor(m) ]   (missing → 0)
+deltaPath(p)      = macroDeltaArray[ min((p-1)·s, len-1) ]      s = 1 (Q) or 4 (Y); empty → 0
 ```
-Term 0 = window start; the last delta is **held flat** for periods past the window end. This raw
-delta is the schema's `Rate/100` (the STEP 3 ×100 and the §4.3 /100 cancel).
+Term 0 = window start; the last delta is **held flat** for periods past the window end (the projection
+horizon). This raw delta is the schema's `Rate/100` (the STEP 3 ×100 and the §4.3 /100 cancel). The
+`apply_rate_to_shock` toggle selects the multiplier: `true` (default) uses `delta` (Adverse ≠ Extreme);
+`false` uses `1.0` — the literal STEP-4 full-size shock (Adverse = Extreme).
 
 ### 4.5 Run-off guards  (when the exposure has amortized)
 1. **Exact zero (spec):** `if CRD_p == 0 → RA_p = 0` (`VECTOR = 1`), avoiding `0/0`.
@@ -239,10 +263,14 @@ Under `tseadfwd_app`:
 | `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | `Inputs_RA_v2.xlsx` / `RA_BCEF` |
 | `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel | `PARAMETRAGE_corrected.xlsx` / `PARAMETRAGE` |
 | `MACRO_VARIABLE.path` / `.sheetNames` | scenario **Excel workbook, one sheet per scenario** (read + unioned by `readScenarioFromExcelSheets`; sheet name → `Scenario_ID`) | `Scenario_EAD_FWD.xlsx` / `["Central","Adverse","Optimistic","Extreme"]` |
-| `shock_window_start` / `shock_window_end` | macro path window the FWL shock is read over (term 0 = start, step 1Q) | `"2025Q4"` / `"2028Q4"` |
-| `ref_shock` | stress-leg magnitude for FWL=YES scaling (calibration) | `1.0` |
+| `as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) | `"2025Q4"` |
+| `last_quarter_projection_horizon` | fallback shock-window end, used only when a matrix's PARAMETRAGE `PROJECTION_HORIZON` is blank (normally end = `as_of + PROJECTION_HORIZON`) | `"2028Q4"` |
+| `apply_rate_to_shock` | FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
 | `debug` | enable titled `show()` of inputs + per-term trace | `false` |
+| `validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
+| `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job — diff an output CSV vs a target CSV | — |
+| `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job — analysis breakdown (+ engine reconciliation) | — |
 
 > **Note (scenario input).** Earlier vintages used a single scenario **CSV** (`header`/`delimiter`,
 > one table with a `scenario` column). It is now a per-scenario **Excel workbook**: each sheet is one
@@ -256,9 +284,10 @@ Under `tseadfwd_app`:
 
 When `debug = true` (`PrimaryMapper`), `logShow(title, df)` logs a title line before
 each `show()`:
+- `PARSED - RA keys` — every `(PERIMETER|SEGMENT|RATE_TYPE|FWL_TYPE|METRIC)` key + series length
 - `INPUT - PARAMETRAGE`
-- `INPUT - MACRO_VARIABLE (scenario)` (filtered to `projection_date`)
-- `INPUT - RA_BCEF (keys + first/last months; 361 monthly cols used in full)`
+- `INPUT - MACRO_VARIABLE (scenario, union of shock windows)`
+- `INPUT - RA all perimeters (keys + first/last months; 361 monthly cols used in full)`
 - `PARSED - matrix definitions`
 - `TRACE - <matrixId> / <scenario>` — per-period table:
   `period, term, CRD, RA_STAT, RA_FI, RE, RA, VECTOR, EAD_RA_RATE`
@@ -305,6 +334,33 @@ java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
 
 - Central / FWL=NO matches the target to ~`1e-5`.
 - Deep-tail deviation and FWL=YES magnitude are **data-dependent** open items — see
-  [`MISSING_INPUTS.md`](../MISSING_INPUTS.md) (scenario file where Adverse ≠ Extreme +
-  `ref_shock` calibration; and the 25Q4-matching INPUTS_RA vintage). No logic change is
+  [`MISSING_INPUTS.md`](../MISSING_INPUTS.md) (a scenario file whose macro path differentiates Adverse
+  vs Extreme under `apply_rate_to_shock`; and the 25Q4-matching INPUTS_RA vintage). No logic change is
   expected once the corrected inputs arrive.
+
+---
+
+## 10. Auxiliary jobs
+
+Both are objects with a `main` in the same jar; select with `--class` and pass the same
+`application.conf`.
+
+### 10.1 `Term0AnalysisDriver` — analysis generator
+Regenerates the worked computation breakdown per *(matrix, scenario, term)* as a Markdown narrative
+and a decimal-comma CSV. It reads inputs via `PrimaryReader` and calls
+`PrimaryMapper.term0AnalysisRows(terms)`, which reuses the **same** parsing + `PrimaryView` formulas as
+production — so every value equals the engine's output at that term by construction. Config block
+`TERM0_ANALYSIS`:
+- `enabled` — generation gate (the job is a no-op when `false`).
+- `terms` — output terms to break down, e.g. `[0, 0.25, 0.5, 1, 2, 5, 10, 30]`.
+- `enginePath` — (optional) the real `TS_EAD_FWD` CSV to **reconcile** against; each computed `EAD` is
+  tagged `MATCH` / `DIFF` / `MISSING` (so a bad input parse surfaces as `DIFF` instead of a
+  silently-wrong-but-self-consistent number). `tol` is the MATCH threshold.
+- `mdPath` / `csvPath` — outputs.
+
+### 10.2 `EadFwdCompare` — output vs target
+Joins an output CSV and a target CSV on `(EAD_MATRIX_ID, SCENARIO_ID, TERM)`, reports row coverage,
+error stats, per-matrix max error and worst mismatches, and writes a per-key CSV
+(`…;OUTPUT;TARGET;ABS_ERROR;STATUS` with `STATUS ∈ {MATCH, DIFF, ONLY_OUTPUT, ONLY_TARGET}`).
+`stripRateType` drops the `RATE_TYPE` token from the output id to align with a target that omits it.
+Config block `COMPARE`.
