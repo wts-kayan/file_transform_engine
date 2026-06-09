@@ -11,21 +11,24 @@ import org.slf4j.LoggerFactory
 import java.io.{File, PrintWriter}
 
 /**
- * Spark job that auto-generates the Term-0 (period 1) EAD_RA_RATE computation breakdown for every
- * (matrix, scenario), in the spirit of the hand-written `docs/ANALYSIS_TERM0_COMPUTATION.md` —
- * but driven entirely by the configured input workbooks rather than typed by hand.
+ * Spark job that auto-generates the EAD_RA_RATE computation breakdown for every (matrix, scenario)
+ * at a CONFIGURABLE set of terms, in the spirit of the hand-written
+ * `docs/ANALYSIS_TERM0_COMPUTATION.md` — but driven entirely by the configured inputs.
  *
  * It reads the same inputs as the production pipeline (RA perimeters, MACRO_VARIABLE, PARAMETRAGE)
- * via [[PrimaryReader]], then asks [[PrimaryMapper.term0AnalysisRows]] for the breakdown — so every number
- * is computed through the SAME validated parsing + [[PrimaryView]] formulas and equals the
- * production `EAD_RA_RATE` at TERM 0.
+ * via [[PrimaryReader]], then asks [[PrimaryMapper.term0AnalysisRows]] for the breakdown — so every
+ * value is computed through the SAME validated parsing + [[PrimaryView]] formulas as the production
+ * output and equals the production `EAD_RA_RATE` at each term by construction.
  *
- * Single argument: the path to `application.conf`. Output paths are read from the
+ * Single argument: the path to `application.conf`. Everything is read from the
  * `tseadfwd_app.TERM0_ANALYSIS` block:
- *   mdPath  — Markdown narrative (worked example per matrix, all scenarios)
- *   csvPath — `;`-delimited, decimal-comma CSV: one row per (matrix, scenario) with every
- *             intermediate value (M1..M3, Q1 aggregates, stress-leg Q1, delta, RA, VECTOR, EAD).
- * Both default next to the other outputs if the block (or a key) is absent.
+ *   enabled    — when false, the job does nothing (generation gate). Default true.
+ *   terms      — list of output terms to break down, e.g. `[0, 0.25, 1, 5, 30]`. Default `[0]`.
+ *   enginePath — (optional) the REAL engine output CSV (TS_EAD_FWD). When set, each analysis `ead`
+ *                is reconciled against the engine's `EAD_RA_RATE` at the same term -> STATUS column
+ *                (MATCH / DIFF / MISSING). A bad input parse then shows as DIFF, not a silent error.
+ *   tol        — abs-error threshold for a MATCH (default 1e-6).
+ *   mdPath / csvPath — outputs (Markdown narrative + decimal-comma CSV). Default next to the output.
  */
 object Term0AnalysisDriver {
 
@@ -46,11 +49,30 @@ object Term0AnalysisDriver {
     val appConf = config.getConfig(PrimaryConstants.APP_CONF)
     val anaConf =
       if (appConf.hasPath("TERM0_ANALYSIS")) appConf.getConfig("TERM0_ANALYSIS") else ConfigFactory.empty()
-    def pathOr(key: String, default: String): String =
+
+    // ---- generation gate ----
+    val enabled = !anaConf.hasPath("enabled") || anaConf.getBoolean("enabled")
+    if (!enabled) {
+      logger.info("TERM0_ANALYSIS.enabled = false -> analysis generation skipped.")
+      println(">>> Term analysis disabled (TERM0_ANALYSIS.enabled = false); nothing generated.")
+      spark.stop()
+      return
+    }
+
+    def strOr(key: String, default: String): String =
       if (anaConf.hasPath(key)) anaConf.getString(key) else default
 
-    val mdPath  = pathOr("mdPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.md")
-    val csvPath = pathOr("csvPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.csv")
+    // ---- configurable terms ----
+    val terms: Seq[Double] = {
+      import scala.collection.JavaConverters._
+      if (anaConf.hasPath("terms"))
+        anaConf.getDoubleList("terms").asScala.map(_.doubleValue()).toVector
+      else Seq(0.0)
+    }
+    val tol         = if (anaConf.hasPath("tol")) anaConf.getDouble("tol") else 1e-6
+    val enginePath  = if (anaConf.hasPath("enginePath")) Some(anaConf.getString("enginePath")) else None
+    val mdPath      = strOr("mdPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.md")
+    val csvPath     = strOr("csvPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.csv")
 
     val reader = new PrimaryReader()
     val mapper = new PrimaryMapper(
@@ -60,24 +82,89 @@ object Term0AnalysisDriver {
       PrimaryConstants.OUTPUT_EAD_FWD
     )
 
-    val rows = mapper.term0AnalysisRows(PrimaryView.Quarterly)
-    logger.info(s"Term-0 analysis: ${rows.size} (matrix, scenario) breakdown(s) computed")
+    val rawRows = mapper.term0AnalysisRows(terms, PrimaryView.Quarterly)
+    logger.info(s"Term analysis: ${rawRows.size} (matrix, scenario, term) breakdown(s) computed " +
+      s"over terms ${terms.map(snap).distinct.sorted.mkString(", ")}")
+
+    // ---- reconcile against the real engine output, when configured ----
+    val rows = enginePath match {
+      case Some(ep) => reconcile(rawRows, ep, tol)
+      case None     => rawRows
+    }
 
     writeMarkdown(mdPath, rows)
     writeCsv(csvPath, rows)
 
-    val matrices = rows.map(_.matrixId).distinct.size
-    println(s"\n>>> Term-0 analysis written:\n    markdown: $mdPath\n    csv     : $csvPath" +
-      s"\n    ($matrices matrices x scenarios = ${rows.size} rows)")
+    val nMatrices = rows.map(_.matrixId).distinct.size
+    val nTerms    = rows.map(_.term).distinct.size
+    val recoSummary = {
+      val statuses = rows.map(_.status).filter(_.nonEmpty)
+      if (statuses.isEmpty) "no engine reconciliation"
+      else {
+        val diff = statuses.count(_ == "DIFF"); val miss = statuses.count(_ == "MISSING")
+        s"reconciled vs engine: ${statuses.count(_ == "MATCH")} MATCH, $diff DIFF, $miss MISSING"
+      }
+    }
+    println(s"\n>>> Term analysis written:\n    markdown: $mdPath\n    csv     : $csvPath" +
+      s"\n    ($nMatrices matrices x scenarios x $nTerms terms = ${rows.size} rows; $recoSummary)")
 
     spark.stop()
   }
 
+  // ---- engine reconciliation ------------------------------------------------
+
+  /**
+   * Attach the REAL engine output's `EAD_RA_RATE` (at the same matrix/scenario/term) and a STATUS
+   * to each row. The engine output (`TS_EAD_FWD`) keeps the RATE_TYPE token, so its id equals the
+   * analysis `matrixId` — no normalization needed. Returns the rows unchanged (status="MISSING") if
+   * the engine file cannot be read.
+   */
+  private def reconcile(rows: Seq[Term0RowView], enginePath: String, tol: Double)
+                       (implicit spark: SparkSession): Seq[Term0RowView] = {
+    val engine: Map[(String, String, Double), Double] =
+      try {
+        val df = spark.read.option("header", "true").option("delimiter", ";").csv(enginePath)
+        df.select(PrimaryConstants.OUT_MATRIX_ID, PrimaryConstants.OUT_SCENARIO_ID,
+            PrimaryConstants.OUT_TERM, PrimaryConstants.OUT_EAD_RA_RATE)
+          .collect().flatMap { r =>
+            val mid = r.getString(0); val scen = r.getString(1)
+            val t = parseComma(r.getString(2)); val e = parseComma(r.getString(3))
+            if (t.isNaN) None else Some((mid, scen, snap(t)) -> e)
+          }.toMap
+      } catch {
+        case ex: Throwable =>
+          logger.warn(s"Could not read engine output for reconciliation ($enginePath): ${ex.getMessage}")
+          Map.empty
+      }
+
+    if (engine.isEmpty) rows.map(_.copy(status = "MISSING"))
+    else rows.map { r =>
+      engine.get((r.matrixId, r.scenarioCode, r.term)) match {
+        case Some(e) =>
+          val status = if (!e.isNaN && !r.ead.isNaN && math.abs(e - r.ead) <= tol) "MATCH" else "DIFF"
+          r.copy(engineEad = e, status = status)
+        case None => r.copy(status = "MISSING")
+      }
+    }
+  }
+
   // ---- formatting -----------------------------------------------------------
+
+  /** Round a term to a clean grid value (must match PrimaryMapper.snap). */
+  private def snap(t: Double): Double = Math.round(t * 1e6) / 1e6
+
+  /** Decimal-comma string -> Double (NaN on empty / non-numeric). */
+  private def parseComma(s: String): Double =
+    if (s == null || s.trim.isEmpty) Double.NaN
+    else try s.trim.replace(",", ".").toDouble catch { case _: Throwable => Double.NaN }
 
   /** Full-precision dot-decimal for the narrative (NaN -> "n/a"). */
   private def dot(v: Double, dp: Int = 6): String =
     if (v.isNaN || v.isInfinite) "n/a" else String.format(java.util.Locale.ROOT, s"%.${dp}f", Double.box(v))
+
+  /** Compact term label: "0", "0.25", "30" (no trailing zeros). */
+  private def termStr(t: Double): String =
+    BigDecimal(t).setScale(6, BigDecimal.RoundingMode.HALF_UP).bigDecimal.stripTrailingZeros.toPlainString
 
   /** Decimal-comma for the CSV, half-up at 12 dp, trailing zeros stripped (NaN/Inf -> empty). */
   private def comma(v: Double): String =
@@ -96,25 +183,33 @@ object Term0AnalysisDriver {
     val pw = new PrintWriter(f, "UTF-8")
     try {
       pw.println(Seq(
-        "EAD_MATRIX_ID", "SCENARIO_ID", "FWL_APPLIED", "MACRO_VAR", "USES_SHOCK",
+        "EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "PERIOD", "FWL_APPLIED", "MACRO_VAR", "USES_SHOCK",
         "CRD_M1", "CRD_M2", "CRD_M3", "STAT_M1", "STAT_M2", "STAT_M3",
         "FI_M1", "FI_M2", "FI_M3", "RE_M1", "RE_M2", "RE_M3",
-        "CRD_Q1", "STAT_Q1", "FI_Q1", "RE_Q1",
-        "LEG_CRD_Q1", "LEG_FI_Q1", "LEG_RE_Q1",
-        "DELTA0", "RA_TERM0", "VECTOR_TERM0", "EAD_RA_RATE_TERM0").mkString(";"))
-      rows.foreach { r =>
+        "CRD_AGG", "STAT_AGG", "FI_AGG", "RE_AGG",
+        "LEG_CRD_AGG", "LEG_FI_AGG", "LEG_RE_AGG",
+        "DELTA", "RA", "VECTOR", "EAD_RA_RATE", "ENGINE_EAD", "STATUS").mkString(";"))
+      sortRows(rows).foreach { r =>
         def m(xs: Seq[Double], i: Int): String = if (i < xs.length) comma(xs(i)) else ""
         pw.println(Seq(
-          r.matrixId, r.scenarioCode, r.fwlApplied.toString, r.macroVar, r.usesShock.toString,
+          r.matrixId, r.scenarioCode, comma(r.term), r.period.toString,
+          r.fwlApplied.toString, r.macroVar, r.usesShock.toString,
           m(r.crdMonths, 0), m(r.crdMonths, 1), m(r.crdMonths, 2),
           m(r.statMonths, 0), m(r.statMonths, 1), m(r.statMonths, 2),
           m(r.fiMonths, 0), m(r.fiMonths, 1), m(r.fiMonths, 2),
           m(r.reMonths, 0), m(r.reMonths, 1), m(r.reMonths, 2),
-          comma(r.crdQ1), comma(r.statQ1), comma(r.fiQ1), comma(r.reQ1),
-          comma(r.legCrdQ1), comma(r.legFiQ1), comma(r.legReQ1),
-          comma(r.delta0), comma(r.ra0), comma(r.vector0), comma(r.ead0)).mkString(";"))
+          comma(r.crdAgg), comma(r.statAgg), comma(r.fiAgg), comma(r.reAgg),
+          comma(r.legCrdAgg), comma(r.legFiAgg), comma(r.legReAgg),
+          comma(r.delta), comma(r.ra), comma(r.vector), comma(r.ead),
+          comma(r.engineEad), r.status).mkString(";"))
       }
     } finally pw.close()
+  }
+
+  /** Stable order: matrix, scenario (canonical order), then term. */
+  private def sortRows(rows: Seq[Term0RowView]): Seq[Term0RowView] = {
+    val scenOrder = PrimaryConstants.SCENARIO_CODES.map(_._1).zipWithIndex.toMap
+    rows.sortBy(r => (r.matrixId, scenOrder.getOrElse(r.scenarioName, Int.MaxValue), r.term))
   }
 
   // ---- Markdown -------------------------------------------------------------
@@ -129,78 +224,78 @@ object Term0AnalysisDriver {
   /** Render the full Markdown narrative. Public for unit testing. */
   def renderMarkdown(rows: Seq[Term0RowView]): String = {
     val sb = new StringBuilder
-    sb.append("# Analysis — Term-0 (period 1) EAD_RA_RATE computation (generated)\n\n")
-    sb.append("Auto-generated by the `Term0AnalysisDriver` job from the configured inputs — the machine\n")
-    sb.append("equivalent of `docs/ANALYSIS_TERM0_COMPUTATION.md`. **Term 0 = quarter Q1** (period 1),\n")
-    sb.append("quarterly. Every value is computed through the same validated parsing and `PrimaryView`\n")
-    sb.append("formulas as the production output, so `EAD_RA_RATE (Term 0)` matches it exactly.\n\n")
-    sb.append("Aggregation at Q1: `CRD_Q1 = mean(M1,M2,M3)`; `X_Q1 = M1 + M2/2` for RA STAT / RA FI / RE.\n")
-    sb.append("Central / FWL=NO loss rate: `RA = -(STAT+FI+RE)/CRD` (FWL=YES) or `-(STAT)/CRD` (FWL=NO).\n")
-    sb.append("`VECTOR = 1 - RA`; at Term 0 the factored value seeds the cumulative product, so\n")
-    sb.append("`EAD_RA_RATE(Term 0) = VECTOR`.\n\n")
-    sb.append("---\n\n")
+    val reconciled = rows.exists(_.status.nonEmpty)
+    val allTerms = rows.map(_.term).distinct.sorted
 
-    // Preserve discovery order; group scenarios under their matrix.
+    sb.append("# Analysis — EAD_RA_RATE computation breakdown (generated)\n\n")
+    sb.append("Auto-generated by the `Term0AnalysisDriver` job from the configured inputs — the machine\n")
+    sb.append("equivalent of `docs/ANALYSIS_TERM0_COMPUTATION.md`. Every value is computed through the\n")
+    sb.append("same validated parsing and `PrimaryView` formulas as the production output, so each\n")
+    sb.append("`EAD_RA_RATE` matches the engine at that term.\n\n")
+    sb.append(s"Terms analysed (quarterly grid; term 0 = Q1): ${allTerms.map(termStr).mkString(", ")}.\n")
+    sb.append("Aggregation: `CRD = mean(window months)`; `RA metric = M1 + M2/2` (Q1) / half-weight\n")
+    sb.append("window thereafter. Loss rate: `RA = -(STAT+FI+RE)/CRD` (FWL=YES) or `-(STAT)/CRD` (FWL=NO);\n")
+    sb.append("`VECTOR = 1 - RA`; `EAD_RA_RATE` = cumulative product of VECTOR (held flat past horizon).\n")
+    if (reconciled)
+      sb.append("`ENGINE` / `STATUS` reconcile each `EAD_RA_RATE` against the real engine output CSV.\n")
+    sb.append("\n---\n\n")
+
     val byMatrix = rows.groupBy(_.matrixId)
     val matrixOrder = rows.map(_.matrixId).distinct
+    val scenOrder = PrimaryConstants.SCENARIO_CODES.map(_._1).zipWithIndex.toMap
 
     matrixOrder.zipWithIndex.foreach { case (mid, idx) =>
       val group = byMatrix(mid)
-      val head = group.head // baseline Q1 is identical across scenarios of a matrix
+      val head = group.head // raw-input sample is identical across the matrix's rows
       sb.append(s"## ${idx + 1}. `$mid`\n\n")
-      sb.append(s"- Segments: `${group.head.segments.mkString(" + ")}` — RATE_TYPE: " +
+      sb.append(s"- Segments: `${head.segments.mkString(" + ")}` — RATE_TYPE: " +
         (if (head.rateType.nonEmpty) s"`${head.rateType}`" else "*(blank)*") + "\n")
       sb.append(s"- FWL_TO_BE_APPLIED: **${if (head.fwlApplied) "YES" else "NO"}**" +
         (if (head.fwlApplied && head.macroVar.nonEmpty) s" — macro var `${head.macroVar}`" else "") + "\n")
       val ruleTxt =
         if (head.fwlApplied) "`RA = -(RA_STAT + RA_FI + RE) / CRD`  (STAT+FI+RE)"
         else "`RA = -(RA_STAT) / CRD`  (stat-only; FI/RE excluded)"
-      sb.append(s"- Central loss-rate rule: $ruleTxt\n\n")
+      sb.append(s"- Loss-rate rule: $ruleTxt\n\n")
 
-      // Baseline inputs + Q1 aggregation
-      sb.append("**Baseline inputs (first 3 months) and Q1 aggregation**\n\n")
-      sb.append("| Metric | M1 | M2 | M3 | Q1 |\n|---|---|---|---|---|\n")
-      sb.append(s"| CRD | ${month(head.crdMonths, 0)} | ${month(head.crdMonths, 1)} | ${month(head.crdMonths, 2)} | ${dot(head.crdQ1)} |\n")
-      sb.append(s"| RA STAT | ${month(head.statMonths, 0)} | ${month(head.statMonths, 1)} | ${month(head.statMonths, 2)} | ${dot(head.statQ1)} |\n")
-      sb.append(s"| RA FI | ${month(head.fiMonths, 0)} | ${month(head.fiMonths, 1)} | ${month(head.fiMonths, 2)} | ${dot(head.fiQ1)} |\n")
-      sb.append(s"| RE | ${month(head.reMonths, 0)} | ${month(head.reMonths, 1)} | ${month(head.reMonths, 2)} | ${dot(head.reQ1)} |\n\n")
+      // Raw baseline input sample (first 3 months) — a quick parse sanity check.
+      sb.append("**Raw baseline input sample (first 3 months)**\n\n")
+      sb.append("| Metric | M1 | M2 | M3 |\n|---|---|---|---|\n")
+      sb.append(s"| CRD | ${month(head.crdMonths, 0)} | ${month(head.crdMonths, 1)} | ${month(head.crdMonths, 2)} |\n")
+      sb.append(s"| RA STAT | ${month(head.statMonths, 0)} | ${month(head.statMonths, 1)} | ${month(head.statMonths, 2)} |\n")
+      sb.append(s"| RA FI | ${month(head.fiMonths, 0)} | ${month(head.fiMonths, 1)} | ${month(head.fiMonths, 2)} |\n")
+      sb.append(s"| RE | ${month(head.reMonths, 0)} | ${month(head.reMonths, 1)} | ${month(head.reMonths, 2)} |\n\n")
 
-      // Central worked numbers
-      val central = group.find(_.scenarioName == PrimaryConstants.SCENARIO_CENTRAL).getOrElse(head)
-      val numerator = if (head.fwlApplied) head.statQ1 + head.fiQ1 + head.reQ1 else head.statQ1
-      val numTxt = if (head.fwlApplied)
-        s"${dot(head.statQ1)} + ${dot(head.fiQ1)} + ${dot(head.reQ1)} = ${dot(numerator)}"
-      else s"${dot(head.statQ1)}"
-      sb.append("**Central (no shock):**\n\n```\n")
-      sb.append(s"numerator           = $numTxt\n")
-      sb.append(s"RA(Term 0)          = -(${dot(numerator)}) / ${dot(head.crdQ1)} = ${dot(central.ra0, 8)}\n")
-      sb.append(s"VECTOR(Term 0)      = 1 - ${dot(central.ra0, 8)} = ${dot(central.vector0, 8)}\n")
-      sb.append(s"EAD_RA_RATE(Term 0) = ${dot(central.ead0, 8)}\n```\n\n")
-
-      // Per-scenario term-0 result table
-      sb.append("**Term-0 result per scenario**\n\n")
-      sb.append("| Scenario | delta(Q1) | RA(Term 0) | VECTOR | EAD_RA_RATE(Term 0) |\n")
-      sb.append("|---|---|---|---|---|\n")
-      // order scenarios by the canonical SCENARIO_CODES sequence
-      val order = PrimaryConstants.SCENARIO_CODES.map(_._1).zipWithIndex.toMap
-      group.sortBy(r => order.getOrElse(r.scenarioName, Int.MaxValue)).foreach { r =>
-        val deltaTxt = if (r.usesShock) dot(r.delta0, 6) else "—"
-        sb.append(s"| ${r.scenarioName} (${r.scenarioCode}) | $deltaTxt | ${dot(r.ra0, 8)} | ${dot(r.vector0, 8)} | ${dot(r.ead0, 8)} |\n")
+      // Worked Term-0 Central example, when term 0 was requested.
+      group.find(r => r.scenarioName == PrimaryConstants.SCENARIO_CENTRAL && r.term == 0.0).foreach { c =>
+        val numerator = if (head.fwlApplied) c.statAgg + c.fiAgg + c.reAgg else c.statAgg
+        val numTxt = if (head.fwlApplied)
+          s"${dot(c.statAgg)} + ${dot(c.fiAgg)} + ${dot(c.reAgg)} = ${dot(numerator)}"
+        else dot(c.statAgg)
+        sb.append("**Worked Term 0 — Central (no shock)**\n\n```\n")
+        sb.append(s"numerator           = $numTxt\n")
+        sb.append(s"RA(Term 0)          = -(${dot(numerator)}) / ${dot(c.crdAgg)} = ${dot(c.ra, 8)}\n")
+        sb.append(s"VECTOR(Term 0)      = 1 - ${dot(c.ra, 8)} = ${dot(c.vector, 8)}\n")
+        sb.append(s"EAD_RA_RATE(Term 0) = ${dot(c.ead, 8)}\n```\n\n")
       }
-      sb.append("\n")
 
-      // Shock-leg detail for FWL=YES matrices
-      val shocked = group.filter(_.usesShock)
-      if (shocked.nonEmpty) {
-        sb.append("**Shock detail (FWL=YES non-Central — stress leg Q1 values)**\n\n")
-        sb.append("| Scenario | stress leg | CRD_Q1 | RA_FI_Q1 | RE_Q1 | delta(Q1) |\n")
-        sb.append("|---|---|---|---|---|---|\n")
-        shocked.foreach { r =>
-          val leg = if (r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC) "STRESS (+)" else "STRESS (-)"
-          sb.append(s"| ${r.scenarioName} (${r.scenarioCode}) | $leg | ${dot(r.legCrdQ1)} | ${dot(r.legFiQ1)} | ${dot(r.legReQ1)} | ${dot(r.delta0, 6)} |\n")
+      // Per-scenario term table.
+      group.groupBy(_.scenarioName).toSeq
+        .sortBy { case (scen, _) => scenOrder.getOrElse(scen, Int.MaxValue) }
+        .foreach { case (scen, scenRows) =>
+          val code = scenRows.head.scenarioCode
+          sb.append(s"**$scen ($code) — per-term breakdown**\n\n")
+          val engCols = if (reconciled) " ENGINE | STATUS |" else ""
+          val engSep  = if (reconciled) "---|---|" else ""
+          sb.append(s"| term | CRD | RA_STAT | RA_FI | RE | delta | RA | VECTOR | EAD_RA_RATE |$engCols\n")
+          sb.append(s"|---|---|---|---|---|---|---|---|---|$engSep\n")
+          scenRows.sortBy(_.term).foreach { r =>
+            val deltaTxt = if (r.usesShock) dot(r.delta, 6) else "—"
+            val eng = if (reconciled) s" ${dot(r.engineEad, 8)} | ${if (r.status.isEmpty) "—" else r.status} |" else ""
+            sb.append(s"| ${termStr(r.term)} | ${dot(r.crdAgg)} | ${dot(r.statAgg)} | ${dot(r.fiAgg)} | " +
+              s"${dot(r.reAgg)} | $deltaTxt | ${dot(r.ra, 8)} | ${dot(r.vector, 8)} | ${dot(r.ead, 8)} |$eng\n")
+          }
+          sb.append("\n")
         }
-        sb.append("\n")
-      }
       sb.append("---\n\n")
     }
     sb.toString()
