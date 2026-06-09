@@ -99,14 +99,17 @@ spark-submit --class com.bnp.str.tseadfwd.job.EadFwdCompare \
 
 ### Configuration (`tseadfwd_app`)
 
+Input blocks and output/job blocks live at the root; engine **run parameters** are grouped under
+`parameters { … }`.
+
 | Key | Meaning |
 |---|---|
 | `RA_*`, `MACRO_VARIABLE`, `PARAMETRAGE` `.path` / `.sheetNames` | input workbook paths/sheets |
-| `as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) |
-| `last_quarter_projection_horizon` | **fallback** shock-window end, used only when a matrix's `PROJECTION_HORIZON` is blank |
-| `apply_rate_to_shock` | scale the FWL=YES shock by the macro `Rate/100` (true) or apply it full-size (false) |
-| `debug` | log titled `show()` of inputs + a per-term trace |
-| `validation.strict` | abort the run on a data-control FAIL (true) or only warn (false) |
+| `parameters.as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) |
+| `parameters.last_quarter_projection_horizon` | **fallback** shock-window end, used only when a matrix's `PROJECTION_HORIZON` is blank |
+| `parameters.apply_rate_to_shock` | scale the FWL=YES shock by the macro `Rate/100` (true) or apply it full-size (false) |
+| `parameters.debug` | log titled `show()` of inputs + a per-term trace |
+| `parameters.validation.strict` | abort the run on a data-control FAIL (true) or only warn (false) |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output settings |
 | `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job |
 | `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job |

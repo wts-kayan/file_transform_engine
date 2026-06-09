@@ -34,18 +34,24 @@ class PrimaryMapper(
 
   private val appConf = config.getConfig(APP_CONF)
   /**
+   * Engine run parameters, grouped under `tseadfwd_app.parameters`. Falls back to the app root when
+   * the `parameters` block is absent (backward compatibility / minimal test configs).
+   */
+  private val paramsConf: Config =
+    if (appConf.hasPath("parameters")) appConf.getConfig("parameters") else appConf
+  /**
    * Projection start quarter = term 0 (the as-of date). The FWL=YES shock reads the scenario macro
    * path from here, one step per quarter. (Renamed from `shock_window_start`.)
    */
   private val asOfDateQuarter: String =
-    if (appConf.hasPath("as_of_date_quarter")) appConf.getString("as_of_date_quarter") else "2021Q1"
+    if (paramsConf.hasPath("as_of_date_quarter")) paramsConf.getString("as_of_date_quarter") else "2021Q1"
   /**
    * Fallback last quarter of the projection horizon, used ONLY when a matrix's PARAMETRAGE
    * `PROJECTION_HORIZON` cell is blank/unparseable. Normally each matrix's shock-window end is
    * derived as `as_of_date_quarter + PROJECTION_HORIZON` (e.g. "3Y"). (Renamed from `shock_window_end`.)
    */
   private val lastQuarterProjectionHorizon: String =
-    if (appConf.hasPath("last_quarter_projection_horizon")) appConf.getString("last_quarter_projection_horizon") else "2025Q4"
+    if (paramsConf.hasPath("last_quarter_projection_horizon")) paramsConf.getString("last_quarter_projection_horizon") else "2025Q4"
 
   /**
    * FWL=YES scenario shock scaling (schema interpretation toggle, default true):
@@ -55,7 +61,7 @@ class PrimaryMapper(
    *            makes Adverse = Extreme (both STRESS(-)) — kept so we can compare both readings.
    */
   private val applyRateToShock: Boolean =
-    if (appConf.hasPath("apply_rate_to_shock")) appConf.getBoolean("apply_rate_to_shock") else true
+    if (paramsConf.hasPath("apply_rate_to_shock")) paramsConf.getBoolean("apply_rate_to_shock") else true
 
   /** Quarter "yyyyQq" -> ordinal (quarters since year 0); inverse is [[qLabel]]. */
   private def qOrd(q: String): Int = { val p = q.split("Q"); p(0).trim.toInt * 4 + (p(1).trim.toInt - 1) }
@@ -101,11 +107,11 @@ class PrimaryMapper(
     matrices.filter(_.fwlApplied).flatMap(m => shockWindowFor(m.projectionHorizon)).distinct.sortBy(qOrd).toVector
   /** When true, log a titled `show()` of the inputs and a full per-term trace per matrix. */
   private val debug: Boolean =
-    if (appConf.hasPath("debug")) appConf.getBoolean("debug") else false
+    if (paramsConf.hasPath("debug")) paramsConf.getBoolean("debug") else false
 
   /** When true (default), a failed pre-calculation data control aborts the run; otherwise it only warns. */
   private val validationStrict: Boolean =
-    if (appConf.hasPath("validation.strict")) appConf.getBoolean("validation.strict") else true
+    if (paramsConf.hasPath("validation.strict")) paramsConf.getBoolean("validation.strict") else true
 
   /** Log a title, then show the DataFrame (used to label every debug dump). */
   private def logShow(title: String, df: DataFrame, numRows: Int = 250): Unit = {
@@ -487,7 +493,7 @@ class PrimaryMapper(
     if (failures.nonEmpty && validationStrict)
       throw new IllegalStateException(
         s"Pre-calculation data control FAILED (${failures.size} check(s)); aborting before calculation. " +
-          s"Set $APP_CONF.validation.strict=false to override.\n" +
+          s"Set $APP_CONF.parameters.validation.strict=false to override.\n" +
           failures.map(c => s"  - ${c.name}: ${c.detail}").mkString("\n"))
   }
 

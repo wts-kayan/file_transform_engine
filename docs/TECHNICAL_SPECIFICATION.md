@@ -256,18 +256,20 @@ emitted value = min(1, max(0, EAD_RA_RATE_p))   (clamp backstop: an exposure fac
 
 ## 5. Configuration (`localRun/tseadfwd/application.conf`)
 
-Under `tseadfwd_app`:
+Under `tseadfwd_app`. Engine **run parameters** (the computation settings, not the input/output
+blocks) are grouped under a `parameters { … }` object; input blocks (`RA_*`, `MACRO_VARIABLE`,
+`PARAMETRAGE`) and output/job blocks (`TS_EAD_FWD`, `COMPARE`, `TERM0_ANALYSIS`) stay at the root.
 
 | Key | Meaning | Current value |
 |-----|---------|---------------|
 | `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | `Inputs_RA_v2.xlsx` / `RA_BCEF` |
 | `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel | `PARAMETRAGE_corrected.xlsx` / `PARAMETRAGE` |
 | `MACRO_VARIABLE.path` / `.sheetNames` | scenario **Excel workbook, one sheet per scenario** (read + unioned by `readScenarioFromExcelSheets`; sheet name → `Scenario_ID`) | `Scenario_EAD_FWD.xlsx` / `["Central","Adverse","Optimistic","Extreme"]` |
-| `as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) | `"2025Q4"` |
-| `last_quarter_projection_horizon` | fallback shock-window end, used only when a matrix's PARAMETRAGE `PROJECTION_HORIZON` is blank (normally end = `as_of + PROJECTION_HORIZON`) | `"2028Q4"` |
-| `apply_rate_to_shock` | FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
-| `debug` | enable titled `show()` of inputs + per-term trace | `false` |
-| `validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
+| `parameters.as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) | `"2025Q4"` |
+| `parameters.last_quarter_projection_horizon` | fallback shock-window end, used only when a matrix's PARAMETRAGE `PROJECTION_HORIZON` is blank (normally end = `as_of + PROJECTION_HORIZON`) | `"2028Q4"` |
+| `parameters.apply_rate_to_shock` | FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
+| `parameters.debug` | enable titled `show()` of inputs + per-term trace | `false` |
+| `parameters.validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
 | `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job — diff an output CSV vs a target CSV | — |
 | `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job — analysis breakdown (+ engine reconciliation) | — |
