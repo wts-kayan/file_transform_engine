@@ -101,7 +101,7 @@ class PrimaryMapper(
       // (e.g. "STRESS (+)" vs "STRESS (+) " vs "STRESS(+)"). An empty/missing key here is the
       // direct cause of an EMPTY ra_detail downstream.
       val keyLines = ra.toSeq
-        .map { case ((seg, rt, fwl, metric), arr) => s"[$seg|$rt|$fwl|$metric] len=${arr.length}" }
+        .map { case ((perim, seg, rt, fwl, metric), arr) => s"[$perim|$seg|$rt|$fwl|$metric] len=${arr.length}" }
         .sorted
       log.info(s"PARSED - RA keys (${ra.size}):\n  " + keyLines.mkString("\n  "))
 
@@ -171,12 +171,12 @@ class PrimaryMapper(
   /** Build the per-term breakdown rows for one matrix / scenario (empty if there is nothing to compute). */
   private def termRowsFor(
                            m: MatrixDef, freq: Frequency, scenName: String, scenCode: String,
-                           ra: Map[(String, String, String, String), Array[Double]],
+                           ra: Map[(String, String, String, String, String), Array[Double]],
                            macroData: Map[(String, String), Map[String, Double]],
                            terms: Seq[Double]
                          ): Seq[Term0RowView] = {
     def series(fwl: String, metric: String): Array[Double] =
-      aggregateSegments(ra, m.segments, m.rateType, fwl, metric)
+      aggregateSegments(ra, m.perimeter, m.segments, m.rateType, fwl, metric)
 
     val crd    = series(FWL_BASELINE, METRIC_CRD)
     val raStat = series(FWL_BASELINE, METRIC_RA_STAT)
@@ -241,11 +241,11 @@ class PrimaryMapper(
                           freq: Frequency,
                           scenName: String,
                           scenCode: String,
-                          ra: Map[(String, String, String, String), Array[Double]],
+                          ra: Map[(String, String, String, String, String), Array[Double]],
                           macroData: Map[(String, String), Map[String, Double]]
                         ): Seq[Row] = {
     def series(fwl: String, metric: String): Array[Double] =
-      aggregateSegments(ra, m.segments, m.rateType, fwl, metric)
+      aggregateSegments(ra, m.perimeter, m.segments, m.rateType, fwl, metric)
 
     val crd    = series(FWL_BASELINE, METRIC_CRD)
     val raStat = series(FWL_BASELINE, METRIC_RA_STAT)
@@ -382,10 +382,17 @@ class PrimaryMapper(
     df.columns.filter(c => c.length > 1 && c.charAt(0) == 'M' && c.drop(1).forall(_.isDigit))
       .sortBy(_.drop(1).toInt)
 
-  /** key = (SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) -> monthly series (M1..Mn). */
-  private def collectRa(df: DataFrame): Map[(String, String, String, String), Array[Double]] = {
+  /**
+   * key = (PERIMETER, SEGMENT, RATE_TYPE, FWL_TYPE, METRIC) -> monthly series (M1..Mn).
+   *
+   * PERIMETER is part of the key: the RA input unions several entities (BCEF/BGL/BNL/…) and the
+   * same SEGMENT name (e.g. MORTGAGE) recurs across them, so omitting PERIMETER would collide those
+   * rows and `.toMap` would keep only the LAST one — making every perimeter's MORTGAGE matrix use a
+   * single (wrong) entity's data. `aggregateSegments` looks up with the matrix's perimeter to match.
+   */
+  private def collectRa(df: DataFrame): Map[(String, String, String, String, String), Array[Double]] = {
     val months = monthColumns(df)
-    val cols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ months
+    val cols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ months
     df.select(cols.head, cols.tail: _*).collect().map { r =>
       // Canonicalize key fields (null-safe): Excel cells frequently carry leading/trailing or
       // embedded odd whitespace (incl. the NBSP/narrow no-break space POI emits on French-locale
@@ -393,9 +400,9 @@ class PrimaryMapper(
       // ("STRESS (+)") and yield an empty series -> empty ra_detail -> empty non-Central scenarios.
       // canon() normalizes both this map's keys and the aggregateSegments lookup tuple identically.
       def key0(i: Int): String = canon(Option(r.get(i)).map(_.toString).getOrElse(""))
-      val key = (key0(0), key0(1), key0(2), key0(3))
+      val key = (key0(0), key0(1), key0(2), key0(3), key0(4))
       // Schema preamble (r1): forward-fill a short series flat to M361 with its last month's value.
-      val series = padForward(months.indices.map(i => toDouble(r.get(4 + i))).toArray)
+      val series = padForward(months.indices.map(i => toDouble(r.get(5 + i))).toArray)
       key -> series
     }.toMap
   }
@@ -408,7 +415,7 @@ class PrimaryMapper(
    * Always on (independent of the debug flag).
    */
   private def runDataControl(
-                              ra: Map[(String, String, String, String), Array[Double]],
+                              ra: Map[(String, String, String, String, String), Array[Double]],
                               macroData: Map[(String, String), Map[String, Double]],
                               matrices: Seq[MatrixDef]
                             ): Unit = {
@@ -439,7 +446,7 @@ class PrimaryMapper(
 
   /** All technical-control checks on the parsed inputs (keys already canon()ed). */
   private def buildControlChecks(
-                                  ra: Map[(String, String, String, String), Array[Double]],
+                                  ra: Map[(String, String, String, String, String), Array[Double]],
                                   macroData: Map[(String, String), Map[String, Double]],
                                   matrices: Seq[MatrixDef]
                                 ): Seq[ControlCheck] = {
@@ -466,8 +473,8 @@ class PrimaryMapper(
     else add("RA.rows", Severity.Pass, s"${ra.size} RA series parsed")
 
     // --- label vocabulary (canonicalized) ---
-    val fwlPresent = ra.keySet.map(_._3)
-    val metricPresent = ra.keySet.map(_._4)
+    val fwlPresent = ra.keySet.map(_._4)
+    val metricPresent = ra.keySet.map(_._5)
     val missingFwl = Seq(FWL_BASELINE, FWL_STRESS_PLUS, FWL_STRESS_MINUS).filterNot(f => fwlPresent.contains(canon(f)))
     val missingMetric = Seq(METRIC_CRD, METRIC_RA_STAT, METRIC_RA_FI, METRIC_RE).filterNot(m => metricPresent.contains(canon(m)))
     if (missingFwl.isEmpty && missingMetric.isEmpty)
@@ -489,8 +496,8 @@ class PrimaryMapper(
     // --- per-matrix stress legs for FWL=YES ---
     val legIssues = for {
       m <- matrices if m.fwlApplied
-      plus = m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_STRESS_PLUS), canon(METRIC_RA_FI))))
-      minus = m.segments.exists(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_STRESS_MINUS), canon(METRIC_RA_FI))))
+      plus = m.segments.exists(s => ra.contains((canon(m.perimeter), canon(s), canon(m.rateType), canon(FWL_STRESS_PLUS), canon(METRIC_RA_FI))))
+      minus = m.segments.exists(s => ra.contains((canon(m.perimeter), canon(s), canon(m.rateType), canon(FWL_STRESS_MINUS), canon(METRIC_RA_FI))))
       if !plus || !minus
     } yield s"${m.outSegment}/${m.rateType}(+=$plus,-=$minus)"
     if (matrices.exists(_.fwlApplied)) {
@@ -503,7 +510,7 @@ class PrimaryMapper(
     else add("PARAMETRAGE.matrices", Severity.Pass, s"${matrices.size} matrices resolved")
 
     val orphanSegs = matrices.flatMap(m =>
-      m.segments.filterNot(s => ra.contains((canon(s), canon(m.rateType), canon(FWL_BASELINE), canon(METRIC_CRD))))).distinct
+      m.segments.filterNot(s => ra.contains((canon(m.perimeter), canon(s), canon(m.rateType), canon(FWL_BASELINE), canon(METRIC_CRD))))).distinct
     if (orphanSegs.isEmpty) add("PARAMETRAGE.segments", Severity.Pass, "all referenced segments have BASELINE/CRD in RA")
     else add("PARAMETRAGE.segments", Severity.Warn, s"segment(s) referenced by PARAMETRAGE but absent from RA BASELINE/CRD: ${orphanSegs.mkString(", ")}")
 
@@ -569,13 +576,13 @@ class PrimaryMapper(
     }
   }
 
-  /** Element-wise sum of the monthly series across constituent segments (same rate type). */
+  /** Element-wise sum of the monthly series across constituent segments (same perimeter + rate type). */
   private def aggregateSegments(
-                                 ra: Map[(String, String, String, String), Array[Double]],
-                                 segments: Seq[String], rateType: String, fwl: String, metric: String
+                                 ra: Map[(String, String, String, String, String), Array[Double]],
+                                 perimeter: String, segments: Seq[String], rateType: String, fwl: String, metric: String
                                ): Array[Double] = {
     // canon() the lookup tuple to match collectRa's canonicalized keys (whitespace/NBSP/case).
-    val present = segments.flatMap(s => ra.get((canon(s), canon(rateType), canon(fwl), canon(metric))))
+    val present = segments.flatMap(s => ra.get((canon(perimeter), canon(s), canon(rateType), canon(fwl), canon(metric))))
     if (present.isEmpty) Array.empty
     else {
       val len = present.map(_.length).max
