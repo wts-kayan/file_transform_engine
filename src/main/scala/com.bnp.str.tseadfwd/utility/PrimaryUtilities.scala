@@ -8,7 +8,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.StructType
 
-import java.io.{BufferedReader, InputStreamReader, Reader}
+import java.io.{BufferedReader, BufferedWriter, InputStreamReader, OutputStreamWriter, Reader, Writer}
+import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 
@@ -141,6 +142,30 @@ object PrimaryUtilities {
     val fs = FileSystem.get(sc.hadoopConfiguration)
     val path = new Path(filePath)
     new BufferedReader(new InputStreamReader(fs.open(path)))
+  }
+
+  /**
+   * Opens a file for writing through Hadoop's FileSystem and returns a UTF-8 BufferedWriter.
+   * The same call resolves a local path, a `--files`-shipped basename, or an `hdfs://` path —
+   * mirroring [[getHdfsReader]] — so analysis/report outputs land on the cluster (or locally in
+   * a local Spark session) without the caller knowing which. Overwrites any existing file and
+   * creates parent directories as needed.
+   *
+   * @param filePath The full path to the file to write (local or HDFS).
+   * @param sc The SparkContext to access Hadoop configurations.
+   * @return A Writer the caller is responsible for closing.
+   */
+  def getHdfsWriter(filePath: String)(sc: SparkContext): Writer = {
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val path = new Path(filePath)
+    Option(path.getParent).foreach(p => fs.mkdirs(p))
+    new BufferedWriter(new OutputStreamWriter(fs.create(path, true), StandardCharsets.UTF_8))
+  }
+
+  /** Convenience: write an entire string to a (local or HDFS) path through [[getHdfsWriter]]. */
+  def writeStringToHdfs(filePath: String, content: String)(sc: SparkContext): Unit = {
+    val w = getHdfsWriter(filePath)(sc)
+    try w.write(content) finally w.close()
   }
 
   /**

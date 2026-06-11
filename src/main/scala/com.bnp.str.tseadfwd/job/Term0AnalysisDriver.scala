@@ -8,8 +8,6 @@ import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
 
-import java.io.{File, PrintWriter}
-
 /**
  * Spark job that auto-generates the EAD_RA_RATE computation breakdown for every (matrix, scenario)
  * at a CONFIGURABLE set of terms, in the spirit of the hand-written
@@ -177,33 +175,34 @@ object Term0AnalysisDriver {
 
   // ---- CSV ------------------------------------------------------------------
 
-  private def writeCsv(path: String, rows: Seq[Term0RowView]): Unit = {
-    val f = new File(path)
-    Option(f.getParentFile).foreach(_.mkdirs())
-    val pw = new PrintWriter(f, "UTF-8")
-    try {
-      pw.println(Seq(
-        "EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "PERIOD", "FWL_APPLIED", "MACRO_VAR", "USES_SHOCK",
-        "CRD_M1", "CRD_M2", "CRD_M3", "STAT_M1", "STAT_M2", "STAT_M3",
-        "FI_M1", "FI_M2", "FI_M3", "RE_M1", "RE_M2", "RE_M3",
-        "CRD_AGG", "STAT_AGG", "FI_AGG", "RE_AGG",
-        "LEG_CRD_AGG", "LEG_FI_AGG", "LEG_RE_AGG",
-        "DELTA", "RA", "VECTOR", "EAD_RA_RATE", "ENGINE_EAD", "STATUS").mkString(";"))
-      sortRows(rows).foreach { r =>
-        def m(xs: Seq[Double], i: Int): String = if (i < xs.length) comma(xs(i)) else ""
-        pw.println(Seq(
-          r.matrixId, r.scenarioCode, comma(r.term), r.period.toString,
-          r.fwlApplied.toString, r.macroVar, r.usesShock.toString,
-          m(r.crdMonths, 0), m(r.crdMonths, 1), m(r.crdMonths, 2),
-          m(r.statMonths, 0), m(r.statMonths, 1), m(r.statMonths, 2),
-          m(r.fiMonths, 0), m(r.fiMonths, 1), m(r.fiMonths, 2),
-          m(r.reMonths, 0), m(r.reMonths, 1), m(r.reMonths, 2),
-          comma(r.crdAgg), comma(r.statAgg), comma(r.fiAgg), comma(r.reAgg),
-          comma(r.legCrdAgg), comma(r.legFiAgg), comma(r.legReAgg),
-          comma(r.delta), comma(r.ra), comma(r.vector), comma(r.ead),
-          comma(r.engineEad), r.status).mkString(";"))
-      }
-    } finally pw.close()
+  private def writeCsv(path: String, rows: Seq[Term0RowView])(implicit spark: SparkSession): Unit =
+    PrimaryUtilities.writeStringToHdfs(path, renderCsv(rows))(spark.sparkContext)
+
+  /** Render the decimal-comma, `;`-delimited CSV. Public for unit testing. */
+  def renderCsv(rows: Seq[Term0RowView]): String = {
+    val sb = new StringBuilder
+    sb.append(Seq(
+      "EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "PERIOD", "FWL_APPLIED", "MACRO_VAR", "USES_SHOCK",
+      "CRD_M1", "CRD_M2", "CRD_M3", "STAT_M1", "STAT_M2", "STAT_M3",
+      "FI_M1", "FI_M2", "FI_M3", "RE_M1", "RE_M2", "RE_M3",
+      "CRD_AGG", "STAT_AGG", "FI_AGG", "RE_AGG",
+      "LEG_CRD_AGG", "LEG_FI_AGG", "LEG_RE_AGG",
+      "DELTA", "RA", "VECTOR", "EAD_RA_RATE", "ENGINE_EAD", "STATUS").mkString(";")).append("\n")
+    sortRows(rows).foreach { r =>
+      def m(xs: Seq[Double], i: Int): String = if (i < xs.length) comma(xs(i)) else ""
+      sb.append(Seq(
+        r.matrixId, r.scenarioCode, comma(r.term), r.period.toString,
+        r.fwlApplied.toString, r.macroVar, r.usesShock.toString,
+        m(r.crdMonths, 0), m(r.crdMonths, 1), m(r.crdMonths, 2),
+        m(r.statMonths, 0), m(r.statMonths, 1), m(r.statMonths, 2),
+        m(r.fiMonths, 0), m(r.fiMonths, 1), m(r.fiMonths, 2),
+        m(r.reMonths, 0), m(r.reMonths, 1), m(r.reMonths, 2),
+        comma(r.crdAgg), comma(r.statAgg), comma(r.fiAgg), comma(r.reAgg),
+        comma(r.legCrdAgg), comma(r.legFiAgg), comma(r.legReAgg),
+        comma(r.delta), comma(r.ra), comma(r.vector), comma(r.ead),
+        comma(r.engineEad), r.status).mkString(";")).append("\n")
+    }
+    sb.toString()
   }
 
   /** Stable order: matrix, scenario (canonical order), then term. */
@@ -214,12 +213,8 @@ object Term0AnalysisDriver {
 
   // ---- Markdown -------------------------------------------------------------
 
-  private def writeMarkdown(path: String, rows: Seq[Term0RowView]): Unit = {
-    val f = new File(path)
-    Option(f.getParentFile).foreach(_.mkdirs())
-    val pw = new PrintWriter(f, "UTF-8")
-    try pw.print(renderMarkdown(rows)) finally pw.close()
-  }
+  private def writeMarkdown(path: String, rows: Seq[Term0RowView])(implicit spark: SparkSession): Unit =
+    PrimaryUtilities.writeStringToHdfs(path, renderMarkdown(rows))(spark.sparkContext)
 
   /** Render the full Markdown narrative. Public for unit testing. */
   def renderMarkdown(rows: Seq[Term0RowView]): String = {
