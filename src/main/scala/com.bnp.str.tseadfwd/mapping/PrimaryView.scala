@@ -217,12 +217,17 @@ object PrimaryView {
     buf.result()
   }
 
-  /** Cumulative product of (1 - RA), clamped to [0,1] (an exposure factor can't be <0 or >1). */
+  /**
+   * Cumulative product of (1 - RA). Emitted value is capped at 1 (an exposure factor can't exceed 1).
+   * A NEGATIVE running product is reported as 1 (treat a sub-zero result as "full exposure", per
+   * request). NOTE: this lower backstop is currently unreachable — the RUNOFF_RA_CAP=1.0 guard
+   * truncates the RA series at the first RA >= 1, so every (1-RA) factor stays > 0 and the product
+   * never goes negative; it only matters if that truncation is ever relaxed. `acc` keeps the true
+   * running product so subsequent terms still compound correctly.
+   */
   def vectorFactored(ra: Vector[Double]): Vector[Double] = {
     var acc = 1.0
-    // Emit the clamped value but keep `acc` as the true running product (the RUNOFF_RA_CAP guard
-    // already keeps each (1-RA) factor in (0,1]; this clamp is a cheap backstop for odd data).
-    ra.map { x => acc *= (1.0 - x); math.max(0.0, math.min(1.0, acc)) }
+    ra.map { x => acc *= (1.0 - x); if (acc < 0.0) 1.0 else math.min(1.0, acc) }
   }
 
   /**
