@@ -173,6 +173,54 @@ object Term0AnalysisDriver {
   private def month(xs: Seq[Double], i: Int, dp: Int = 6): String =
     if (i < xs.length) dot(xs(i), dp) else "n/a"
 
+  /** Loss-rate determinant `-x / c` (0 when CRD has run off) — mirrors PrimaryView.scenarioRa. */
+  private def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
+
+  /**
+   * The exact arithmetic the engine used to reach RA / VECTOR / EAD_RA_RATE at one term, rendered as
+   * a worked block. A non-shock term (Central, or any scenario when FWL=NO) uses
+   * `RA = -(STAT[+FI+RE]) / CRD`; a shocked term decomposes the stat / fire-base / shock pieces of
+   * [[PrimaryView.scenarioRa]]. The cumulative-product line shows the explicit `prevEad * VECTOR`
+   * only when this term's period immediately follows the previous listed one — otherwise intermediate
+   * periods are hidden, so it states the running product instead of inventing a one-step multiply.
+   */
+  private def termSteps(r: Term0RowView, prevPeriod: Int, prevEad: Double): String = {
+    val sb = new StringBuilder
+    val t  = termStr(r.term)
+    val consecutive = !prevEad.isNaN && r.period == prevPeriod + 1
+    val eadLine =
+      if (consecutive) s"EAD_RA_RATE($t) = ${dot(prevEad, 8)} * ${dot(r.vector, 8)} = ${dot(r.ead, 8)}"
+      else s"EAD_RA_RATE($t) = running product of VECTOR through period ${r.period} = ${dot(r.ead, 8)}"
+
+    if (r.crdAgg == 0.0) {
+      sb.append(s"term $t (period ${r.period}) -- CRD run off (=0): RA = 0, VECTOR = 1\n")
+    } else if (r.usesShock) {
+      val statDet     = det(r.statAgg, r.crdAgg)
+      val fireBaseDet = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)
+      val shockFi     = det(r.legFiAgg, r.legCrdAgg) - det(r.fiAgg, r.crdAgg)
+      val shockRe     = det(r.legReAgg, r.legCrdAgg) - det(r.reAgg, r.crdAgg)
+      sb.append(s"term $t (period ${r.period}, macro delta = ${dot(r.delta, 6)})\n")
+      sb.append(s"  stat_det      = -(STAT)/CRD             = -(${dot(r.statAgg)}) / ${dot(r.crdAgg)} = ${dot(statDet, 8)}\n")
+      sb.append(s"  fire_base_det = -(FI+RE)/CRD            = -(${dot(r.fiAgg)} + ${dot(r.reAgg)}) / ${dot(r.crdAgg)} = ${dot(fireBaseDet, 8)}\n")
+      sb.append(s"  shock_fi      = -FI_leg/CRD_leg + FI/CRD = ${dot(shockFi, 8)}\n")
+      sb.append(s"  shock_re      = -RE_leg/CRD_leg + RE/CRD = ${dot(shockRe, 8)}\n")
+      sb.append(s"  RA($t)        = stat_det + fire_base_det - (shock_fi + shock_re) * delta\n")
+      sb.append(s"                = ${dot(statDet, 8)} + ${dot(fireBaseDet, 8)} - (${dot(shockFi, 8)} + ${dot(shockRe, 8)}) * ${dot(r.delta, 6)} = ${dot(r.ra, 8)}\n")
+      sb.append(s"  VECTOR($t)    = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+    } else {
+      val numerator = if (r.fwlApplied) r.statAgg + r.fiAgg + r.reAgg else r.statAgg
+      val numTxt =
+        if (r.fwlApplied) s"${dot(r.statAgg)} + ${dot(r.fiAgg)} + ${dot(r.reAgg)} = ${dot(numerator)}"
+        else dot(r.statAgg)
+      sb.append(s"term $t (period ${r.period})\n")
+      sb.append(s"  numerator     = ${if (r.fwlApplied) "STAT + FI + RE" else "STAT"} = $numTxt\n")
+      sb.append(s"  RA($t)        = -(${dot(numerator)}) / ${dot(r.crdAgg)} = ${dot(r.ra, 8)}\n")
+      sb.append(s"  VECTOR($t)    = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+    }
+    sb.append(s"  $eadLine\n\n")
+    sb.toString()
+  }
+
   // ---- CSV ------------------------------------------------------------------
 
   private def writeCsv(path: String, rows: Seq[Term0RowView])(implicit spark: SparkSession): Unit =
@@ -290,6 +338,19 @@ object Term0AnalysisDriver {
               s"${dot(r.reAgg)} | $deltaTxt | ${dot(r.ra, 8)} | ${dot(r.vector, 8)} | ${dot(r.ead, 8)} |$eng\n")
           }
           sb.append("\n")
+
+          // Worked computation steps for every listed term — the exact arithmetic of
+          // PrimaryView.scenarioRa, so each line shows how the engine reached RA / VECTOR /
+          // EAD_RA_RATE at that term and the cumulative product is auditable term by term.
+          sb.append(s"*$scen ($code) — worked computation steps per term*\n\n```\n")
+          var prevPeriod = Int.MinValue
+          var prevEad    = Double.NaN
+          scenRows.sortBy(_.term).foreach { r =>
+            sb.append(termSteps(r, prevPeriod, prevEad))
+            prevPeriod = r.period
+            prevEad    = r.ead
+          }
+          sb.append("```\n\n")
         }
       sb.append("---\n\n")
     }
