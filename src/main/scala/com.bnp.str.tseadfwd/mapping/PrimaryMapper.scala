@@ -63,6 +63,15 @@ class PrimaryMapper(
   private val applyRateToShock: Boolean =
     if (paramsConf.hasPath("apply_rate_to_shock")) paramsConf.getBoolean("apply_rate_to_shock") else true
 
+  /**
+   * Unit scale applied to the per-term macro delta (`scenario − Central`) before it scales the
+   * stress-vs-baseline shock in [[PrimaryView.scenarioRa]]. The raw macro difference is in the
+   * scenario file's native unit; this converts it to the unit the shock expects. Default `1.0`
+   * (raw) when absent. Example: `10000` turns a raw delta of `0.00025` into `2.5`.
+   */
+  private val macroDeltaScale: Double =
+    if (paramsConf.hasPath("macro_delta_scale")) paramsConf.getDouble("macro_delta_scale") else 1.0
+
   /** Quarter "yyyyQq" -> ordinal (quarters since year 0); inverse is [[qLabel]]. */
   private def qOrd(q: String): Int = { val p = q.split("Q"); p(0).trim.toInt * 4 + (p(1).trim.toInt - 1) }
   private def qLabel(o: Int): String = s"${o / 4}Q${o % 4 + 1}"
@@ -404,14 +413,18 @@ class PrimaryMapper(
     sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(rows, 1), schema)
   }
 
-  /** Signed macro delta (scenario - Central) for `macroVar` at each quarter of the given shock window. */
+  /**
+   * Signed macro delta (`scenario - Central`) for `macroVar` at each quarter of the given shock
+   * window, scaled by [[macroDeltaScale]] (default 1.0) to convert the raw macro unit into the unit
+   * the shock expects — e.g. scale 10000 turns a 0.00025 raw delta into 2.5.
+   */
   private def macroDeltaArray(
                                macroData: Map[(String, String), Map[String, Double]],
                                scenName: String, macroVar: String, window: Vector[String]
                              ): Array[Double] =
     window.map { q =>
       def v(scen: String): Double = macroData.get((scen, q)).flatMap(_.get(macroVar)).getOrElse(0.0)
-      v(scenName) - v(SCENARIO_CENTRAL)
+      (v(scenName) - v(SCENARIO_CENTRAL)) * macroDeltaScale
     }.toArray
 
   /**
