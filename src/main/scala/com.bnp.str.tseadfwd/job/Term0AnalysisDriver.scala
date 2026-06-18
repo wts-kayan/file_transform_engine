@@ -32,10 +32,24 @@ object Term0AnalysisDriver {
 
   private val logger = LoggerFactory.getLogger(this.getClass)
 
-  def main(args: Array[String]): Unit = {
-    val confPath = args.lift(0).getOrElse("localRun/tseadfwd/application.conf")
+  def main(args: Array[String]): Unit =
+    run(
+      confPath   = args.lift(0).getOrElse("localRun/tseadfwd/application.conf"),
+      appName    = "term0-analysis",
+      blockName  = "TERM0_ANALYSIS",
+      freq       = PrimaryView.Quarterly,
+      defaultMd  = "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.md",
+      defaultCsv = "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.csv")
 
-    implicit val spark: SparkSession = SparkSessionManager.fetchSparkSession("term0-analysis")
+  /**
+   * Shared analysis pipeline driving both the quarterly entry point ([[Term0AnalysisDriver.main]])
+   * and the yearly one ([[YearAnalysisDriver.main]]). It is identical for the two frequencies — the
+   * only differences are `freq` (the aggregation grid), `blockName` (the `application.conf` sub-block
+   * read for terms/tol/enginePath/paths), the Spark `appName`, and the fallback `defaultMd`/`defaultCsv`.
+   */
+  private[job] def run(confPath: String, appName: String, blockName: String,
+                       freq: PrimaryView.Frequency, defaultMd: String, defaultCsv: String): Unit = {
+    implicit val spark: SparkSession = SparkSessionManager.fetchSparkSession(appName)
     spark.sparkContext.setLogLevel("ERROR")
 
     // Read the conf through Hadoop's FileSystem (like MainDriver), so the same call resolves a
@@ -46,13 +60,13 @@ object Term0AnalysisDriver {
     }
     val appConf = config.getConfig(PrimaryConstants.APP_CONF)
     val anaConf =
-      if (appConf.hasPath("TERM0_ANALYSIS")) appConf.getConfig("TERM0_ANALYSIS") else ConfigFactory.empty()
+      if (appConf.hasPath(blockName)) appConf.getConfig(blockName) else ConfigFactory.empty()
 
     // ---- generation gate ----
     val enabled = !anaConf.hasPath("enabled") || anaConf.getBoolean("enabled")
     if (!enabled) {
-      logger.info("TERM0_ANALYSIS.enabled = false -> analysis generation skipped.")
-      println(">>> Term analysis disabled (TERM0_ANALYSIS.enabled = false); nothing generated.")
+      logger.info(s"$blockName.enabled = false -> analysis generation skipped.")
+      println(s">>> Term analysis disabled ($blockName.enabled = false); nothing generated.")
       spark.stop()
       return
     }
@@ -69,8 +83,8 @@ object Term0AnalysisDriver {
     }
     val tol         = if (anaConf.hasPath("tol")) anaConf.getDouble("tol") else 1e-6
     val enginePath  = if (anaConf.hasPath("enginePath")) Some(anaConf.getString("enginePath")) else None
-    val mdPath      = strOr("mdPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.md")
-    val csvPath     = strOr("csvPath", "localRun/tseadfwd/output/ANALYSIS_TERM0_GENERATED.csv")
+    val mdPath      = strOr("mdPath", defaultMd)
+    val csvPath     = strOr("csvPath", defaultCsv)
 
     val reader = new PrimaryReader()
     val mapper = new PrimaryMapper(
@@ -80,9 +94,9 @@ object Term0AnalysisDriver {
       PrimaryConstants.OUTPUT_EAD_FWD
     )
 
-    val rawRows = mapper.term0AnalysisRows(terms, PrimaryView.Quarterly)
-    logger.info(s"Term analysis: ${rawRows.size} (matrix, scenario, term) breakdown(s) computed " +
-      s"over terms ${terms.map(snap).distinct.sorted.mkString(", ")}")
+    val rawRows = mapper.term0AnalysisRows(terms, freq)
+    logger.info(s"Term analysis (${freq.suffix}): ${rawRows.size} (matrix, scenario, term) breakdown(s) " +
+      s"computed over terms ${terms.map(snap).distinct.sorted.mkString(", ")}")
 
     // ---- reconcile against the real engine output, when configured ----
     val rows = enginePath match {
@@ -90,7 +104,7 @@ object Term0AnalysisDriver {
       case None     => rawRows
     }
 
-    writeMarkdown(mdPath, rows)
+    writeMarkdown(mdPath, rows, freq)
     writeCsv(csvPath, rows)
 
     val nMatrices = rows.map(_.matrixId).distinct.size
@@ -103,7 +117,7 @@ object Term0AnalysisDriver {
         s"reconciled vs engine: ${statuses.count(_ == "MATCH")} MATCH, $diff DIFF, $miss MISSING"
       }
     }
-    println(s"\n>>> Term analysis written:\n    markdown: $mdPath\n    csv     : $csvPath" +
+    println(s"\n>>> Term analysis (${freq.suffix}) written:\n    markdown: $mdPath\n    csv     : $csvPath" +
       s"\n    ($nMatrices matrices x scenarios x $nTerms terms = ${rows.size} rows; $recoSummary)")
 
     spark.stop()
@@ -265,23 +279,35 @@ object Term0AnalysisDriver {
 
   // ---- Markdown -------------------------------------------------------------
 
-  private def writeMarkdown(path: String, rows: Seq[Term0RowView])(implicit spark: SparkSession): Unit =
-    PrimaryUtilities.writeStringToHdfs(path, renderMarkdown(rows))(spark.sparkContext)
+  private def writeMarkdown(path: String, rows: Seq[Term0RowView], freq: PrimaryView.Frequency)
+                           (implicit spark: SparkSession): Unit =
+    PrimaryUtilities.writeStringToHdfs(path, renderMarkdown(rows, freq))(spark.sparkContext)
 
-  /** Render the full Markdown narrative. Public for unit testing. */
-  def renderMarkdown(rows: Seq[Term0RowView]): String = {
+  /** Render the full Markdown narrative. Public for unit testing. `freq` only tunes the grid /
+   *  aggregation description in the header — all per-term values come from the rows. */
+  def renderMarkdown(rows: Seq[Term0RowView], freq: PrimaryView.Frequency = PrimaryView.Quarterly): String = {
     val sb = new StringBuilder
     val reconciled = rows.exists(_.status.nonEmpty)
     val allTerms = rows.map(_.term).distinct.sorted
 
+    // Grid label + aggregation description differ by frequency (see PrimaryView.aggregate).
+    val (gridLabel, aggText) = freq match {
+      case PrimaryView.Yearly =>
+        ("yearly grid; term 0 = Y1",
+          "Aggregation: `CRD = mean(window months)`; `RA metric = SUM(window months)` (Y1 = 6 months,\nYn = 12 months). ")
+      case _ =>
+        ("quarterly grid; term 0 = Q1",
+          "Aggregation: `CRD = mean(window months)`; `RA metric = M1 + M2/2` (Q1) / half-weight\nwindow thereafter. ")
+    }
+
     sb.append("# Analysis — EAD_RA_RATE computation breakdown (generated)\n\n")
-    sb.append("Auto-generated by the `Term0AnalysisDriver` job from the configured inputs — the machine\n")
+    sb.append("Auto-generated by the analysis driver job from the configured inputs — the machine\n")
     sb.append("equivalent of `docs/ANALYSIS_TERM0_COMPUTATION.md`. Every value is computed through the\n")
     sb.append("same validated parsing and `PrimaryView` formulas as the production output, so each\n")
     sb.append("`EAD_RA_RATE` matches the engine at that term.\n\n")
-    sb.append(s"Terms analysed (quarterly grid; term 0 = Q1): ${allTerms.map(termStr).mkString(", ")}.\n")
-    sb.append("Aggregation: `CRD = mean(window months)`; `RA metric = M1 + M2/2` (Q1) / half-weight\n")
-    sb.append("window thereafter. Loss rate: `RA = -(STAT+FI+RE)/CRD` (FWL=YES) or `-(STAT)/CRD` (FWL=NO);\n")
+    sb.append(s"Terms analysed ($gridLabel): ${allTerms.map(termStr).mkString(", ")}.\n")
+    sb.append(aggText)
+    sb.append("Loss rate: `RA = -(STAT+FI+RE)/CRD` (FWL=YES) or `-(STAT)/CRD` (FWL=NO);\n")
     sb.append("`VECTOR = 1 - RA`; `EAD_RA_RATE` = cumulative product of VECTOR (held flat past horizon).\n")
     if (reconciled)
       sb.append("`ENGINE` / `STATUS` reconcile each `EAD_RA_RATE` against the real engine output CSV.\n")
