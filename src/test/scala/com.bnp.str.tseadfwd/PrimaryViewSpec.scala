@@ -110,21 +110,32 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
     val central  = centralRa(crd, stat, fib, reb, Quarterly)
     // leg series arbitrary; delta=0 => shock contributes nothing => RA = STAT+FI+RE detail = central
     val scenario = scenarioRa(crd, stat, fib, reb,
-      Array.fill(12)(-100.0), Array.fill(12)(99.0), Array.fill(12)(99.0), Quarterly, _ => 0.0)
+      Array.fill(12)(-100.0), Array.fill(12)(99.0), Array.fill(12)(99.0), Quarterly, _ => 0.0, -1.0)
     scenario.length shouldBe central.length
     central.zip(scenario).foreach { case (c, s) => s shouldBe (c +- tol) }
   }
 
-  test("scenarioRa applies the schema shock: RA_FI_RE_base - (shockFI + shockRE) * delta") {
+  test("scenarioRa Adverse/Extreme (shockSign -1): RA_FI_RE_base - (shockFI + shockRE) * delta") {
     val crd  = Array.fill(9)(-100.0)
     val zero = Array.fill(9)(0.0)
     // base STAT/FI/RE = 0 -> statDet = fireBaseDet = 0; leg FI = 30 with its own CRD -100:
     // FI_leg_Q1 = 30 + 15 = 45 ; det(fl,cl) = -45/-100 = 0.45 ; shockFI = 0.45 - 0 = 0.45
     val fiLeg = Array.fill(9)(30.0)
     def ra(delta: Double) =
-      scenarioRa(crd, zero, zero, zero, crd, fiLeg, zero, Quarterly, _ => delta).head
+      scenarioRa(crd, zero, zero, zero, crd, fiLeg, zero, Quarterly, _ => delta, -1.0).head
     ra(2.0) shouldBe (-0.90 +- tol)  // 0 - (0.45 + 0) * 2
     ra(-2.0) shouldBe (0.90 +- tol)  // 0 - (0.45 + 0) * -2
+  }
+
+  test("scenarioRa Optimistic (shockSign +1): RA_FI_RE_base + (shockFI + shockRE) * delta") {
+    val crd  = Array.fill(9)(-100.0)
+    val zero = Array.fill(9)(0.0)
+    // same setup as above: shockFI = 0.45, shockRE = 0; only the sign flips (STRESS(+) leg added).
+    val fiLeg = Array.fill(9)(30.0)
+    def ra(delta: Double) =
+      scenarioRa(crd, zero, zero, zero, crd, fiLeg, zero, Quarterly, _ => delta, 1.0).head
+    ra(2.0) shouldBe (0.90 +- tol)   // 0 + (0.45 + 0) * 2
+    ra(-2.0) shouldBe (-0.90 +- tol) // 0 + (0.45 + 0) * -2
   }
 
   // ---- §4.7 survival factor + clamp --------------------------------------------------------

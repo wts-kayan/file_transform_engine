@@ -166,9 +166,12 @@ object PrimaryView {
    *   RA_FI_RE_base = -(FI_base + RE_base) / CRD_base
    *   Shock_FI      = (-FI_leg / CRD_leg) - (-FI_base / CRD_base)     // each leg's own CRD
    *   Shock_RE      = (-RE_leg / CRD_leg) - (-RE_base / CRD_base)
-   *   RA_FI_RE_scen = RA_FI_RE_base - (Shock_FI + Shock_RE) * delta   // delta = Rate/100
+   *   RA_FI_RE_scen = RA_FI_RE_base + shockSign * (Shock_FI + Shock_RE) * delta   // delta = Rate/100
    *   RA            = RA_STAT + RA_FI_RE_scen
    * }}}
+   * `shockSign` carries the STEP-4 per-scenario sign: `+1` for Optimistic (STRESS(+) leg, the shock
+   * is ADDED) and `-1` for Adverse/Extreme (STRESS(-) leg, the shock is SUBTRACTED). The CALLER sets
+   * it together with the matching stress leg.
    * `deltaAt(period)` is the per-term macro delta on the shock-window path: `Rate/100`, i.e. the
    * raw `Macro(scenario) - Macro(Central)` (the schema's ×100 and the /100 here cancel).
    */
@@ -177,7 +180,8 @@ object PrimaryView {
                   raFiBase: Array[Double], reBase: Array[Double],
                   crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
                   freq: Frequency,
-                  deltaAt: Int => Double
+                  deltaAt: Int => Double,
+                  shockSign: Double
                 ): Vector[Double] = computeRa(freq) { period =>
     (for {
       cb <- aggregate(crdBase, period, freq, isCrd = true)
@@ -195,7 +199,7 @@ object PrimaryView {
         val fireBaseDet = det(fb, cb) + det(rb, cb)
         val shockFi     = det(fl, cl) - det(fb, cb)
         val shockRe     = det(rl, cl) - det(rb, cb)
-        statDet + fireBaseDet - (shockFi + shockRe) * deltaAt(period)
+        statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
       }
     }
     ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value

@@ -246,12 +246,13 @@ class PrimaryMapper(
     if (crd.isEmpty) return Seq.empty
 
     val usesShock = m.fwlApplied && scenName != SCENARIO_CENTRAL
-    // Stress leg fixed by scenario (Optimistic -> STRESS(+); Adverse/Extreme -> STRESS(-)), as in matrixRows.
-    val (crdLeg, fiLeg, reLeg) =
+    // Stress leg AND sign fixed by scenario (Optimistic -> STRESS(+), shock ADDED; Adverse/Extreme
+    // -> STRESS(-), shock SUBTRACTED), as in matrixRows.
+    val (crdLeg, fiLeg, reLeg, shockSign) =
       if (scenName == SCENARIO_OPTIMISTIC)
-        (series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE))
+        (series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE), 1.0)
       else
-        (series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE))
+        (series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE), -1.0)
 
     val raDetail: Vector[Double] =
       if (!usesShock) {
@@ -259,7 +260,7 @@ class PrimaryMapper(
       } else {
         val mult: Int => Double =
           if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
+        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
       }
     if (raDetail.isEmpty) return Seq.empty
 
@@ -348,14 +349,16 @@ class PrimaryMapper(
         // FWL=YES non-Central: the stress leg is fixed by scenario (Optimistic -> STRESS(+);
         // Adverse/Extreme -> STRESS(-)); the per-term macro delta (Rate/100) scales the
         // stress-vs-baseline shock on FI+RE.
-        val (crdLeg, fiLeg, reLeg) =
-          if (scenName == SCENARIO_OPTIMISTIC) (crdPlus, raFiPlus, rePlus)
-          else (crdMinus, raFiMinus, reMinus)
+        // STEP-4 per-scenario stress leg AND sign: Optimistic ADDS the STRESS(+) shock (+1),
+        // Adverse/Extreme SUBTRACT the STRESS(-) shock (-1).
+        val (crdLeg, fiLeg, reLeg, shockSign) =
+          if (scenName == SCENARIO_OPTIMISTIC) (crdPlus, raFiPlus, rePlus, 1.0)
+          else (crdMinus, raFiMinus, reMinus, -1.0)
         // Shock multiplier: Rate/100 (per-term macro delta) when applyRateToShock, else 1.0 (full
         // shock, literal STEP-4 reading). See OPEN_QUESTIONS Q33.
         val mult: Int => Double =
           if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult)
+        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
       }
 
     if (ra_detail.isEmpty) {
@@ -429,9 +432,10 @@ class PrimaryMapper(
 
   /**
    * Maps a 1-based projection period to its macro delta on the shock-window path:
-   * term 0 = window start, step 1 quarter (quarterly) or 1 year = 4 quarters (yearly);
-   * past the window end (the projection horizon) the last delta is held — i.e. the shock STOPS
-   * advancing at the horizon. `window` is the matrix's [[shockWindowFor]] result.
+   * term 0 = window start, step 1 quarter (quarterly) or 1 year = 4 quarters (yearly).
+   * The shock applies ONLY up to and including the projection-horizon end (the last window
+   * quarter, per PROJECTION_HORIZON); past the window end the delta is 0.0 — i.e. no shock is
+   * applied beyond the horizon. `window` is the matrix's [[shockWindowFor]] result.
    */
   private def deltaPath(
                          macroData: Map[(String, String), Map[String, Double]],
@@ -439,7 +443,10 @@ class PrimaryMapper(
                        ): Int => Double = {
     val arr = macroDeltaArray(macroData, scenName, macroVar, window)
     val step = if (freq == Quarterly) 1 else 4
-    (period: Int) => if (arr.isEmpty) 0.0 else arr(math.min((period - 1) * step, arr.length - 1))
+    (period: Int) => {
+      val idx = (period - 1) * step
+      if (idx < arr.length) arr(idx) else 0.0 // shock applies only through PROJECTION_HORIZON (end inclusive)
+    }
   }
 
   // ---- input collection -----------------------------------------------------
