@@ -40,14 +40,15 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
 
   // ---- §4.2 period aggregation: yearly -----------------------------------------------------
 
-  test("yearly RA-metric Y1 = sum(M1..M6), CRD Y1 = mean(M1..M6)") {
-    aggregate(ramp, period = 1, Yearly, isCrd = false) shouldBe Some(21.0) // 1+..+6
-    aggregate(ramp, period = 1, Yearly, isCrd = true) shouldBe Some(3.5)   // 21/6
+  test("yearly: EVERY metric is the MEAN over the window (Annual Freq schema STEP 1)") {
+    // Y1 = mean(M1..M6) for both RA metrics and CRD: 21/6 = 3.5 (no half-weight, no raw sum).
+    aggregate(ramp, period = 1, Yearly, isCrd = false) shouldBe Some(3.5) // (1+..+6)/6
+    aggregate(ramp, period = 1, Yearly, isCrd = true) shouldBe Some(3.5)   // identical for CRD
   }
 
-  test("yearly Yn (n>=2) covers 12 months: Y2 = sum(M7..M18), CRD = mean") {
-    aggregate(ramp, period = 2, Yearly, isCrd = false) shouldBe Some(150.0) // 7+..+18
-    aggregate(ramp, period = 2, Yearly, isCrd = true) shouldBe Some(12.5)   // 150/12
+  test("yearly Yn (n>=2) covers 12 months, mean either way: Y2 = mean(M7..M18)") {
+    aggregate(ramp, period = 2, Yearly, isCrd = false) shouldBe Some(12.5) // (7+..+18)/12
+    aggregate(ramp, period = 2, Yearly, isCrd = true) shouldBe Some(12.5)  // identical for CRD
   }
 
   test("aggregate returns None when the window exceeds the available months") {

@@ -12,8 +12,9 @@ package com.bnp.str.tseadfwd.mapping
  *       Q1 = M1 + M2/2
  *       Qn = M[3n-4]/2 + M[3n-3] + M[3n-2] + M[3n-1]/2   (1-based, step 3)
  *   - Quarterly CRD, block average: Qi = mean(M[3i-2], M[3i-1], M[3i])
- *   - Yearly aggregation: RA metrics = SUM over window (Y1 = 6 months, Yn = 12 months);
- *     CRD = MEAN over the same window.
+ *   - Yearly aggregation (Annual Freq schema STEP 1): EVERY metric (CRD and RA STAT/FI/RE) is the
+ *     MEAN over the window — SUM/divisor (Y1 = 6 months /6, Yn = 12 months /12). Unlike quarterly,
+ *     RA metrics are NOT a half-weighted sum here.
  *   - Core RA (Central / FWL=NO):  RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i   (BASELINE)
  *   - VECTOR_i = 1 - RA_i ; EAD_RA_RATE = cumulative product of VECTOR.
  *   - Computation runs to term 30y; from term 30 on the value is held flat (... 50, 100).
@@ -106,12 +107,15 @@ object PrimaryView {
   }
 
   private def aggregateYear(m: Array[Double], y: Int, isCrd: Boolean): Option[Double] = {
-    // Y1 covers 6 months (M1..M6); Yn (n>=2) covers 12 months.
+    // Annual Freq schema (STEP 1): EVERY metric is the MEAN over the window — `SUM(months)/divisor`,
+    // for CRD AND for RA STAT/FI/RE alike. (This differs from the quarterly sheet, where RA metrics
+    // are a half-weighted sum; hence `isCrd` is honoured only in aggregateQuarter, not here.)
+    // Y1 covers 6 months (M1..M6); Yn (n>=2) covers 12 months: M(12n-17)..M(12n-6).
     val (start0, len) =
       if (y == 1) (0, 6)
       else (6 + 12 * (y - 2), 12)
     val idx = (0 until len).map(start0 + _)
-    seqAt(m, idx).map(xs => if (isCrd) xs.sum / len.toDouble else xs.sum)
+    seqAt(m, idx).map(xs => xs.sum / len.toDouble)
   }
 
   private def seqAt(m: Array[Double], idx: Seq[Int]): Option[Seq[Double]] = {
