@@ -199,13 +199,17 @@ object Term0AnalysisDriver {
       val fireBaseDet = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)
       val shockFi     = det(r.legFiAgg, r.legCrdAgg) - det(r.fiAgg, r.crdAgg)
       val shockRe     = det(r.legReAgg, r.legCrdAgg) - det(r.reAgg, r.crdAgg)
+      // STEP-4 per-scenario sign: Optimistic ADDS the STRESS(+) shock, Adverse/Extreme SUBTRACT the
+      // STRESS(-) shock — mirrors PrimaryView.scenarioRa's shockSign so the worked block reconciles to r.ra.
+      val opt    = r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC
+      val signOp = if (opt) "+" else "-"
       sb.append(s"term $t (period ${r.period}, macro delta = ${dot(r.delta, 6)})\n")
       sb.append(s"  stat_det      = -(STAT)/CRD             = -(${dot(r.statAgg)}) / ${dot(r.crdAgg)} = ${dot(statDet, 8)}\n")
       sb.append(s"  fire_base_det = -(FI+RE)/CRD            = -(${dot(r.fiAgg)} + ${dot(r.reAgg)}) / ${dot(r.crdAgg)} = ${dot(fireBaseDet, 8)}\n")
       sb.append(s"  shock_fi      = -FI_leg/CRD_leg + FI/CRD = ${dot(shockFi, 8)}\n")
       sb.append(s"  shock_re      = -RE_leg/CRD_leg + RE/CRD = ${dot(shockRe, 8)}\n")
-      sb.append(s"  RA($t)        = stat_det + fire_base_det - (shock_fi + shock_re) * delta\n")
-      sb.append(s"                = ${dot(statDet, 8)} + ${dot(fireBaseDet, 8)} - (${dot(shockFi, 8)} + ${dot(shockRe, 8)}) * ${dot(r.delta, 6)} = ${dot(r.ra, 8)}\n")
+      sb.append(s"  RA($t)        = stat_det + fire_base_det $signOp (shock_fi + shock_re) * delta\n")
+      sb.append(s"                = ${dot(statDet, 8)} + ${dot(fireBaseDet, 8)} $signOp (${dot(shockFi, 8)} + ${dot(shockRe, 8)}) * ${dot(r.delta, 6)} = ${dot(r.ra, 8)}\n")
       sb.append(s"  VECTOR($t)    = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
     } else {
       val numerator = if (r.fwlApplied) r.statAgg + r.fiAgg + r.reAgg else r.statAgg
