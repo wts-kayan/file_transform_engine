@@ -68,38 +68,18 @@ object PrimaryViewYearly {
     }
 
   /**
-   * FWL=YES non-Central. The CALLER selects the stress leg and `shockSign` by scenario
-   * (Adverse/Extreme -> STRESS(-), shockSign -1; Optimistic -> STRESS(+), shockSign +1). Each shock
-   * leg is detrended by its OWN CRD; the base stat/fire terms stay BASELINE.
+   * FWL=YES non-Central — **pure-stress model** (yearly only). The scenario's loss rate is computed
+   * ENTIRELY on its stress leg: `RA = -(RA_STAT + RA_FI + RE) / CRD`, with every metric taken from
+   * the leg (Adverse/Extreme -> STRESS(-), Optimistic -> STRESS(+)). This is identical to
+   * [[centralRa]] applied to the leg series — there is NO baseline term and NO macro shock/Rate, so
+   * Adverse and Extreme (both STRESS(-)) are identical. The CALLER selects the leg by scenario.
+   * See `docs/YEAR_CALCULATION_SPECIFICATION.md`.
    */
   def scenarioRa(
-                  crdBase: Array[Double], raStatBase: Array[Double],
-                  raFiBase: Array[Double], reBase: Array[Double],
-                  crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
-                  deltaAt: Int => Double,
-                  shockSign: Double
+                  crdLeg: Array[Double], raStatLeg: Array[Double],
+                  raFiLeg: Array[Double], reLeg: Array[Double]
                 ): Vector[Double] =
-    computeRa { period =>
-      (for {
-        cb <- aggregate(crdBase, period, isCrd = true)
-        s  <- aggregate(raStatBase, period, isCrd = false)
-        fb <- aggregate(raFiBase, period, isCrd = false)
-        rb <- aggregate(reBase, period, isCrd = false)
-        cl <- aggregate(crdLeg, period, isCrd = true)
-        fl <- aggregate(raFiLeg, period, isCrd = false)
-        rl <- aggregate(reLeg, period, isCrd = false)
-      } yield {
-        if (cb == 0.0) 0.0
-        else {
-          def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
-          val statDet     = det(s, cb)
-          val fireBaseDet = det(fb, cb) + det(rb, cb)
-          val shockFi     = det(fl, cl) - det(fb, cb)
-          val shockRe     = det(rl, cl) - det(rb, cb)
-          statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
-        }
-      }).filter(_ < RUNOFF_RA_CAP)
-    }
+    centralRa(crdLeg, raStatLeg, raFiLeg, reLeg)
 
   /** Yearly period loop: keep years while the window is valid and term <= the computed horizon. */
   private def computeRa(period: Int => Option[Double]): Vector[Double] = {

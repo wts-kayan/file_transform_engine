@@ -24,10 +24,14 @@ to 361 months holding the last observed value (`PrimaryView.padForward`, `INPUT_
 
 Branching is driven by `FWL_TO_BE_APPLIED`:
 
-| Flag | Path | Steps |
+| Flag | Path | Steps (yearly) |
 |------|------|-------|
-| `NO`  | BASELINE only | 1 → 2 (RA detail) → 3 (vector) → 4 (factored) |
-| `YES` | BASELINE + ADVERSE + EXTREME + OPTIMISTIC | 1 → 2 (shock) → 3 (rate) → 4 (RA detail) → 5 (total) → 6 (vector) → 7 (factored) |
+| `NO`  | BASELINE only | 1 (annual mean) → RA = −RA_STAT/CRD → VECTOR → factored |
+| `YES` | Central (BASELINE) + ADVERSE/EXTREME (STRESS−) + OPTIMISTIC (STRESS+) | 1 (annual mean of the scenario's leg) → RA = −(STAT+FI+RE)/CRD on that leg → VECTOR → factored |
+
+> The yearly non-Central path is **pure stress** (each scenario computed on its own leg), so the
+> schema's separate shock (STEP 2) and rate (STEP 3) steps do not apply here — see §2 and
+> [Deviations](#deviations-from-the-v5-schema).
 
 ---
 
@@ -81,48 +85,42 @@ RA_i = stat_det                        # RA STAT only; FI and RE are EXCLUDED (s
 RA_i = stat_det + fire_base_det        # = −(RA_STAT + RA_FI + RE)_base / CRD_base
 ```
 
-### FWL = YES, non-Central  (`PrimaryViewYearly.scenarioRa`)
-The caller (`PrimaryMapper.matrixRows`) fixes the stress leg **and** the sign by scenario:
+### FWL = YES, non-Central  (`PrimaryViewYearly.scenarioRa`) — **PURE STRESS**
 
-| Scenario | Stress leg | `shockSign` |
-|----------|-----------|-------------|
-| ADVERSE  | STRESS (−) | −1 |
-| EXTREME  | STRESS (−) | −1 |
-| OPTIMISTIC | STRESS (+) | +1 |
+> **Yearly-specific.** The quarterly path uses a baseline + macro-weighted shock (see `PrimaryView`);
+> the yearly path does **not**. This is the deliberate divergence the standalone `PrimaryViewYearly`
+> exists for.
 
-The shock detrend uses **each leg's OWN CRD** (schema STEP 2):
+The scenario's loss rate is computed **entirely on its own stress leg** — exactly `centralRa` applied
+to the leg's metrics:
 ```
-shock_fi = (−RA_FI_leg / CRD_leg) − (−RA_FI_base / CRD_base)
-shock_re = (−RE_leg   / CRD_leg) − (−RE_base   / CRD_base)
+RA_i = −(RA_STAT_leg + RA_FI_leg + RE_leg) / CRD_leg
 ```
 
-The per-year macro delta (STEP 3, see §3):
-```
-delta_i = (Macro_scen_i − Macro_central_i) · macro_delta_scale
-```
+| Scenario | Stress leg |
+|----------|-----------|
+| ADVERSE  | STRESS (−) |
+| EXTREME  | STRESS (−) |
+| OPTIMISTIC | STRESS (+) |
 
-RA total (STEP 4 + 5 combined — RA STAT stays BASELINE across all scenarios):
-```
-RA_i = stat_det + fire_base_det + shockSign · (shock_fi + shock_re) · delta_i
-```
+Consequences:
+- **No baseline term and no macro shock/Rate** — the macro variable does **not** enter the yearly
+  FI/RE, and the per-year `delta`/`macro_delta_scale` are unused on the yearly path (§3 applies to
+  quarterly only).
+- **ADVERSE == EXTREME** (both read STRESS(−)).
+- **RA STAT is taken from the leg**, not baseline — `PrimaryMapper` reads the leg's RA STAT
+  (`series(legFwl, METRIC_RA_STAT)`) for this path. (In the sample the STRESS lines carry the same
+  RA STAT as baseline, so this matches numerically, but it is genuinely sourced from the leg.)
 
-So ADVERSE/EXTREME subtract the STRESS(−) shock and OPTIMISTIC adds the STRESS(+) shock.
-
-**Equivalent macro-blended form (how the analysis worked-steps render it).** Because
-`shock_fi + shock_re ≡ str − fire`, where `fire = −(FI+RE)/CRD` on **BASELINE** and
-`str = −(FI+RE)/CRD` on the scenario's **STRESS leg**, the same RA is:
-```
-Rate = shockSign · delta_i            # +delta Optimistic, −delta Adverse/Extreme
-RA_i = stat_det + fire + Rate · (str − fire)
-```
-i.e. the baseline FI/RE detrend blended toward the stress-leg detrend by the macro weight. At
-`Rate = 0` (Central) it collapses to the baseline detrend. This is the form shown in the
-`YearAnalysisDriver` worked blocks because it makes the STRESS(+/−) data explicit; it is
-arithmetically identical to the shock form above — `fire_base_det` is still BASELINE.
+`PrimaryMapper.matrixRows`/`termRowsFor` dispatch this by frequency: `Yearly` → the pure-stress call
+above; everything else → the quarterly `PrimaryView.scenarioRa`.
 
 ---
 
-## 3. STEP 3 — Macro delta (shock multiplier)
+## 3. STEP 3 — Macro delta (shock multiplier) — *quarterly only*
+
+> Not used on the yearly path (pure stress, §2). This section describes the quarterly shock and the
+> shared `deltaPath`/shock-window code, retained here for reference.
 
 `delta_i = (Macro_scen_i − Macro_central_i) · macro_delta_scale`, read for the matrix's
 `MACRO_VARIABLE` from the scenario file (`PrimaryMapper.macroDeltaArray`). `macro_delta_scale` is the
@@ -153,20 +151,18 @@ EAD_RA_RATE_i   = Π(VECTOR_1 … VECTOR_i)          # cumulative product, per s
 
 ---
 
-## Worked example — `BCEF_MORTGAGE_TF_Y`, Adverse, term 2 (Y3)
+## Worked example — `BCEF_MORTGAGE_TF_Y`, Adverse, term 1 (Y2)
 
-Annual means over M19–M30 (÷12), STRESS(−) leg, `shockSign = −1`:
+Pure stress: annual means over M7–M18 (÷12), **all metrics from the STRESS(−) leg**:
 ```
-stat_det      = −RA_STAT_base / CRD_base
-fire_base_det = −(RA_FI_base + RE_base) / CRD_base
-shock_fi      = −RA_FI_leg/CRD_leg + RA_FI_base/CRD_base
-shock_re      = −RE_leg/CRD_leg   + RE_base/CRD_base
-RA(2)         = stat_det + fire_base_det − (shock_fi + shock_re) · delta_2
-VECTOR(2)     = 1 − RA(2)
-EAD_RA_RATE(2)= EAD_RA_RATE(1) · VECTOR(2)
+RA(1)         = −(RA_STAT(−) + RA_FI(−) + RE(−)) / CRD(−)
+              = −(337.292230 + 252.313760 + 151.388256) / −86377.517513 = 0.00857855
+VECTOR(1)     = 1 − 0.00857855 = 0.99142145
+EAD_RA_RATE(1)= EAD_RA_RATE(0) · VECTOR(1) = 0.99507015 · 0.99142145 = 0.98653389
 ```
 The `YearAnalysisDriver` job emits this breakdown (Markdown + CSV) for every matrix/scenario/term;
-each `EAD_RA_RATE` is reconciled against the production engine output by construction.
+each `EAD_RA_RATE` is reconciled against the production engine output by construction (84/84 MATCH on
+the sample).
 
 ---
 
@@ -175,13 +171,19 @@ each `EAD_RA_RATE` is reconciled against the production engine output by constru
 The engine is the source of truth; the following are **intentional** differences from
 `Schema_EAD_FWD_20260601_v5.xlsx` (`Annual Freq - COMPUTATION`):
 
-1. **Optimistic sign (STEP 4).** The v5 cell shows a `−` for *all three* scenarios. The engine
-   **adds** the STRESS(+) shock for Optimistic (`shockSign = +1`) and subtracts it for
-   Adverse/Extreme (`shockSign = −1`). The schema's literal all-minus is treated as a transcription
-   error.
-2. **Rate scaling (STEP 3 / 4).** The v5 text computes `Rate = (Macro_scen − Macro_base) × 100` then
-   multiplies by `Rate / 100` (a no-op cancel). The engine instead applies a single configurable
-   `macro_delta_scale` to the raw macro difference and does **not** hard-code the ×100 / ÷100.
+1. **Pure-stress non-Central (STEP 2–5).** The v5 schema builds non-Central RA_FI_RE as
+   `RA_FI_RE(BASELINE) − shock(STRESS)·Rate/100` — a baseline detail plus a macro-weighted shock.
+   The yearly engine instead computes each non-Central scenario **entirely on its stress leg**:
+   `RA = −(RA_STAT + RA_FI + RE)/CRD` from STRESS(−) (Adverse/Extreme) or STRESS(+) (Optimistic). So
+   on the yearly path the **macro variable / `Rate` plays no part**, **ADVERSE == EXTREME**, and
+   **RA STAT comes from the leg** (not baseline as schema STEP 5 says). *(Quarterly still follows the
+   schema's baseline + shock·Rate form.)*
+2. **Optimistic sign (quarterly only).** In the quarterly shock the engine **adds** the STRESS(+)
+   shock (`shockSign = +1`) and subtracts STRESS(−) (`−1`); the v5 cell shows `−` for all three.
+   (Moot on the yearly path, which has no shock term.)
+3. **Rate scaling (quarterly only).** The v5 text does `Rate = (Macro_scen − Macro_base) × 100` then
+   `× Rate/100` (a no-op cancel); the quarterly engine applies a single configurable
+   `macro_delta_scale` instead. (Moot on the yearly path.)
 
 The averaging convention of §1 (mean of every metric) **matches** the v5 schema and was corrected to
 do so for the yearly path.
