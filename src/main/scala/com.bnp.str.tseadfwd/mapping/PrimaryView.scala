@@ -85,7 +85,7 @@ object PrimaryView {
   def aggregate(m: Array[Double], period: Int, freq: Frequency, isCrd: Boolean): Option[Double] =
     freq match {
       case Quarterly => aggregateQuarter(m, period, isCrd)
-      case Yearly    => aggregateYear(m, period, isCrd)
+      case Yearly    => PrimaryViewYearly.aggregate(m, period, isCrd) // standalone yearly core
     }
 
   private def at(m: Array[Double], idx0: Int): Option[Double] =
@@ -106,17 +106,8 @@ object PrimaryView {
     }
   }
 
-  private def aggregateYear(m: Array[Double], y: Int, isCrd: Boolean): Option[Double] = {
-    // Annual Freq schema (STEP 1): EVERY metric is the MEAN over the window — `SUM(months)/divisor`,
-    // for CRD AND for RA STAT/FI/RE alike. (This differs from the quarterly sheet, where RA metrics
-    // are a half-weighted sum; hence `isCrd` is honoured only in aggregateQuarter, not here.)
-    // Y1 covers 6 months (M1..M6); Yn (n>=2) covers 12 months: M(12n-17)..M(12n-6).
-    val (start0, len) =
-      if (y == 1) (0, 6)
-      else (6 + 12 * (y - 2), 12)
-    val idx = (0 until len).map(start0 + _)
-    seqAt(m, idx).map(xs => xs.sum / len.toDouble)
-  }
+  // NB: the yearly aggregation lives in the standalone [[PrimaryViewYearly]] (its own MEAN-of-every-
+  // metric convention); only the quarterly aggregator remains here.
 
   private def seqAt(m: Array[Double], idx: Seq[Int]): Option[Seq[Double]] = {
     val xs = idx.flatMap(i => at(m, i))
@@ -137,14 +128,17 @@ object PrimaryView {
                  raFi: Array[Double],
                  re: Array[Double],
                  freq: Frequency
-               ): Vector[Double] = computeRa(freq) { period =>
-    (for {
-      c <- aggregate(crd, period, freq, isCrd = true)
-      s <- aggregate(raStat, period, freq, isCrd = false)
-      f <- aggregate(raFi, period, freq, isCrd = false)
-      r <- aggregate(re, period, freq, isCrd = false)
-    } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> exposure run off, no further loss
-    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+               ): Vector[Double] = freq match {
+    case Yearly => PrimaryViewYearly.centralRa(crd, raStat, raFi, re) // standalone yearly core
+    case Quarterly => computeRa(freq) { period =>
+      (for {
+        c <- aggregate(crd, period, freq, isCrd = true)
+        s <- aggregate(raStat, period, freq, isCrd = false)
+        f <- aggregate(raFi, period, freq, isCrd = false)
+        r <- aggregate(re, period, freq, isCrd = false)
+      } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> exposure run off, no further loss
+      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+    }
   }
 
   /**
@@ -153,12 +147,15 @@ object PrimaryView {
    * Contrast `centralRa`, which is the FWL=YES Central case (STAT + FI + RE).
    */
   def statOnlyRa(crd: Array[Double], raStat: Array[Double], freq: Frequency): Vector[Double] =
-    computeRa(freq) { period =>
-      (for {
-        c <- aggregate(crd, period, freq, isCrd = true)
-        s <- aggregate(raStat, period, freq, isCrd = false)
-      } yield if (c == 0.0) 0.0 else -s / c
-      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+    freq match {
+      case Yearly => PrimaryViewYearly.statOnlyRa(crd, raStat) // standalone yearly core
+      case Quarterly => computeRa(freq) { period =>
+        (for {
+          c <- aggregate(crd, period, freq, isCrd = true)
+          s <- aggregate(raStat, period, freq, isCrd = false)
+        } yield if (c == 0.0) 0.0 else -s / c
+        ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+      }
     }
 
   /**
@@ -186,27 +183,31 @@ object PrimaryView {
                   freq: Frequency,
                   deltaAt: Int => Double,
                   shockSign: Double
-                ): Vector[Double] = computeRa(freq) { period =>
-    (for {
-      cb <- aggregate(crdBase, period, freq, isCrd = true)
-      s  <- aggregate(raStatBase, period, freq, isCrd = false)
-      fb <- aggregate(raFiBase, period, freq, isCrd = false)
-      rb <- aggregate(reBase, period, freq, isCrd = false)
-      cl <- aggregate(crdLeg, period, freq, isCrd = true)
-      fl <- aggregate(raFiLeg, period, freq, isCrd = false)
-      rl <- aggregate(reLeg, period, freq, isCrd = false)
-    } yield {
-      if (cb == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
-      else {
-        def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
-        val statDet     = det(s, cb)
-        val fireBaseDet = det(fb, cb) + det(rb, cb)
-        val shockFi     = det(fl, cl) - det(fb, cb)
-        val shockRe     = det(rl, cl) - det(rb, cb)
-        statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
+                ): Vector[Double] = freq match {
+    case Yearly => // standalone yearly core
+      PrimaryViewYearly.scenarioRa(crdBase, raStatBase, raFiBase, reBase, crdLeg, raFiLeg, reLeg, deltaAt, shockSign)
+    case Quarterly => computeRa(freq) { period =>
+      (for {
+        cb <- aggregate(crdBase, period, freq, isCrd = true)
+        s  <- aggregate(raStatBase, period, freq, isCrd = false)
+        fb <- aggregate(raFiBase, period, freq, isCrd = false)
+        rb <- aggregate(reBase, period, freq, isCrd = false)
+        cl <- aggregate(crdLeg, period, freq, isCrd = true)
+        fl <- aggregate(raFiLeg, period, freq, isCrd = false)
+        rl <- aggregate(reLeg, period, freq, isCrd = false)
+      } yield {
+        if (cb == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
+        else {
+          def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
+          val statDet     = det(s, cb)
+          val fireBaseDet = det(fb, cb) + det(rb, cb)
+          val shockFi     = det(fl, cl) - det(fb, cb)
+          val shockRe     = det(rl, cl) - det(rb, cb)
+          statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
+        }
       }
+      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
     }
-    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
   }
 
   /** Build the RA prefix: keep periods while the window is valid and term <= horizon. */

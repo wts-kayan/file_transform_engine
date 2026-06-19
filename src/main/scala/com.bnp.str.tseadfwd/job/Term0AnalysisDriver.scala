@@ -198,44 +198,70 @@ object Term0AnalysisDriver {
    * only when this term's period immediately follows the previous listed one — otherwise intermediate
    * periods are hidden, so it states the running product instead of inventing a one-step multiply.
    */
+  /** Annual window label for a yearly period: Y1 = M1..M6 /6; Yn = M(12n-17)..M(12n-6) /12. */
+  private def yearWindow(period: Int): (String, Int) =
+    if (period <= 1) ("M1..M6", 6) else (s"M${12 * period - 17}..M${12 * period - 6}", 12)
+
   private def termSteps(r: Term0RowView, prevPeriod: Int, prevEad: Double): String = {
     val sb = new StringBuilder
     val t  = termStr(r.term)
     val consecutive = !prevEad.isNaN && r.period == prevPeriod + 1
     val eadLine =
-      if (consecutive) s"EAD_RA_RATE($t) = ${dot(prevEad, 8)} * ${dot(r.vector, 8)} = ${dot(r.ead, 8)}"
+      if (consecutive) s"EAD_RA_RATE($t) = prevEAD * VECTOR = ${dot(prevEad, 8)} * ${dot(r.vector, 8)} = ${dot(r.ead, 8)}"
       else s"EAD_RA_RATE($t) = running product of VECTOR through period ${r.period} = ${dot(r.ead, 8)}"
 
+    // [STEP 1] Annual averaging window (yearly only; quarterly uses its own half-weighted scheme).
+    val yearly = r.matrixId.endsWith("_" + PrimaryView.Yearly.suffix)
+    val (win, div) = yearWindow(r.period)
+    val step1 =
+      if (yearly) s"[STEP 1] annual mean over $win  (SUM / $div), every metric"
+      else        s"[STEP 1] quarterly aggregation (CRD = block mean; RA metrics = half-weighted window)"
+
     if (r.crdAgg == 0.0) {
-      sb.append(s"term $t (period ${r.period}) -- CRD run off (=0): RA = 0, VECTOR = 1\n")
+      sb.append(s"term $t (period ${r.period}) -- CRD run off (CRD = 0): RA = 0, VECTOR = 1\n")
     } else if (r.usesShock) {
-      val statDet     = det(r.statAgg, r.crdAgg)
-      val fireBaseDet = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)
-      val shockFi     = det(r.legFiAgg, r.legCrdAgg) - det(r.fiAgg, r.crdAgg)
-      val shockRe     = det(r.legReAgg, r.legCrdAgg) - det(r.reAgg, r.crdAgg)
-      // STEP-4 per-scenario sign: Optimistic ADDS the STRESS(+) shock, Adverse/Extreme SUBTRACT the
-      // STRESS(-) shock — mirrors PrimaryView.scenarioRa's shockSign so the worked block reconciles to r.ra.
-      val opt    = r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC
-      val signOp = if (opt) "+" else "-"
-      sb.append(s"term $t (period ${r.period}, macro delta = ${dot(r.delta, 6)})\n")
-      sb.append(s"  stat_det      = -(STAT)/CRD             = -(${dot(r.statAgg)}) / ${dot(r.crdAgg)} = ${dot(statDet, 8)}\n")
-      sb.append(s"  fire_base_det = -(FI+RE)/CRD            = -(${dot(r.fiAgg)} + ${dot(r.reAgg)}) / ${dot(r.crdAgg)} = ${dot(fireBaseDet, 8)}\n")
-      sb.append(s"  shock_fi      = -FI_leg/CRD_leg + FI/CRD = ${dot(shockFi, 8)}\n")
-      sb.append(s"  shock_re      = -RE_leg/CRD_leg + RE/CRD = ${dot(shockRe, 8)}\n")
-      sb.append(s"  RA($t)        = stat_det + fire_base_det $signOp (shock_fi + shock_re) * delta\n")
-      sb.append(s"                = ${dot(statDet, 8)} + ${dot(fireBaseDet, 8)} $signOp (${dot(shockFi, 8)} + ${dot(shockRe, 8)}) * ${dot(r.delta, 6)} = ${dot(r.ra, 8)}\n")
-      sb.append(s"  VECTOR($t)    = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      val statDet = det(r.statAgg, r.crdAgg)
+      val fire    = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)             // BASELINE FI+RE detrend
+      val str     = det(r.legFiAgg, r.legCrdAgg) + det(r.legReAgg, r.legCrdAgg) // STRESS leg FI+RE detrend
+      val shockFi = det(r.legFiAgg, r.legCrdAgg) - det(r.fiAgg, r.crdAgg)
+      val shockRe = det(r.legReAgg, r.legCrdAgg) - det(r.reAgg, r.crdAgg)
+      val opt     = r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC
+      val leg     = if (opt) "STRESS(+)" else "STRESS(-)"
+      val sign    = if (opt) 1.0 else -1.0
+      val rate    = sign * r.delta                                             // blend weight
+      val fireRe  = fire + rate * (str - fire)                                 // RA_FI_RE(scenario)
+
+      sb.append(s"term $t (period ${r.period})\n")
+      sb.append(s"  $step1\n")
+      sb.append(s"    BASELINE  : CRD=${dot(r.crdAgg)}  RA_STAT=${dot(r.statAgg)}  RA_FI=${dot(r.fiAgg)}  RE=${dot(r.reAgg)}\n")
+      sb.append(s"    $leg : CRD=${dot(r.legCrdAgg)}  RA_FI=${dot(r.legFiAgg)}  RE=${dot(r.legReAgg)}\n")
+      sb.append(s"  [STEP 2] parallel shock (leg detrend - baseline detrend; each leg uses its OWN CRD):\n")
+      sb.append(s"    shock_fi = -RA_FI($leg)/CRD($leg) + RA_FI/CRD = -${dot(r.legFiAgg)}/${dot(r.legCrdAgg)} + ${dot(r.fiAgg)}/${dot(r.crdAgg)} = ${dot(shockFi, 8)}\n")
+      sb.append(s"    shock_re = -RE($leg)/CRD($leg) + RE/CRD = -${dot(r.legReAgg)}/${dot(r.legCrdAgg)} + ${dot(r.reAgg)}/${dot(r.crdAgg)} = ${dot(shockRe, 8)}\n")
+      sb.append(s"  [STEP 3] macro delta = ${dot(r.delta, 6)} ; Rate = shockSign(${if (opt) "+1" else "-1"}) * delta = ${dot(rate, 6)}\n")
+      sb.append(s"  [STEP 4] RA detail:\n")
+      sb.append(s"    stat_det = -RA_STAT/CRD          [BASELINE] = -${dot(r.statAgg)}/${dot(r.crdAgg)} = ${dot(statDet, 8)}\n")
+      sb.append(s"    fire     = -(RA_FI+RE)/CRD       [BASELINE] = -(${dot(r.fiAgg)} + ${dot(r.reAgg)})/${dot(r.crdAgg)} = ${dot(fire, 8)}\n")
+      sb.append(s"    str      = -(RA_FI+RE)/CRD       [$leg] = -(${dot(r.legFiAgg)} + ${dot(r.legReAgg)})/${dot(r.legCrdAgg)} = ${dot(str, 8)}\n")
+      sb.append(s"    RA_FI_RE = fire + Rate*(str - fire) = ${dot(fire, 8)} + ${dot(rate, 6)}*(${dot(str, 8)} - ${dot(fire, 8)}) = ${dot(fireRe, 8)}\n")
+      sb.append(s"               (equivalently fire + shockSign*(shock_fi + shock_re)*delta)\n")
+      sb.append(s"  [STEP 5] RA($t) = stat_det + RA_FI_RE = ${dot(statDet, 8)} + ${dot(fireRe, 8)} = ${dot(r.ra, 8)}\n")
+      sb.append(s"  [STEP 6] VECTOR($t) = 1 - RA = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      sb.append(s"  [STEP 7] $eadLine\n\n")
     } else {
+      // No shock: Central (FWL=YES -> STAT+FI+RE) or FWL=NO (STAT only).
       val numerator = if (r.fwlApplied) r.statAgg + r.fiAgg + r.reAgg else r.statAgg
       val numTxt =
-        if (r.fwlApplied) s"${dot(r.statAgg)} + ${dot(r.fiAgg)} + ${dot(r.reAgg)} = ${dot(numerator)}"
-        else dot(r.statAgg)
-      sb.append(s"term $t (period ${r.period})\n")
-      sb.append(s"  numerator     = ${if (r.fwlApplied) "STAT + FI + RE" else "STAT"} = $numTxt\n")
-      sb.append(s"  RA($t)        = -(${dot(numerator)}) / ${dot(r.crdAgg)} = ${dot(r.ra, 8)}\n")
-      sb.append(s"  VECTOR($t)    = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+        if (r.fwlApplied) s"RA_STAT + RA_FI + RE = ${dot(r.statAgg)} + ${dot(r.fiAgg)} + ${dot(r.reAgg)} = ${dot(numerator)}"
+        else s"RA_STAT = ${dot(r.statAgg)}"
+      sb.append(s"term $t (period ${r.period})  -- ${if (r.fwlApplied) "Central / no shock" else "FWL=NO (STAT only)"}\n")
+      sb.append(s"  $step1\n")
+      sb.append(s"    CRD=${dot(r.crdAgg)}  RA_STAT=${dot(r.statAgg)}" + (if (r.fwlApplied) s"  RA_FI=${dot(r.fiAgg)}  RE=${dot(r.reAgg)}" else "") + "\n")
+      sb.append(s"  [STEP 2] numerator = $numTxt\n")
+      sb.append(s"           RA($t) = -(numerator)/CRD = -(${dot(numerator)}) / ${dot(r.crdAgg)} = ${dot(r.ra, 8)}\n")
+      sb.append(s"  [STEP 3] VECTOR($t) = 1 - RA = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      sb.append(s"  [STEP 4] $eadLine\n\n")
     }
-    sb.append(s"  $eadLine\n\n")
     sb.toString()
   }
 

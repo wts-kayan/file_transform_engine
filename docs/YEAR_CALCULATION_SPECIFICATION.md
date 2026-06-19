@@ -5,8 +5,11 @@ Authoritative description of how the engine computes the **yearly** EAD term str
 of truth: where it intentionally deviates from `Schema_EAD_FWD_20260601_v5.xlsx` (`Annual Freq -
 COMPUTATION`), that is called out under [Deviations from the v5 schema](#deviations-from-the-v5-schema).
 
-Core code: `PrimaryView` (formula core) and `PrimaryMapper` (parsing, leg selection, shock window).
-The quarterly path is **not** described here; only the parts that differ are noted.
+Core code: **`PrimaryViewYearly`** — the standalone yearly formula core (own aggregation, period loop,
+and RA-detail formulas); `PrimaryView` — shared frequency-agnostic primitives (`vectorFactored`,
+`termGrid`/`termSeries`, constants) plus the `freq` dispatch that routes the `Yearly` case to
+`PrimaryViewYearly`; and `PrimaryMapper` — parsing, leg selection, and the shock window. The quarterly
+path lives in `PrimaryView` and is **not** described here; only the parts that differ are noted.
 
 ---
 
@@ -44,8 +47,8 @@ divisor` — and this applies to **every** metric: CRD **and** RA STAT / RA FI /
 > block. The windows do **not** overlap and the boundary months are **not** half-weighted (that is a
 > quarterly-only convention).
 
-Code: `PrimaryView.aggregateYear` — `seqAt(window).map(_.sum / len)` for all metrics. A term whose
-window exceeds the available months yields no value (the series stops there).
+Code: `PrimaryViewYearly.aggregate` — `SUM(window months) / len` for all metrics (CRD and RA alike).
+A term whose window exceeds the available months yields no value (the series stops there).
 
 > **Why the mean (not a raw sum) matters.** The RA detail is `−RA_metric / CRD`. Because both the
 > numerator and the denominator are divided by the same divisor, the divisor cancels and the detail
@@ -68,17 +71,17 @@ stat_det      = −RA_STAT_base / CRD_base
 fire_base_det = −(RA_FI_base + RE_base) / CRD_base
 ```
 
-### FWL = NO  (`PrimaryView.statOnlyRa`)
+### FWL = NO  (`PrimaryViewYearly.statOnlyRa`)
 ```
 RA_i = stat_det                        # RA STAT only; FI and RE are EXCLUDED (schema FWL=NO STEP 2)
 ```
 
-### FWL = YES, Central  (`PrimaryView.centralRa`)
+### FWL = YES, Central  (`PrimaryViewYearly.centralRa`)
 ```
 RA_i = stat_det + fire_base_det        # = −(RA_STAT + RA_FI + RE)_base / CRD_base
 ```
 
-### FWL = YES, non-Central  (`PrimaryView.scenarioRa`)
+### FWL = YES, non-Central  (`PrimaryViewYearly.scenarioRa`)
 The caller (`PrimaryMapper.matrixRows`) fixes the stress leg **and** the sign by scenario:
 
 | Scenario | Stress leg | `shockSign` |
@@ -104,6 +107,18 @@ RA_i = stat_det + fire_base_det + shockSign · (shock_fi + shock_re) · delta_i
 ```
 
 So ADVERSE/EXTREME subtract the STRESS(−) shock and OPTIMISTIC adds the STRESS(+) shock.
+
+**Equivalent macro-blended form (how the analysis worked-steps render it).** Because
+`shock_fi + shock_re ≡ str − fire`, where `fire = −(FI+RE)/CRD` on **BASELINE** and
+`str = −(FI+RE)/CRD` on the scenario's **STRESS leg**, the same RA is:
+```
+Rate = shockSign · delta_i            # +delta Optimistic, −delta Adverse/Extreme
+RA_i = stat_det + fire + Rate · (str − fire)
+```
+i.e. the baseline FI/RE detrend blended toward the stress-leg detrend by the macro weight. At
+`Rate = 0` (Central) it collapses to the baseline detrend. This is the form shown in the
+`YearAnalysisDriver` worked blocks because it makes the STRESS(+/−) data explicit; it is
+arithmetically identical to the shock form above — `fire_base_det` is still BASELINE.
 
 ---
 
@@ -175,7 +190,8 @@ do so for the yearly path.
 
 ## Cross-references
 
-- Formula core: `src/main/scala/com.bnp.str.tseadfwd/mapping/PrimaryView.scala`
+- Yearly formula core: `src/main/scala/com.bnp.str.tseadfwd/mapping/PrimaryViewYearly.scala`
+- Shared primitives + quarterly core + freq dispatch: `…/mapping/PrimaryView.scala`
 - Orchestration / leg selection / shock window: `…/mapping/PrimaryMapper.scala`
 - Yearly analysis generator: `…/job/YearAnalysisDriver.scala` (config block `YEAR_ANALYSIS`)
 - Open items & decision history: `docs/OPEN_QUESTIONS.md` (Q32 FWL=NO, Q33 shock formula/sign)
