@@ -431,6 +431,16 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **One interpretation (flagged):** the schema's STEP 4 cells show the shock *without* `Rate`, while
   STEP 3 computes it. The engine multiplies by `Rate/100` (so Adverse ≠ Extreme and the magnitude
   follows the macro path; no `ref_shock` — Q12). Confirm the business intends `×Rate/100`.
-- **Code:** `PrimaryView.scenarioRa`, `PrimaryMapper.matrixRows`. **Related:** Q6, Q10 (superseded),
-  Q12, Q15, Q17.
-- Confirmed: [x] (formula implemented; `×Rate/100` interpretation pending business confirmation)
+- **Per-scenario sign (2026-06-18):** Optimistic ADDS the shock (`+`), Adverse/Extreme SUBTRACT it
+  (`-`). Previously a single `-` was applied to every non-Central scenario; `scenarioRa` now carries
+  a `shockSign` (+1 Optimistic / -1 Adverse/Extreme).
+- **Yearly annual averaging (2026-06-18) — RESOLVED (v5 schema):** the YEARLY non-Central paths were
+  freezing flat at term 0 because `aggregateYear` averaged only CRD but left RA STAT/FI/RE as raw
+  SUMS, inflating every yearly RA by the divisor (×6 Y1 / ×12 Y2+) → RA ≥ 1 → run-off freeze. The
+  `Schema_EAD_FWD_20260601_v5.xlsx` `Annual Freq` STEP 1 says **every** metric is the MEAN
+  (`SUM/divisor`). Fixed `aggregateYear` to divide all metrics by the divisor (quarterly unchanged —
+  its half-weighted-sum convention is validated). Yearly Adverse now decays smoothly instead of
+  freezing. Full spec: `docs/YEAR_CALCULATION_SPECIFICATION.md`.
+- **Code:** `PrimaryView.scenarioRa`, `PrimaryMapper.matrixRows`, `Term0AnalysisDriver.termSteps`.
+  **Related:** Q6, Q10 (superseded), Q12, Q15, Q17.
+- Confirmed: [x] (sign implemented; `×Rate/100` and the yearly shock magnitude pending business confirmation)
