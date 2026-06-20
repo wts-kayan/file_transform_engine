@@ -6,19 +6,18 @@ package com.bnp.str.tseadfwd.mapping
  * be able to evolve independently, so this object carries its OWN aggregation, period loop, and copy
  * of each RA-detail formula — no computation code is shared with the quarterly path.
  *
- * Annual averaging (`Annual Freq - COMPUTATION` schema, STEP 1): every metric — CRD **and** RA
- * STAT/FI/RE alike — is the MEAN over the year window, `SUM(months)/divisor`:
- *   - Y1 (term 0) = M1..M6 / 6   (half-year, mid-year start)
- *   - Yn (n>=2)   = M(12n-17)..M(12n-6) / 12
+ * Annual aggregation (STEP 1): CRD is the MEAN over the year window (average exposure), while the RA
+ * flow metrics (RA STAT/FI/RE) are the raw SUM over the window (annual loss). Window:
+ *   - Y1 (term 0) = M1..M6   (half-year, mid-year start; CRD /6)
+ *   - Yn (n>=2)   = M(12n-17)..M(12n-6)   (CRD /12)
+ * So RA detail = annual-loss-SUM / average-exposure (the divisor applies to CRD only).
  *
- * RA detail (per year, all aggregates being the annual means above):
- *   - FWL=NO          : RA = -RA_STAT / CRD                                  (FI/RE excluded)
- *   - FWL=YES Central : RA = -(RA_STAT + RA_FI + RE) / CRD
- *   - FWL=YES scenario: RA = stat_det + fire_base_det
- *                          + shockSign * (shock_fi + shock_re) * delta
- *     with stat/fire_base from BASELINE, the shock from the scenario's stress leg (STRESS(-) for
- *     Adverse/Extreme, STRESS(+) for Optimistic) detrended by the leg's OWN CRD, and
- *     shockSign = +1 Optimistic / -1 Adverse/Extreme.
+ * RA detail (per year; RA metrics summed, CRD averaged, as above):
+ *   - FWL=NO           : RA = -RA_STAT / CRD                          (FI/RE excluded)
+ *   - FWL=YES Central  : RA = -(RA_STAT + RA_FI + RE) / CRD           (all BASELINE)
+ *   - FWL=YES non-Central: PURE STRESS — RA = -(RA_STAT + RA_FI + RE) / CRD computed ENTIRELY on the
+ *     scenario's stress leg (Adverse/Extreme -> STRESS(-), Optimistic -> STRESS(+)). No baseline term
+ *     and no macro shock/Rate, so Adverse == Extreme.
  *
  * See `docs/YEAR_CALCULATION_SPECIFICATION.md`. Only frequency-agnostic primitives are reused from
  * [[PrimaryView]] (run-off cap, computed horizon, yearly step, and the [[PrimaryView.vectorFactored]]
@@ -28,19 +27,21 @@ object PrimaryViewYearly {
 
   import PrimaryView.{RUNOFF_RA_CAP, COMPUTED_HORIZON_Y, YEARLY_STEP}
 
-  // ----- monthly -> year aggregation (MEAN of every metric) ------------------
+  // ----- monthly -> year aggregation (RA metrics SUMMED, CRD averaged) -------
 
   /**
-   * Annual mean of `m` over year `period` (1-based): `SUM(window months) / divisor`. `isCrd` is
-   * accepted only for signature parity with the quarterly aggregator and is ignored here — the
-   * yearly convention averages every metric the same way (unlike quarterly, which half-weights the
-   * RA metrics). Returns None if the window runs past the available months.
+   * Annual aggregation of `m` over year `period` (1-based). The window is Y1 = M1..M6 (6 months),
+   * Yn (n>=2) = M(12n-17)..M(12n-6) (12 months). The two metric kinds are combined differently:
+   *   - CRD (`isCrd = true`)  -> MEAN, `SUM(window) / divisor`  (average exposure over the year)
+   *   - RA STAT / RA FI / RE (`isCrd = false`) -> raw SUM over the window  (annual loss)
+   * so the RA detail `-RA_metric / CRD` is `annual-loss-SUM / average-exposure`. Returns None if the
+   * window runs past the available months.
    */
   def aggregate(m: Array[Double], period: Int, isCrd: Boolean): Option[Double] = {
     val (start0, len) = if (period == 1) (0, 6) else (6 + 12 * (period - 2), 12)
     val idx = (0 until len).map(start0 + _)
     val xs  = idx.flatMap(i => if (i >= 0 && i < m.length) Some(m(i)) else None)
-    if (xs.length == idx.length) Some(xs.sum / len.toDouble) else None
+    if (xs.length == idx.length) Some(if (isCrd) xs.sum / len.toDouble else xs.sum) else None
   }
 
   // ----- RA detail (own copy of each formula) --------------------------------
@@ -68,38 +69,18 @@ object PrimaryViewYearly {
     }
 
   /**
-   * FWL=YES non-Central. The CALLER selects the stress leg and `shockSign` by scenario
-   * (Adverse/Extreme -> STRESS(-), shockSign -1; Optimistic -> STRESS(+), shockSign +1). Each shock
-   * leg is detrended by its OWN CRD; the base stat/fire terms stay BASELINE.
+   * FWL=YES non-Central — **pure-stress model** (yearly only). The scenario's loss rate is computed
+   * ENTIRELY on its stress leg: `RA = -(RA_STAT + RA_FI + RE) / CRD`, with every metric taken from
+   * the leg (Adverse/Extreme -> STRESS(-), Optimistic -> STRESS(+)). This is identical to
+   * [[centralRa]] applied to the leg series — there is NO baseline term and NO macro shock/Rate, so
+   * Adverse and Extreme (both STRESS(-)) are identical. The CALLER selects the leg by scenario.
+   * See `docs/YEAR_CALCULATION_SPECIFICATION.md`.
    */
   def scenarioRa(
-                  crdBase: Array[Double], raStatBase: Array[Double],
-                  raFiBase: Array[Double], reBase: Array[Double],
-                  crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
-                  deltaAt: Int => Double,
-                  shockSign: Double
+                  crdLeg: Array[Double], raStatLeg: Array[Double],
+                  raFiLeg: Array[Double], reLeg: Array[Double]
                 ): Vector[Double] =
-    computeRa { period =>
-      (for {
-        cb <- aggregate(crdBase, period, isCrd = true)
-        s  <- aggregate(raStatBase, period, isCrd = false)
-        fb <- aggregate(raFiBase, period, isCrd = false)
-        rb <- aggregate(reBase, period, isCrd = false)
-        cl <- aggregate(crdLeg, period, isCrd = true)
-        fl <- aggregate(raFiLeg, period, isCrd = false)
-        rl <- aggregate(reLeg, period, isCrd = false)
-      } yield {
-        if (cb == 0.0) 0.0
-        else {
-          def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
-          val statDet     = det(s, cb)
-          val fireBaseDet = det(fb, cb) + det(rb, cb)
-          val shockFi     = det(fl, cl) - det(fb, cb)
-          val shockRe     = det(rl, cl) - det(rb, cb)
-          statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
-        }
-      }).filter(_ < RUNOFF_RA_CAP)
-    }
+    centralRa(crdLeg, raStatLeg, raFiLeg, reLeg)
 
   /** Yearly period loop: keep years while the window is valid and term <= the computed horizon. */
   private def computeRa(period: Int => Option[Double]): Vector[Double] = {

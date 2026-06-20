@@ -214,11 +214,28 @@ object Term0AnalysisDriver {
     val yearly = r.matrixId.endsWith("_" + PrimaryView.Yearly.suffix)
     val (win, div) = yearWindow(r.period)
     val step1 =
-      if (yearly) s"[STEP 1] annual mean over $win  (SUM / $div), every metric"
+      if (yearly) s"[STEP 1] annual aggregation over $win  (RA metrics = SUM; CRD = SUM/$div mean)"
       else        s"[STEP 1] quarterly aggregation (CRD = block mean; RA metrics = half-weighted window)"
 
-    if (r.crdAgg == 0.0) {
+    if (r.usesShock && yearly) {
+      // YEARLY pure-stress: RA = -(RA_STAT + RA_FI + RE)/CRD computed ENTIRELY on the scenario's
+      // stress leg (no baseline, no macro shock -> Adverse == Extreme).
+      val opt = r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC
+      val leg = if (opt) "STRESS(+)" else "STRESS(-)"
+      sb.append(s"term $t (period ${r.period})  -- $leg pure-stress (RA from the stress leg only)\n")
+      if (r.legCrdAgg == 0.0) {
+        sb.append(s"  CRD($leg) = 0 -> exposure run off: RA = 0, VECTOR = 1\n")
+      } else {
+        sb.append(s"  $step1  [all metrics from $leg]\n")
+        sb.append(s"    $leg : CRD=${dot(r.legCrdAgg)}  RA_STAT=${dot(r.legStatAgg)}  RA_FI=${dot(r.legFiAgg)}  RE=${dot(r.legReAgg)}\n")
+        sb.append(s"  [STEP 2] RA($t) = -(RA_STAT + RA_FI + RE)/CRD   [all $leg]\n")
+        sb.append(s"           = -(${dot(r.legStatAgg)} + ${dot(r.legFiAgg)} + ${dot(r.legReAgg)}) / ${dot(r.legCrdAgg)} = ${dot(r.ra, 8)}\n")
+        sb.append(s"  [STEP 3] VECTOR($t) = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      }
+      sb.append(s"  [STEP 4] $eadLine\n\n")
+    } else if (r.crdAgg == 0.0) {
       sb.append(s"term $t (period ${r.period}) -- CRD run off (CRD = 0): RA = 0, VECTOR = 1\n")
+      sb.append(s"  $eadLine\n\n")
     } else if (r.usesShock) {
       val statDet = det(r.statAgg, r.crdAgg)
       val fire    = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)             // BASELINE FI+RE detrend

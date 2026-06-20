@@ -42,10 +42,12 @@ case class Term0RowView(
                          statAgg: Double,
                          fiAgg: Double,
                          reAgg: Double,
-                         // stress-leg aggregates at this period (NaN unless usesShock)
+                         // stress-leg aggregates at this period (NaN unless usesShock). legStatAgg is
+                         // only populated for the YEARLY pure-stress path (RA from the leg's own RA STAT).
                          legCrdAgg: Double,
                          legFiAgg: Double,
                          legReAgg: Double,
+                         legStatAgg: Double = Double.NaN,
                          // per-term result
                          delta: Double,
                          ra: Double,

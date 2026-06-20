@@ -246,21 +246,25 @@ class PrimaryMapper(
     if (crd.isEmpty) return Seq.empty
 
     val usesShock = m.fwlApplied && scenName != SCENARIO_CENTRAL
-    // Stress leg AND sign fixed by scenario (Optimistic -> STRESS(+), shock ADDED; Adverse/Extreme
-    // -> STRESS(-), shock SUBTRACTED), as in matrixRows.
-    val (crdLeg, fiLeg, reLeg, shockSign) =
+    // Stress leg AND sign fixed by scenario (Optimistic -> STRESS(+); Adverse/Extreme -> STRESS(-)), as in matrixRows.
+    val (legFwl, crdLeg, fiLeg, reLeg, shockSign) =
       if (scenName == SCENARIO_OPTIMISTIC)
-        (series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE), 1.0)
+        (FWL_STRESS_PLUS, series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE), 1.0)
       else
-        (series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE), -1.0)
+        (FWL_STRESS_MINUS, series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE), -1.0)
+    // Yearly pure-stress also needs the leg's own RA STAT (quarterly keeps RA STAT on baseline).
+    val statLeg = if (usesShock) series(legFwl, METRIC_RA_STAT) else Array.empty[Double]
 
     val raDetail: Vector[Double] =
       if (!usesShock) {
         if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
-      } else {
-        val mult: Int => Double =
-          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
+      } else freq match {
+        case Yearly => // pure-stress: RA from the leg's own STAT/FI/RE/CRD (no baseline, no macro shock)
+          PrimaryViewYearly.scenarioRa(crdLeg, statLeg, fiLeg, reLeg)
+        case _ =>
+          val mult: Int => Double =
+            if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
+          scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
       }
     if (raDetail.isEmpty) return Seq.empty
 
@@ -278,7 +282,8 @@ class PrimaryMapper(
       // RA / VECTOR exist only where a period was actually computed (<= raDetail length); else NaN.
       val ra0    = if (period >= 1 && period <= raDetail.length) raDetail(period - 1) else Double.NaN
       val vec0   = if (ra0.isNaN) Double.NaN else 1.0 - ra0
-      val delta  = if (usesShock) deltaFn(period) else 0.0
+      // delta drives the QUARTERLY shock only; the yearly pure-stress path has no macro term (-> NaN).
+      val delta  = if (!usesShock) 0.0 else if (freq == Yearly) Double.NaN else deltaFn(period)
 
       Term0RowView(
         matrixId = m.matrixId(freq), scenarioName = scenName, scenarioCode = scenCode,
@@ -292,6 +297,7 @@ class PrimaryMapper(
         legCrdAgg = if (usesShock) agg(crdLeg, period, isCrd = true) else Double.NaN,
         legFiAgg  = if (usesShock) agg(fiLeg, period, isCrd = false) else Double.NaN,
         legReAgg  = if (usesShock) agg(reLeg, period, isCrd = false) else Double.NaN,
+        legStatAgg = if (usesShock) agg(statLeg, period, isCrd = false) else Double.NaN,
         delta = delta, ra = ra0, vector = vec0, ead = ead
       )
     }
@@ -346,19 +352,21 @@ class PrimaryMapper(
         if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq)
         else statOnlyRa(crd, raStat, freq)
       } else {
-        // FWL=YES non-Central: the stress leg is fixed by scenario (Optimistic -> STRESS(+);
-        // Adverse/Extreme -> STRESS(-)); the per-term macro delta (Rate/100) scales the
-        // stress-vs-baseline shock on FI+RE.
-        // STEP-4 per-scenario stress leg AND sign: Optimistic ADDS the STRESS(+) shock (+1),
-        // Adverse/Extreme SUBTRACT the STRESS(-) shock (-1).
-        val (crdLeg, fiLeg, reLeg, shockSign) =
-          if (scenName == SCENARIO_OPTIMISTIC) (crdPlus, raFiPlus, rePlus, 1.0)
-          else (crdMinus, raFiMinus, reMinus, -1.0)
-        // Shock multiplier: Rate/100 (per-term macro delta) when applyRateToShock, else 1.0 (full
-        // shock, literal STEP-4 reading). See OPEN_QUESTIONS Q33.
-        val mult: Int => Double =
-          if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-        scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
+        // FWL=YES non-Central. Stress leg fixed by scenario: Optimistic -> STRESS(+), Adverse/Extreme -> STRESS(-).
+        val (legFwl, crdLeg, fiLeg, reLeg, shockSign) =
+          if (scenName == SCENARIO_OPTIMISTIC) (FWL_STRESS_PLUS, crdPlus, raFiPlus, rePlus, 1.0)
+          else (FWL_STRESS_MINUS, crdMinus, raFiMinus, reMinus, -1.0)
+        freq match {
+          case Yearly =>
+            // Yearly PURE-STRESS: RA = -(RA_STAT + RA_FI + RE)/CRD entirely on the stress leg
+            // (no baseline, no macro shock -> Adverse == Extreme). See YEAR_CALCULATION_SPECIFICATION.md.
+            PrimaryViewYearly.scenarioRa(crdLeg, series(legFwl, METRIC_RA_STAT), fiLeg, reLeg)
+          case _ =>
+            // Quarterly: baseline detail + macro-weighted (Rate/100) stress-vs-baseline shock on FI+RE.
+            val mult: Int => Double =
+              if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
+            scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
+        }
       }
 
     if (ra_detail.isEmpty) {
