@@ -190,6 +190,9 @@ object Term0AnalysisDriver {
   /** Loss-rate determinant `-x / c` (0 when CRD has run off) — mirrors PrimaryView.scenarioRa. */
   private def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
 
+  /** Plain ratio `x / c` (0 when CRD has run off) — the literal Excel baseline term in O155-O158. */
+  private def ratio(x: Double, c: Double): Double = if (c == 0.0) 0.0 else x / c
+
   /**
    * The exact arithmetic the engine used to reach RA / VECTOR / EAD_RA_RATE at one term, rendered as
    * a worked block. A non-shock term (Central, or any scenario when FWL=NO) uses
@@ -218,21 +221,33 @@ object Term0AnalysisDriver {
       else        s"[STEP 1] quarterly aggregation (CRD = block mean; RA metrics = half-weighted window)"
 
     if (r.usesShock && yearly) {
-      // YEARLY pure-stress: RA = -(RA_STAT + RA_FI + RE)/CRD computed ENTIRELY on the scenario's
-      // stress leg (no baseline, no macro shock -> Adverse == Extreme).
+      // YEARLY OAT-10Y sensitivity model (Excel O155-O182): RA STAT and the CRD denominator stay
+      // BASELINE; only FI/RE is adjusted, by the per-leg sensitivity scaled by the OAT spread (r.delta
+      // = (IR_10Y_FR scen-Central)*100). Adverse != Extreme via their distinct OAT spreads.
       val opt = r.scenarioName == PrimaryConstants.SCENARIO_OPTIMISTIC
       val leg = if (opt) "STRESS(+)" else "STRESS(-)"
-      sb.append(s"term $t (period ${r.period})  -- $leg pure-stress (RA from the stress leg only)\n")
-      if (r.legCrdAgg == 0.0) {
-        sb.append(s"  CRD($leg) = 0 -> exposure run off: RA = 0, VECTOR = 1\n")
+      sb.append(s"term $t (period ${r.period})  -- $leg OAT-10Y sensitivity (baseline STAT; FI/RE adjusted by OAT spread)\n")
+      if (r.crdAgg == 0.0) {
+        sb.append(s"  CRD(baseline) = 0 -> exposure run off: RA = 0, VECTOR = 1\n")
       } else {
-        sb.append(s"  $step1  [all metrics from $leg]\n")
-        sb.append(s"    $leg : CRD=${dot(r.legCrdAgg)}  RA_STAT=${dot(r.legStatAgg)}  RA_FI=${dot(r.legFiAgg)}  RE=${dot(r.legReAgg)}\n")
-        sb.append(s"  [STEP 2] RA($t) = -(RA_STAT + RA_FI + RE)/CRD   [all $leg]\n")
-        sb.append(s"           = -(${dot(r.legStatAgg)} + ${dot(r.legFiAgg)} + ${dot(r.legReAgg)}) / ${dot(r.legCrdAgg)} = ${dot(r.ra, 8)}\n")
-        sb.append(s"  [STEP 3] VECTOR($t) = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+        val statDet  = det(r.statAgg, r.crdAgg)                                  // O172
+        val fireBase = det(r.fiAgg, r.crdAgg) + det(r.reAgg, r.crdAgg)           // O173
+        val sensFi   = det(r.legFiAgg, r.legCrdAgg) - ratio(r.fiAgg, r.crdAgg)   // O155/O157
+        val sensRe   = det(r.legReAgg, r.legCrdAgg) - ratio(r.reAgg, r.crdAgg)   // O156/O158
+        val fireScen = fireBase - ((fireBase * sensFi + fireBase * sensRe) * r.delta) // O174-176
+        sb.append(s"  $step1\n")
+        sb.append(s"    BASELINE  : CRD=${dot(r.crdAgg)}  RA_STAT=${dot(r.statAgg)}  RA_FI=${dot(r.fiAgg)}  RE=${dot(r.reAgg)}\n")
+        sb.append(s"    $leg : CRD=${dot(r.legCrdAgg)}  RA_FI=${dot(r.legFiAgg)}  RE=${dot(r.legReAgg)}\n")
+        sb.append(s"  [STEP 2] stat_det      = -RA_STAT/CRD [BASELINE]   = ${dot(statDet, 8)}   (O172)\n")
+        sb.append(s"           fire_base_det = -(RA_FI+RE)/CRD [BASELINE] = ${dot(fireBase, 8)}   (O173)\n")
+        sb.append(s"  [STEP 3] sens_fi = -RA_FI($leg)/CRD($leg) - RA_FI/CRD = ${dot(sensFi, 8)}   (O155/O157)\n")
+        sb.append(s"           sens_re = -RE($leg)/CRD($leg) - RE/CRD = ${dot(sensRe, 8)}   (O156/O158)\n")
+        sb.append(s"  [STEP 4] dOAT = (IR_10Y_FR($leg) - IR_10Y_FR(Central))*100 = ${dot(r.delta, 6)}   (O167-169)\n")
+        sb.append(s"  [STEP 5] fire_scen_det = fire_base_det*(1 - (sens_fi+sens_re)*dOAT) = ${dot(fireScen, 8)}   (O174-176)\n")
+        sb.append(s"  [STEP 6] RA($t) = stat_det + fire_scen_det = ${dot(statDet, 8)} + ${dot(fireScen, 8)} = ${dot(r.ra, 8)}   (O179-182)\n")
+        sb.append(s"  [STEP 7] VECTOR($t) = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
       }
-      sb.append(s"  [STEP 4] $eadLine\n\n")
+      sb.append(s"  [STEP 8] $eadLine\n\n")
     } else if (r.crdAgg == 0.0) {
       sb.append(s"term $t (period ${r.period}) -- CRD run off (CRD = 0): RA = 0, VECTOR = 1\n")
       sb.append(s"  $eadLine\n\n")
@@ -350,7 +365,13 @@ object Term0AnalysisDriver {
     sb.append("`EAD_RA_RATE` matches the engine at that term.\n\n")
     sb.append(s"Terms analysed ($gridLabel): ${allTerms.map(termStr).mkString(", ")}.\n")
     sb.append(aggText)
-    sb.append("Loss rate: `RA = -(STAT+FI+RE)/CRD` (FWL=YES) or `-(STAT)/CRD` (FWL=NO);\n")
+    sb.append("Loss rate: Central/FWL=NO `RA = -(STAT+FI+RE)/CRD` or `-(STAT)/CRD`.\n")
+    if (freq == PrimaryView.Yearly)
+      sb.append("Yearly non-Central: OAT-10Y sensitivity (Excel O155-O182) — `RA = stat_det + " +
+        "fire_base_det*(1 - (sens_fi+sens_re)*dOAT)`, baseline STAT/CRD, FI/RE adjusted by the OAT " +
+        "spread `(IR_10Y_FR scen-Central)*100`; Adverse != Extreme.\n")
+    else
+      sb.append("Quarterly non-Central: baseline detail + macro-weighted stress shock on FI/RE.\n")
     sb.append("`VECTOR = 1 - RA`; `EAD_RA_RATE` = cumulative product of VECTOR (held flat past horizon).\n")
     if (reconciled)
       sb.append("`ENGINE` / `STATUS` reconcile each `EAD_RA_RATE` against the real engine output CSV.\n")

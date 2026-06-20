@@ -252,15 +252,15 @@ class PrimaryMapper(
         (FWL_STRESS_PLUS, series(FWL_STRESS_PLUS, METRIC_CRD), series(FWL_STRESS_PLUS, METRIC_RA_FI), series(FWL_STRESS_PLUS, METRIC_RE), 1.0)
       else
         (FWL_STRESS_MINUS, series(FWL_STRESS_MINUS, METRIC_CRD), series(FWL_STRESS_MINUS, METRIC_RA_FI), series(FWL_STRESS_MINUS, METRIC_RE), -1.0)
-    // Yearly pure-stress also needs the leg's own RA STAT (quarterly keeps RA STAT on baseline).
-    val statLeg = if (usesShock) series(legFwl, METRIC_RA_STAT) else Array.empty[Double]
+    // Yearly OAT model keeps RA STAT on BASELINE (like quarterly); the leg supplies only FI/RE/CRD.
+    val oatDeltaFn = oatDeltaYearly(macroData, scenName, m.macroVar, shockWindowFor(m.projectionHorizon))
 
     val raDetail: Vector[Double] =
       if (!usesShock) {
         if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
       } else freq match {
-        case Yearly => // pure-stress: RA from the leg's own STAT/FI/RE/CRD (no baseline, no macro shock)
-          PrimaryViewYearly.scenarioRa(crdLeg, statLeg, fiLeg, reLeg)
+        case Yearly => // OAT-10Y sensitivity: baseline STAT + FI/RE adjusted by per-leg sensitivity x OAT spread
+          PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDeltaFn)
         case _ =>
           val mult: Int => Double =
             if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
@@ -282,8 +282,8 @@ class PrimaryMapper(
       // RA / VECTOR exist only where a period was actually computed (<= raDetail length); else NaN.
       val ra0    = if (period >= 1 && period <= raDetail.length) raDetail(period - 1) else Double.NaN
       val vec0   = if (ra0.isNaN) Double.NaN else 1.0 - ra0
-      // delta drives the QUARTERLY shock only; the yearly pure-stress path has no macro term (-> NaN).
-      val delta  = if (!usesShock) 0.0 else if (freq == Yearly) Double.NaN else deltaFn(period)
+      // delta: quarterly = raw macro Rate/100; yearly = OAT spread (IR_10Y_FR scen-Central)*100 (O167-169).
+      val delta  = if (!usesShock) 0.0 else if (freq == Yearly) oatDeltaFn(period) else deltaFn(period)
 
       Term0RowView(
         matrixId = m.matrixId(freq), scenarioName = scenName, scenarioCode = scenCode,
@@ -297,7 +297,7 @@ class PrimaryMapper(
         legCrdAgg = if (usesShock) agg(crdLeg, period, isCrd = true) else Double.NaN,
         legFiAgg  = if (usesShock) agg(fiLeg, period, isCrd = false) else Double.NaN,
         legReAgg  = if (usesShock) agg(reLeg, period, isCrd = false) else Double.NaN,
-        legStatAgg = if (usesShock) agg(statLeg, period, isCrd = false) else Double.NaN,
+        legStatAgg = Double.NaN, // OAT model uses BASELINE RA STAT, not the leg's
         delta = delta, ra = ra0, vector = vec0, ead = ead
       )
     }
@@ -358,9 +358,12 @@ class PrimaryMapper(
           else (FWL_STRESS_MINUS, crdMinus, raFiMinus, reMinus, -1.0)
         freq match {
           case Yearly =>
-            // Yearly PURE-STRESS: RA = -(RA_STAT + RA_FI + RE)/CRD entirely on the stress leg
-            // (no baseline, no macro shock -> Adverse == Extreme). See YEAR_CALCULATION_SPECIFICATION.md.
-            PrimaryViewYearly.scenarioRa(crdLeg, series(legFwl, METRIC_RA_STAT), fiLeg, reLeg)
+            // Yearly OAT-10Y SENSITIVITY model (Excel O155-O182): baseline RA STAT + FI/RE adjusted by
+            // the per-leg sensitivity scaled by the OAT spread. RA STAT and the CRD denominator stay
+            // BASELINE; the leg supplies only FI/RE/CRD for the sensitivity, and the OAT spread makes
+            // Adverse != Extreme. See YEAR_CALCULATION_SPECIFICATION.md.
+            val oatDelta = oatDeltaYearly(macroData, scenName, m.macroVar, shockWindowFor(m.projectionHorizon))
+            PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDelta)
           case _ =>
             // Quarterly: baseline detail + macro-weighted (Rate/100) stress-vs-baseline shock on FI+RE.
             val mult: Int => Double =
@@ -455,6 +458,26 @@ class PrimaryMapper(
       val idx = (period - 1) * step
       if (idx < arr.length) arr(idx) else 0.0 // shock applies only through PROJECTION_HORIZON (end inclusive)
     }
+  }
+
+  /**
+   * YEARLY-ONLY OAT-10Y spread ΔOAT per year for the Excel sensitivity model
+   * ([[PrimaryViewYearly.scenarioRa]], cells O167-O169): the signed macro `(scenario − Central)` for
+   * `macroVar` sampled at each YEAR's first quarter (`(period-1)*4`), rescaled by ×100 to express the
+   * decimal-rate gap as "100 bp blocks" (`(OAT_scen − OAT_base)·100`). The ×100 is the Excel
+   * convention and is INTENTIONALLY independent of the quarterly `macro_delta_scale` knob, so the two
+   * frequencies stay decoupled. Past the shock window → 0 (no spread beyond the projection horizon).
+   * `window` is the matrix's [[shockWindowFor]] result.
+   */
+  private def oatDeltaYearly(
+                              macroData: Map[(String, String), Map[String, Double]],
+                              scenName: String, macroVar: String, window: Vector[String]
+                            ): Int => Double = {
+    val arr = window.map { q =>
+      def v(scen: String): Double = macroData.get((scen, q)).flatMap(_.get(macroVar)).getOrElse(0.0)
+      (v(scenName) - v(SCENARIO_CENTRAL)) * 100.0
+    }.toArray
+    (period: Int) => { val idx = (period - 1) * 4; if (idx < arr.length) arr(idx) else 0.0 }
   }
 
   // ---- input collection -----------------------------------------------------
