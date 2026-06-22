@@ -259,8 +259,8 @@ class PrimaryMapper(
       if (!usesShock) {
         if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
       } else freq match {
-        case Yearly => // OAT-10Y sensitivity: baseline STAT + FI/RE adjusted by per-leg sensitivity x OAT spread
-          PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDeltaFn)
+        case Yearly => // OAT-10Y additive shock: baseline STAT + macro-weighted FI/RE shock (no ×O173)
+          PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDeltaFn, shockSign)
         case _ =>
           val mult: Int => Double =
             if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
@@ -363,7 +363,7 @@ class PrimaryMapper(
             // BASELINE; the leg supplies only FI/RE/CRD for the sensitivity, and the OAT spread makes
             // Adverse != Extreme. See YEAR_CALCULATION_SPECIFICATION.md.
             val oatDelta = oatDeltaYearly(macroData, scenName, m.macroVar, shockWindowFor(m.projectionHorizon))
-            PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDelta)
+            PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDelta, shockSign)
           case _ =>
             // Quarterly: baseline detail + macro-weighted (Rate/100) stress-vs-baseline shock on FI+RE.
             val mult: Int => Double =
