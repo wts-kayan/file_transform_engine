@@ -17,7 +17,7 @@ The Risk team supplies three inputs in TWIST (Parameters > Projection):
 
 The engine reads them and produces the final **EAD FWD Term Structure** file: for each
 *matrix* (perimeter × segment × frequency), each *scenario* and each *term*, a single
-`EAD_RA_RATE` value.
+`EAD_RA_RATE` value (plus a reserved, currently-empty `EAD_CCF_RATE` column — see §3).
 
 ---
 
@@ -108,6 +108,8 @@ Secto is **not** implemented (no Secto data in the scenario file).
 >   **203 rows**.
 > - **Yearly:** 30 computed points → terms `0 … 29`; every term from `29` onward
 >   (`30, 31 … 50` and `100`) repeats the **term-29 value** = **52 rows**.
+>
+> (These counts are the full output; the `EAD_RA_RATE >= 1` exclusion option (§4.9) drops some rows.)
 
 The intent is to compute to term **30 years** then hold flat. With exactly 361 input
 months the *last computable* term is **29.75** (quarterly) / **29** (yearly) — the
@@ -167,8 +169,8 @@ code paths and must evolve independently):
 #### 4.7.1 Quarterly (macro-path additive shock)
 For non-Central scenarios the shock is **term-varying**, read from the scenario macro path
 over the matrix's window (`as_of_date_quarter .. as_of_date_quarter + PROJECTION_HORIZON`):
-term 0 = window start, step 1 quarter (yearly steps 1 year); past the window end (the projection
-horizon) the last delta is held.
+term 0 = window start, one step per quarter; past the window end (the projection horizon) the last
+delta is held.
 1. `delta_i = MACRO[scenario][q_i] − MACRO[Central][q_i]` — the raw macro delta (`Rate/100`), per term `i`.
 2. Stress leg is fixed by **scenario**: **Adverse / Extreme → STRESS (-)**, **Optimistic → STRESS (+)**.
 3. `RA_STAT` stays baseline; only FI + RE are shocked. Per period (`det(x,c) = -x/c`, `0` if `c = 0`):
@@ -244,10 +246,11 @@ value. See `TECHNICAL_SPECIFICATION.md` §5.
   scenario coverage, the shock-window quarters). It logs a consolidated PASS/WARN/FAIL report and
   writes an auditable `DATA_CONTROL_<table>.csv`. When `validation.strict = true` (default) any FAIL
   **aborts the run** before calculation; otherwise it only warns.
-- **Analysis generator.** A separate job (`Term0AnalysisDriver`) regenerates the worked computation
-  breakdown per *(matrix, scenario, term)* — a Markdown narrative and a CSV — from the same inputs and
-  the **same** formulas as production, optionally **reconciled** against the real output (`MATCH` /
-  `DIFF` / `MISSING`). It is the auditable, machine-generated equivalent of the manual worked example.
+- **Analysis generator.** Separate jobs (`Term0AnalysisDriver` quarterly / `YearAnalysisDriver` yearly)
+  regenerate the worked computation breakdown per *(matrix, scenario, term)* — a Markdown narrative and
+  a CSV — from the same inputs and the **same** formulas as production, optionally **reconciled**
+  against the real output (`MATCH` / `DIFF` / `MISSING`). It is the auditable, machine-generated
+  equivalent of the manual worked example.
 
 ## 8. Open items (data-dependent)
 

@@ -31,7 +31,7 @@ MainDriver
   │         ├─ collect RA + scenario to driver maps  (RA key includes PERIMETER)
   │         ├─ pre-calculation data control (DataControlView; aborts on FAIL when validation.strict)
   │         ├─ per matrix × {Q,Y} × scenario:
-  │         │     PrimaryView aggregation → RA → vector-factored → flat tail
+  │         │     PrimaryView (Q) / PrimaryViewYearly (Y) → aggregate → RA → vector-factored → flat tail
   │         └─ build output DataFrame (decimal-comma strings)
   └─ PrimaryWriter / PrimaryUtilities.writeDataframe
         └─ write CSV (1 partition) + collapse part-file → single clean CSV
@@ -55,9 +55,10 @@ MainDriver
 | `writer/PrimaryWriter.scala`, `utility/PrimaryUtilities.scala` | Write + single-file collapse, Excel/CSV readers, HDFS helpers |
 | `utility/PrimaryConstants.scala` | Column/value names, scenario codes, output columns |
 
-> `MainDriver` is the production pipeline (above). `Term0AnalysisDriver` and `EadFwdCompare` are
-> separate jobs in the same jar (pick with `--class`); the analysis job reuses `PrimaryReader` +
-> `PrimaryMapper`, so its numbers are computed by the same validated code. See §10.
+> `MainDriver` is the production pipeline (above). `Term0AnalysisDriver` / `YearAnalysisDriver` (the
+> quarterly/yearly analysis generators) and `EadFwdCompare` are separate jobs in the same jar (pick
+> with `--class`); the analysis jobs reuse `PrimaryReader` + `PrimaryMapper`, so their numbers are
+> computed by the same validated code. See §10.
 
 ---
 
@@ -72,6 +73,9 @@ MainDriver
 >   all repeat the term-29.75 value → 203 rows.
 > - **Yearly:** 30 computed points (terms `0 … 29`); terms `30 … 50` and `100` all repeat
 >   the term-29 value → 52 rows.
+>
+> These row counts assume `exclude_ead_ra_rate_ge_1 = false`; the filter drops `EAD_RA_RATE >= 1`
+> rows, so fewer are emitted (§4.8).
 >
 > `computeRa` stops when the aggregation window exceeds the 361 available months (the
 > quarterly window for term 30 needs month 362) or when term > 30, whichever comes first.
@@ -242,7 +246,8 @@ The leg is fixed by scenario (Optimistic → STRESS(+), Adverse/Extreme → STRE
 gives the direction (no `shockSign`). Reproduces the workbook to 8 dp. Full rationale (incl. the
 `·10000` scale) and open points: [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md).
 
-### 4.4 Macro delta path (FWL=YES)  `macroDeltaArray` / `deltaPath`
+### 4.4 Macro delta path (FWL=YES, **quarterly**)  `macroDeltaArray` / `deltaPath`
+> Yearly uses `oatDeltaYearly` instead (anniversary-sampled OAT spread `·10000`, §4.3 yearly / §3.3).
 ```
 shockWindowFor(m) = ordered quarters [as_of_date_quarter .. end]
                     end = as_of_date_quarter + PROJECTION_HORIZON(m)   (blank → last_quarter_projection_horizon)
@@ -298,7 +303,8 @@ Output header: `EAD_MATRIX_ID;SCENARIO_ID;TERM;EAD_RA_RATE;EAD_CCF_RATE`.
 
 Under `tseadfwd_app`. Engine **run parameters** (the computation settings, not the input/output
 blocks) are grouped under a `parameters { … }` object; input blocks (`RA_*`, `MACRO_VARIABLE`,
-`PARAMETRAGE`) and output/job blocks (`TS_EAD_FWD`, `COMPARE`, `TERM0_ANALYSIS`) stay at the root.
+`PARAMETRAGE`) and output/job blocks (`TS_EAD_FWD`, `COMPARE`, `TERM0_ANALYSIS`, `YEAR_ANALYSIS`) stay
+at the root.
 
 | Key | Meaning | Current value |
 |-----|---------|---------------|
@@ -314,7 +320,8 @@ blocks) are grouped under a `parameters { … }` object; input blocks (`RA_*`, `
 | `parameters.validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
 | `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job — diff an output CSV vs a target CSV | — |
-| `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job — analysis breakdown (+ engine reconciliation) | — |
+| `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job — **quarterly** analysis breakdown (+ engine reconciliation) | — |
+| `YEAR_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `YearAnalysisDriver` job — **yearly** analysis breakdown (same keys, yearly grid) | — |
 
 > **Note (scenario input).** Earlier vintages used a single scenario **CSV** (`header`/`delimiter`,
 > one table with a `scenario` column). It is now a per-scenario **Excel workbook**: each sheet is one
@@ -338,7 +345,7 @@ each `show()`:
   (FWL=NO matrices trace Central only; FWL=YES trace all scenarios).
 - `OUTPUT - TS_EAD_FWD` (final, in `MainDriver`).
 
-The TRACE is the row-by-row view of the 120-quarter / 31-year build described in §3.1.
+The TRACE is the row-by-row view of the 120-quarter / 30-year build described in §3.1.
 
 ---
 
@@ -401,7 +408,7 @@ Regenerates the worked computation breakdown per *(matrix, scenario, term)* as a
 and a decimal-comma CSV. It reads inputs via `PrimaryReader` and calls
 `PrimaryMapper.term0AnalysisRows(terms)`, which reuses the **same** parsing + `PrimaryView` formulas as
 production — so every value equals the engine's output at that term by construction. Config block
-`TERM0_ANALYSIS`:
+`TERM0_ANALYSIS` (quarterly) / `YEAR_ANALYSIS` (yearly):
 - `enabled` — generation gate (the job is a no-op when `false`).
 - `terms` — output terms to break down, e.g. `[0, 0.25, 0.5, 1, 2, 5, 10, 30]`.
 - `enginePath` — (optional) the real `TS_EAD_FWD` CSV to **reconcile** against; each computed `EAD` is
