@@ -308,7 +308,7 @@ blocks) are grouped under a `parameters { … }` object; input blocks (`RA_*`, `
 | `parameters.as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) | `"2025Q4"` |
 | `parameters.last_quarter_projection_horizon` | fallback shock-window end, used only when a matrix's PARAMETRAGE `PROJECTION_HORIZON` is blank (normally end = `as_of + PROJECTION_HORIZON`) | `"2028Q4"` |
 | `parameters.apply_rate_to_shock` | **Quarterly** FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
-| `parameters.macro_delta_scale` | **Quarterly only** — unit scale on the raw macro delta before it scales the shock (yearly uses a fixed `·10000` in `oatDeltaYearly`, not this knob) | `100` |
+| `parameters.macro_delta_scale` | **Quarterly only** — unit scale on the raw macro delta before it scales the shock (yearly uses a fixed `·10000` in `oatDeltaYearly`, not this knob; see OPEN_QUESTIONS Q34 on whether `100` is consistent with the yearly OAT scale) | `100` |
 | `parameters.exclude_ead_ra_rate_ge_1` | Drop output rows whose final `EAD_RA_RATE >= 1` (full-exposure terms). Output-only filter | `true` (localRun); default `false` |
 | `parameters.debug` | enable titled `show()` of inputs + per-term trace | `false` |
 | `parameters.validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
