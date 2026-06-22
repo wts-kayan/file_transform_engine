@@ -2,6 +2,7 @@ package com.bnp.str.tseadfwd
 
 import com.bnp.str.tseadfwd.mapping.PrimaryView
 import com.bnp.str.tseadfwd.mapping.PrimaryView._
+import com.bnp.str.tseadfwd.mapping.PrimaryViewYearly
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -21,6 +22,8 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
   private val tol = 1e-9
   /** 18-month ramp 1.0 .. 18.0 (m(0)=M1). */
   private val ramp: Array[Double] = (1 to 18).map(_.toDouble).toArray
+  /** A constant 6-month series (one yearly Y1 window: M1..M6 -> a single computed period). */
+  private def six(x: Double): Array[Double] = Array.fill(6)(x)
 
   // ---- §4.2 period aggregation: quarterly --------------------------------------------------
 
@@ -40,15 +43,14 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
 
   // ---- §4.2 period aggregation: yearly -----------------------------------------------------
 
-  test("yearly: EVERY metric is the MEAN over the window (Annual Freq schema STEP 1)") {
-    // Y1 = mean(M1..M6) for both RA metrics and CRD: 21/6 = 3.5 (no half-weight, no raw sum).
-    aggregate(ramp, period = 1, Yearly, isCrd = false) shouldBe Some(3.5) // (1+..+6)/6
-    aggregate(ramp, period = 1, Yearly, isCrd = true) shouldBe Some(3.5)   // identical for CRD
+  test("yearly Y1: RA metrics = SUM(M1..M6), CRD = MEAN(M1..M6)") {
+    aggregate(ramp, period = 1, Yearly, isCrd = false) shouldBe Some(21.0) // 1+..+6 (raw sum)
+    aggregate(ramp, period = 1, Yearly, isCrd = true) shouldBe Some(3.5)   // 21/6 (mean)
   }
 
-  test("yearly Yn (n>=2) covers 12 months, mean either way: Y2 = mean(M7..M18)") {
-    aggregate(ramp, period = 2, Yearly, isCrd = false) shouldBe Some(12.5) // (7+..+18)/12
-    aggregate(ramp, period = 2, Yearly, isCrd = true) shouldBe Some(12.5)  // identical for CRD
+  test("yearly Yn (n>=2) covers 12 months: Y2 RA = SUM(M7..M18), CRD = MEAN") {
+    aggregate(ramp, period = 2, Yearly, isCrd = false) shouldBe Some(150.0) // 7+..+18 (raw sum)
+    aggregate(ramp, period = 2, Yearly, isCrd = true) shouldBe Some(12.5)   // 150/12 (mean)
   }
 
   test("aggregate returns None when the window exceeds the available months") {
@@ -139,6 +141,76 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
     ra(-2.0) shouldBe (-0.90 +- tol) // 0 + (0.45 + 0) * -2
   }
 
+  // ---- yearly OAT-10Y sensitivity scenario RA (Excel O155-O182, ×O173) ----------------------
+  //
+  // PrimaryViewYearly.scenarioRa keeps RA STAT and the CRD denominator at BASELINE and adjusts FI/RE
+  // by the per-leg sensitivity scaled by the OAT spread, WITH the ×fire_base_det factor:
+  //   stat_det      = -RA_STAT_base/CRD_base                          (O172)
+  //   fire_base_det = -(RA_FI_base + RE_base)/CRD_base                (O173)
+  //   sens_fi       = (-RA_FI_leg/CRD_leg) - (RA_FI_base/CRD_base)    (O155/O157, literal Excel)
+  //   sens_re       = (-RE_leg /CRD_leg)  - (RE_base /CRD_base)       (O156/O158)
+  //   fire_scen_det = fire_base_det*(1 - (sens_fi+sens_re)*dOAT)      (O174-176)
+  //   RA            = stat_det + fire_scen_det                        (O179-182)
+  // dOAT = (IR_10Y_FR scen - Central)*10000 (signed; its sign gives the scenario direction — no
+  // shockSign). Y1 aggregation: CRD = MEAN(M1..M6); RA metrics = SUM(M1..M6).
+
+  test("yearly scenarioRa with dOAT == 0 equals yearly centralRa (no OAT spread)") {
+    val crd = six(-100.0); val stat = six(8.0); val fib = six(2.0); val reb = six(1.0)
+    val central = PrimaryViewYearly.centralRa(crd, stat, fib, reb) // -(48+12+6)/-100 = 0.66
+    // arbitrary leg; dOAT=0 => fire_scen_det = fire_base_det*(1-0) = fire_base_det => RA = central
+    val scen = PrimaryViewYearly.scenarioRa(crd, stat, fib, reb, six(-100.0), six(99.0), six(99.0), _ => 0.0)
+    central.head shouldBe (0.66 +- tol)
+    scen.length shouldBe central.length
+    central.zip(scen).foreach { case (c, s) => s shouldBe (c +- tol) }
+  }
+
+  test("yearly scenarioRa worked case: RA = stat_det + fire_base_det*(1 - (sens_fi+sens_re)*dOAT)") {
+    // baseline: CRD mean -100; STAT sum 30 -> stat_det 0.30; FI sum 30 -> fire_base_det 0.30; RE 0.
+    // leg: CRD mean -100; FI sum 90 -> det 0.90; sens_fi = 0.90 - (30/-100) = 1.20; sens_re = 0.
+    // => RA = 0.30 + 0.30*(1 - 1.20*dOAT) = 0.60 - 0.36*dOAT
+    val crd = six(-100.0); val stat = six(5.0); val fib = six(5.0); val zero = six(0.0)
+    val legCrd = six(-100.0); val legFi = six(15.0)
+    def ra(dOat: Double) =
+      PrimaryViewYearly.scenarioRa(crd, stat, fib, zero, legCrd, legFi, zero, _ => dOat).head
+    ra(0.0) shouldBe (0.60 +- tol)   // no spread
+    ra(0.5) shouldBe (0.42 +- tol)   // 0.60 - 0.36*0.5  (positive dOAT -> lower RA, e.g. Optimistic)
+    ra(-0.5) shouldBe (0.78 +- tol)  // 0.60 + 0.18      (negative dOAT -> higher RA, e.g. Adverse)
+  }
+
+  test("yearly Adverse != Extreme: same STRESS(-) leg, different OAT spread -> different RA") {
+    // RA = 0.60 - 0.36*dOAT (setup as above); Adverse/Extreme both have dOAT<0 but distinct.
+    val crd = six(-100.0); val stat = six(5.0); val fib = six(5.0); val zero = six(0.0)
+    val legCrd = six(-100.0); val legFi = six(15.0)
+    val adverse = PrimaryViewYearly.scenarioRa(crd, stat, fib, zero, legCrd, legFi, zero, _ => -0.325).head
+    val extreme = PrimaryViewYearly.scenarioRa(crd, stat, fib, zero, legCrd, legFi, zero, _ => -0.125).head
+    adverse shouldBe (0.60 + 0.36 * 0.325 +- tol) // 0.71700  (worse: higher RA)
+    extreme shouldBe (0.60 + 0.36 * 0.125 +- tol) // 0.64500
+    adverse should be > extreme                    // the old ×100-scaled run made these near-identical
+  }
+
+  test("yearly scenarioRa: when fire_base_det == 0 (FI=RE=0) every scenario equals Central") {
+    // The ×fire_base_det factor zeroes the OAT adjustment, so a CONSO-like book (no FI/RE) is
+    // scenario-invariant: RA = stat_det for any leg / OAT spread.
+    val crd = six(-100.0); val stat = six(5.0); val zero = six(0.0)
+    val central = PrimaryViewYearly.centralRa(crd, stat, zero, zero).head // -30/-100 = 0.30
+    central shouldBe (0.30 +- tol)
+    PrimaryViewYearly.scenarioRa(crd, stat, zero, zero, six(-100.0), six(99.0), six(7.0), _ => 5.0).head shouldBe (0.30 +- tol)
+    PrimaryViewYearly.scenarioRa(crd, stat, zero, zero, six(-100.0), six(99.0), six(7.0), _ => -30.0).head shouldBe (0.30 +- tol)
+  }
+
+  test("yearly scenarioRa: leg CRD == 0 (run-off) zeroes the sensitivity (Excel SIERREUR) -> RA = Central") {
+    // A 0 leg CRD makes the sensitivity cell error to 0, so the scenario FI/RE collapses to baseline.
+    val crd = six(-100.0); val stat = six(8.0); val fib = six(2.0); val reb = six(1.0)
+    val central = PrimaryViewYearly.centralRa(crd, stat, fib, reb).head // 0.66
+    central shouldBe (0.66 +- tol)
+    PrimaryViewYearly.scenarioRa(crd, stat, fib, reb, six(0.0), six(20.0), six(5.0), _ => 0.5).head shouldBe (0.66 +- tol)
+  }
+
+  test("yearly scenarioRa run-off guard: baseline CRD == 0 -> RA = 0") {
+    val ra = PrimaryViewYearly.scenarioRa(six(0.0), six(5.0), six(10.0), six(1.0), six(-100.0), six(20.0), six(2.0), _ => 0.5)
+    every(ra) shouldBe 0.0
+  }
+
   // ---- §4.7 survival factor + clamp --------------------------------------------------------
 
   test("vectorFactored is the cumulative product of (1 - RA)") {
@@ -147,9 +219,9 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
     vf(1) shouldBe (0.72 +- tol) // 0.9 * 0.8
   }
 
-  test("vectorFactored clamps the emitted value into [0,1]") {
-    vectorFactored(Vector(-1.0)).head shouldBe (1.0 +- tol) // 1*(1-(-1))=2 -> clamp to 1
-    vectorFactored(Vector(2.0)).head shouldBe (0.0 +- tol)  // 1*(1-2)=-1  -> clamp to 0
+  test("vectorFactored caps at 1, and reports a negative running product as 1 (full exposure)") {
+    vectorFactored(Vector(-1.0)).head shouldBe (1.0 +- tol) // 1*(1-(-1))=2  -> capped at 1
+    vectorFactored(Vector(2.0)).head shouldBe (1.0 +- tol)  // 1*(1-2)=-1 (<0) -> reported as 1, per PrimaryView
   }
 
   // ---- §4.8 term grid + flat tail ----------------------------------------------------------

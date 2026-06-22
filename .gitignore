@@ -14,3 +14,10 @@ target/
 
 # generated output
 localRun/tseadfwd/output/
+localRun/tseadfwd/output_analysis/
+
+# Excel temp lock files
+~$*
+
+# Claude Code local agent files
+.claude/

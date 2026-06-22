@@ -69,4 +69,6 @@ object PrimaryConstants {
   final val OUT_SCENARIO_ID = "SCENARIO_ID"
   final val OUT_TERM = "TERM"
   final val OUT_EAD_RA_RATE = "EAD_RA_RATE"
+  // Placeholder column, emitted with empty values (CCF rate not computed by this engine yet).
+  final val OUT_EAD_CCF_RATE = "EAD_CCF_RATE"
 }

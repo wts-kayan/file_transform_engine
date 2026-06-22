@@ -183,31 +183,29 @@ object PrimaryView {
                   freq: Frequency,
                   deltaAt: Int => Double,
                   shockSign: Double
-                ): Vector[Double] = freq match {
-    case Yearly => // standalone yearly core
-      PrimaryViewYearly.scenarioRa(crdBase, raStatBase, raFiBase, reBase, crdLeg, raFiLeg, reLeg, deltaAt, shockSign)
-    case Quarterly => computeRa(freq) { period =>
-      (for {
-        cb <- aggregate(crdBase, period, freq, isCrd = true)
-        s  <- aggregate(raStatBase, period, freq, isCrd = false)
-        fb <- aggregate(raFiBase, period, freq, isCrd = false)
-        rb <- aggregate(reBase, period, freq, isCrd = false)
-        cl <- aggregate(crdLeg, period, freq, isCrd = true)
-        fl <- aggregate(raFiLeg, period, freq, isCrd = false)
-        rl <- aggregate(reLeg, period, freq, isCrd = false)
-      } yield {
-        if (cb == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
-        else {
-          def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
-          val statDet     = det(s, cb)
-          val fireBaseDet = det(fb, cb) + det(rb, cb)
-          val shockFi     = det(fl, cl) - det(fb, cb)
-          val shockRe     = det(rl, cl) - det(rb, cb)
-          statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
-        }
+                ): Vector[Double] = computeRa(freq) { period =>
+    // QUARTERLY only. The yearly non-Central path is the standalone pure-stress
+    // [[PrimaryViewYearly.scenarioRa]] (= centralRa on the stress leg), dispatched in PrimaryMapper.
+    (for {
+      cb <- aggregate(crdBase, period, freq, isCrd = true)
+      s  <- aggregate(raStatBase, period, freq, isCrd = false)
+      fb <- aggregate(raFiBase, period, freq, isCrd = false)
+      rb <- aggregate(reBase, period, freq, isCrd = false)
+      cl <- aggregate(crdLeg, period, freq, isCrd = true)
+      fl <- aggregate(raFiLeg, period, freq, isCrd = false)
+      rl <- aggregate(reLeg, period, freq, isCrd = false)
+    } yield {
+      if (cb == 0.0) 0.0 // CRD==0 -> exposure run off, no further loss
+      else {
+        def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c
+        val statDet     = det(s, cb)
+        val fireBaseDet = det(fb, cb) + det(rb, cb)
+        val shockFi     = det(fl, cl) - det(fb, cb)
+        val shockRe     = det(rl, cl) - det(rb, cb)
+        statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
       }
-      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
     }
+    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
   }
 
   /** Build the RA prefix: keep periods while the window is valid and term <= horizon. */
