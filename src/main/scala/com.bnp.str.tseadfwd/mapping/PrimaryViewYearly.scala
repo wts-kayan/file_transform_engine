@@ -15,13 +15,13 @@ package com.bnp.str.tseadfwd.mapping
  * RA detail (per year; RA metrics summed, CRD averaged, as above):
  *   - FWL=NO           : RA = -RA_STAT / CRD                          (FI/RE excluded)
  *   - FWL=YES Central  : RA = -(RA_STAT + RA_FI + RE) / CRD           (all BASELINE)
- *   - FWL=YES non-Central: OAT-10Y ADDITIVE-shock model. RA STAT and the CRD denominator stay
- *     BASELINE; the FI/RE component takes a macro-weighted parallel shock
- *     `fire_base_det + shockSign*(shock_fi + shock_re)*dOat` (NO ×O173 factor — dropped 2026-06-22 as
- *     it suppressed the spread to ~0). `dOat = (IR_10Y_FR_scen - IR_10Y_FR_central)·100`. The CALLER
- *     selects the leg (Adverse/Extreme -> STRESS(-), Optimistic -> STRESS(+)) and the matching
- *     `shockSign`, so Adverse and Extreme DIFFER (distinct OAT spreads) with a material spread. See
- *     [[scenarioRa]].
+ *   - FWL=YES non-Central: OAT-10Y SENSITIVITY model (Excel O155-O182). RA STAT and the CRD
+ *     denominator stay BASELINE; only FI/RE is adjusted, by each leg's sensitivity scaled by the OAT
+ *     spread WITH the ×fire_base_det factor: `fire_scen_det = fire_base_det*(1 - (sens_fi+sens_re)*dOat)`.
+ *     `dOat = (IR_10Y_FR_scen - IR_10Y_FR_central)·10000` (the workbook's percent·100 on the decimal
+ *     scenario file). The CALLER selects the leg (Adverse/Extreme -> STRESS(-), Optimistic -> STRESS(+));
+ *     the spread's sign gives the direction, so Adverse and Extreme DIFFER. Reproduces the workbook to
+ *     8 dp (e.g. MORTGAGE Adverse term 1 EAD = 0.90785228). See [[scenarioRa]].
  *
  * See `docs/YEAR_CALCULATION_SPECIFICATION.md`. Only frequency-agnostic primitives are reused from
  * [[PrimaryView]] (run-off cap, computed horizon, yearly step, and the [[PrimaryView.vectorFactored]]
@@ -73,32 +73,35 @@ object PrimaryViewYearly {
     }
 
   /**
-   * FWL=YES non-Central — yearly **OAT-10Y additive-shock** model. Per the business decision
-   * (2026-06-22) the literal Excel `×O173` factor (cells O174-O176) is DROPPED: it made the scenario
-   * adjustment proportional to the tiny baseline FI/RE rate, which suppressed the scenario spread to
-   * ~0. Instead the FI/RE component takes an ADDITIVE macro-weighted parallel shock — the same shape
-   * as the quarterly engine (STEP 2-5), but on the yearly aggregation and OAT spread:
+   * FWL=YES non-Central — yearly **OAT-10Y sensitivity model** (Excel `Calc and Interpol #Mortgage`,
+   * cells O155–O182), VALIDATED to reproduce the workbook's term-0/term-1 cells to 8 dp. RA STAT and
+   * the CRD denominator stay BASELINE; only the FI/RE component is scenario-adjusted, by each leg's
+   * sensitivity scaled by the OAT-10Y spread, WITH the `×fire_base_det` factor (cells O174–O176):
    * {{{
-   *   stat_det      = -RA_STAT_base / CRD_base                              // O172 (baseline; all scenarios)
-   *   fire_base_det = -(RA_FI_base + RE_base) / CRD_base                    // O173 (baseline)
-   *   shock_fi      = (-RA_FI_leg/CRD_leg) - (-RA_FI_base/CRD_base)         // CHANGE in FI rate (each leg's own CRD)
-   *   shock_re      = (-RE_leg /CRD_leg)  - (-RE_base /CRD_base)
-   *   fire_scen_det = fire_base_det + shockSign*(shock_fi + shock_re)*dOat  // additive — NO ×fire_base_det
+   *   stat_det      = -RA_STAT_base / CRD_base                              // O172
+   *   fire_base_det = -(RA_FI_base + RE_base) / CRD_base                    // O173
+   *   sens_fi       = (-RA_FI_leg/CRD_leg) - (RA_FI_base/CRD_base)          // O155 (+100) / O157 (-100), literal Excel
+   *   sens_re       = (-RE_leg  /CRD_leg) - (RE_base  /CRD_base)            // O156 (+100) / O158 (-100)
+   *   fire_scen_det = fire_base_det * (1 - (sens_fi + sens_re) * dOat)      // O174-176 (= O173 - ((O173·sens)·dOat))
    *   RA            = stat_det + fire_scen_det                              // O179-182
    * }}}
-   * `oatDeltaAt(period)` = `(IR_10Y_FR_scen - IR_10Y_FR_central)·100` (the signed OAT spread,
-   * point-sampled at the year's anniversary). `shockSign` = +1 Optimistic (STRESS(+) leg) / -1
-   * Adverse & Extreme (STRESS(-) leg); the CALLER sets it with the matching leg. Together the leg's
-   * shock direction and `shockSign` give the correct sign (Adverse worse, Optimistic better) and a
-   * material spread. A leg whose CRD has run off (`cl == 0`) contributes 0 (mirrors Excel SIERREUR).
-   * RA STAT and the CRD denominator stay BASELINE. See `docs/YEAR_CALCULATION_SPECIFICATION.md` (§2).
-   * The quarterly path ([[PrimaryView.scenarioRa]]) is a separate computation and is unchanged.
+   * `oatDeltaAt(period)` is the signed OAT spread `(IR_10Y_FR_scen - IR_10Y_FR_central)·10000`,
+   * point-sampled at the year's anniversary — the workbook's `(percent_scen - percent_base)·100`
+   * expressed on the decimal scenario file (percent = decimal·100, hence the ·10000). The CALLER
+   * selects the leg by scenario (Optimistic -> STRESS(+), Adverse/Extreme -> STRESS(-)); the SIGN of
+   * the spread alone gives the correct direction (Adverse worse, Optimistic better), so no separate
+   * shockSign is needed. A leg whose CRD has run off (`cl == 0`) contributes 0 (Excel SIERREUR).
+   *
+   * Worked check vs the workbook (`BCEF_MORTGAGE_TF_Y`, Adverse, year 2): `fire_base_det = 0.00701853`,
+   * `sens_fi+sens_re = 0.06310285`, `dOat = (0.03075-0.034)·10000 = -32.5` →
+   * `fire_scen_det = 0.00701853·(1 - 0.06310285·(-32.5)) = 0.02141246`, `RA = 0.06827077`,
+   * `EAD term 1 = 0.97437351·(1-0.06827077) = 0.90785228` — matches the Excel exactly.
+   * See `docs/YEAR_CALCULATION_SPECIFICATION.md` (§2). Quarterly ([[PrimaryView.scenarioRa]]) unchanged.
    */
   def scenarioRa(
                   crdBase: Array[Double], raStatBase: Array[Double], raFiBase: Array[Double], reBase: Array[Double],
                   crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
-                  oatDeltaAt: Int => Double,
-                  shockSign: Double
+                  oatDeltaAt: Int => Double
                 ): Vector[Double] =
     computeRa { period =>
       (for {
@@ -112,15 +115,15 @@ object PrimaryViewYearly {
       } yield
         if (cb == 0.0) 0.0 // baseline exposure run off -> no further loss
         else {
-          def det(x: Double, c: Double): Double = if (c == 0.0) 0.0 else -x / c // -x/c  (loss-rate detail)
+          def det(x: Double, c: Double): Double   = if (c == 0.0) 0.0 else -x / c // -x/c  (loss-rate detail)
+          def ratio(x: Double, c: Double): Double = if (c == 0.0) 0.0 else x / c  //  x/c  (literal Excel base term)
           val statDet     = det(s, cb)                  // O172
           val fireBaseDet = det(fb, cb) + det(rb, cb)   // O173 = -(RA_FI+RE)/CRD baseline
-          // Parallel shock = leg detail - baseline detail (each leg uses its OWN CRD). A leg whose CRD
-          // has run off (cl==0) contributes nothing (Excel SIERREUR: the sensitivity cell -> 0).
-          val shockFi     = if (cl == 0.0) 0.0 else det(fl, cl) - det(fb, cb)
-          val shockRe     = if (cl == 0.0) 0.0 else det(rl, cl) - det(rb, cb)
-          val dOat        = oatDeltaAt(period)          // signed OAT spread (O167/O168/O169)
-          val fireScenDet = fireBaseDet + shockSign * (shockFi + shockRe) * dOat // additive (NO ×O173)
+          // O155-O158 each wrapped in Excel SIERREUR(...,0): a 0 leg CRD (cl==0) -> whole sensitivity 0.
+          val sensFi      = if (cl == 0.0) 0.0 else det(fl, cl) - ratio(fb, cb) // O155/O157
+          val sensRe      = if (cl == 0.0) 0.0 else det(rl, cl) - ratio(rb, cb) // O156/O158
+          val dOat        = oatDeltaAt(period)          // (scen-central)·10000 (O167/O168/O169)
+          val fireScenDet = fireBaseDet - ((fireBaseDet * sensFi + fireBaseDet * sensRe) * dOat) // O174-176
           statDet + fireScenDet                         // O179-182
         }
       ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value

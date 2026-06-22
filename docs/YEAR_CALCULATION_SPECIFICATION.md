@@ -3,11 +3,12 @@
 Authoritative description of how the engine **must** compute the **yearly** EAD term structure
 (`EAD_MATRIX_ID` ending in `_Y`).
 
-> **STATUS — TARGET MODEL (rewritten from the Excel reference).** This revision replaces the previous
-> *pure-stress* yearly model with the **OAT-10Y forward-looking additive-shock model** based on
+> **STATUS — IMPLEMENTED & VALIDATED.** This revision replaces the previous *pure-stress* yearly model
+> with the **OAT-10Y forward-looking sensitivity model** from
 > `docs/EDB_EAD_FWD_BCEF_reconstruction.xlsx` (tab `Calc and Interpol #Mortgage`, and the two rule
-> tabs `Règles de calcul (extraites)` / `Term 1 – Règles ordonnées`) — but with the workbook's `×O173`
-> factor **dropped** (decision 2026-06-22, §2.4) so scenarios diverge materially. The previous behaviour is kept
+> tabs `Règles de calcul (extraites)` / `Term 1 – Règles ordonnées`), **including the workbook's `×O173`
+> factor**, with the OAT spread scaled `·10000` (§2.3). It reproduces the workbook to 8 dp
+> (`BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`). The previous behaviour is kept
 > verbatim in `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md` for reference. Items still to be
 > confirmed against the source workbook are flagged **⚠ CONFIRM** inline and collected in
 > [§7 Open points](#7-open-points-to-confirm-before-coding).
@@ -99,7 +100,7 @@ The term → period → year mapping: `term` is in years (`YEARLY_STEP = 1.0`); 
 
 ---
 
-## 2. STEP 2 — RA detail per scenario (the OAT additive-shock model)
+## 2. STEP 2 — RA detail per scenario (the OAT-10Y sensitivity model, ×O173)
 
 All quantities below are the STEP-1 annual aggregates for year `i`. Every `det(x, c)` is the
 "detail" `−x / c` (with `det = 0` when `c = 0`).
@@ -114,67 +115,64 @@ fire_base_det = −(RA_FI_base + RE_base) / CRD_base               # Excel O173 
 `stat_det` is **fixed at baseline in every scenario** — the RA statistical component never moves.
 Only the FI/RE component is scenario-adjusted.
 
-### 2.2 Per-leg parallel shock (change in FI/RE loss-rate)
+### 2.2 Per-leg sensitivities to a ±100 bp shock (Excel O155–O158, literal)
 
-For the `+100` leg (Optimistic) and the `−100` leg (Adverse & Extreme), the shock is the **change** in
-the FI (resp. RE) loss-rate the stress leg produces, leg vs baseline, each using **its own CRD**
-(`det(x,c) = −x/c`):
+For the `+100` leg (Optimistic) and the `−100` leg (Adverse & Extreme), exactly as the workbook cells:
 
 ```
-shock_fi = (−RA_FI_leg / CRD_leg) − (−RA_FI_base / CRD_base) = det(FI_leg,CRD_leg) − det(FI_base,CRD_base)
-shock_re = (−RE_leg   / CRD_leg) − (−RE_base   / CRD_base) = det(RE_leg ,CRD_leg) − det(RE_base ,CRD_base)
+sensFI = (−RA_FI_leg / CRD_leg) − (RA_FI_base / CRD_base)     # O155 (+100) / O157 (−100)
+sensRE = (−RE_leg   / CRD_leg) − (RE_base   / CRD_base)       # O156 (+100) / O158 (−100)
 ```
 
-> This is the **change-form** sensitivity used by the quarterly engine (`PrimaryView.scenarioRa`), not
-> the literal Excel `O155 = (−O150/O147)−(O134/O131)` (which is a *sum* of rates under the workbook's
-> negative-storage convention). The change form is required so the sign encodes the leg's direction —
-> the `−100` leg raises FI loss (`shock_fi > 0`), the `+100` leg lowers it (`shock_fi < 0`). A leg
-> whose CRD has run off (`CRD_leg = 0`) contributes `shock = 0` (mirrors Excel `SIERREUR`).
+> Implemented as the **literal Excel** cell `(−O150/O147)−(O134/O131)` (i.e. `det(leg) − ratio(base)`,
+> with `det(x,c)=−x/c`, `ratio(x,c)=x/c`). A leg whose CRD has run off (`CRD_leg = 0`) makes the whole
+> sensitivity `0` (Excel `SIERREUR`). Direction is carried by the **sign of ΔOAT** (§2.3), not by the
+> sensitivity — Adverse's OAT spread is negative, Optimistic's positive.
 
-### 2.3 OAT spread vs baseline, in "100 bp blocks" (Excel O167–O169)
-
-```
-ΔOAT_scen = (IR_10Y_FR_scen − IR_10Y_FR_central) · 100            # O167 fav / O168 adv / O169 sev
-```
-
-With `IR_10Y_FR` in **decimal** form, `·100` rescales a decimal gap into **number of 100 bp blocks**
-(100 bp = 1 pp = 0.01 decimal, so `Δdecimal · 100 = Δ / 0.01`). Example, 2026Q4:
-`ΔOAT_opt = (0.03650 − 0.03400)·100 = +0.250`,
-`ΔOAT_adv = (0.03075 − 0.03400)·100 = −0.325`,
-`ΔOAT_ext = (0.03275 − 0.03400)·100 = −0.125`.
-Because Adverse and Extreme have **different** OAT spreads, **they are no longer identical** (the key
-fix vs the old pure-stress model — see §5).
-
-### 2.4 Scenario FI/RE detail and RA(Y) — additive shock
-
-The scenario FI/RE detail is the baseline detail **plus** the parallel shock, weighted by the OAT
-spread and the per-scenario `shockSign` (**no `×fire_base_det` factor**):
+### 2.3 OAT spread vs baseline (Excel O167–O169)
 
 ```
-fire_scen_det = fire_base_det + shockSign · (shock_fi + shock_re) · ΔOAT_scen
+ΔOAT_scen = (IR_10Y_FR_scen − IR_10Y_FR_central) · 10000          # O167 fav / O168 adv / O169 sev
+```
+
+The workbook computes `O167 = (OAT_scen − OAT_base)·100` with OAT in **percent** (e.g. `3.40`); the
+scenario file (`Scenario_EAD_FWD.xlsx`) stores `IR_10Y_FR` in **decimal** (`0.034`), and
+`percent = decimal·100`, so the equivalent factor on the decimal input is `·100·100 = ·10000`.
+Example, 2026Q4:
+`ΔOAT_opt = (0.03650 − 0.03400)·10000 = +25.0`,
+`ΔOAT_adv = (0.03075 − 0.03400)·10000 = −32.5`,
+`ΔOAT_ext = (0.03275 − 0.03400)·10000 = −12.5`.
+Adverse and Extreme have **different** OAT spreads, so they differ (unlike the old pure-stress model).
+
+### 2.4 Scenario FI/RE detail and RA(Y) (Excel O174–O182)
+
+The scenario FI/RE detail is the baseline detail scaled by `(1 − sens·ΔOAT)` — the literal workbook
+form, **with** the `×fire_base_det` (`×O173`) factor:
+
+```
+fire_scen_det = fire_base_det · (1 − (sensFI + sensRE) · ΔOAT_scen)      # = O173 − ((O173·sens)·O167)
 RA_i(scenario) = stat_det + fire_scen_det
 ```
 
-with the per-scenario leg / sign / spread selection:
+with the per-scenario leg / spread selection:
 
-| Engine scenario | Excel scenario | Stress leg | shockSign | OAT spread |
-|-----------------|----------------|-----------|-----------|------------|
-| Central     | Baseline           | — (no shock; `fire_scen_det = fire_base_det`) | — | 0 |
-| Optimistic  | Favourable         | `+100` | **+1** | `ΔOAT_opt` |
-| Adverse     | Adverse            | `−100` | **−1** | `ΔOAT_adv` |
-| Extreme     | Severely adverse   | `−100` | **−1** | `ΔOAT_ext` |
+| Engine scenario | Excel scenario | Stress leg (sensitivities) | OAT spread |
+|-----------------|----------------|----------------------------|------------|
+| Central     | Baseline           | — (no shock; `fire_scen_det = fire_base_det`) | 0 |
+| Optimistic  | Favourable         | `+100` (O155/O156) | `ΔOAT_opt` (> 0) |
+| Adverse     | Adverse            | `−100` (O157/O158) | `ΔOAT_adv` (< 0) |
+| Extreme     | Severely adverse   | `−100` (O157/O158) | `ΔOAT_ext` (< 0) |
 
-`shockSign` together with the leg's shock direction gives the correct sign (Adverse/Extreme worse,
-Optimistic better) and a **material** spread. This is the quarterly engine's shape (`PrimaryView`),
-applied on the yearly aggregation and OAT delta.
+The sign of `ΔOAT` gives the correct direction (Adverse/Extreme worse, Optimistic better); no separate
+`shockSign` is needed.
 
-> **⛔ The Excel `×O173` factor is DROPPED (decision 2026-06-22).** The literal workbook cells write
-> `O174 = O173 − ((O173·O155 + O173·O156)·O167)` — multiplying the shock by the (tiny) baseline FI/RE
-> rate `fire_base_det`. Implemented verbatim it collapsed the scenario spread to ~`1e-4` (Adverse
-> `0.921940` vs Central `0.922080`), far below the expected business spread (~1–1.5%). Dropping the
-> `×O173` factor and using the change-form shock (§2.2) restores a material spread — e.g. for
-> `BCEF_MORTGAGE_TF_Y` term 1: Optimistic `0.92368` > Central `0.92208` > Extreme `0.91610` > Adverse
-> `0.90654`. The literal cells are retained in the reconstruction workbook for reference only.
+> **✓ VALIDATED against the workbook.** With the correct OAT scale (`·10000`, §2.3) the `×O173` factor
+> is right and reproduces the Excel **exactly**. Worked check — `BCEF_MORTGAGE_TF_Y`, Adverse, year 2:
+> `fire_base_det = 0.00701853`, `sensFI+sensRE = 0.06310285`, `ΔOAT_adv = −32.5` →
+> `fire_scen_det = 0.00701853·(1 − 0.06310285·(−32.5)) = 0.02141246`, `RA = 0.06827077`,
+> `EAD term 1 = 0.97437351·(1 − 0.06827077) = 0.90785228` — matches cell `Z192`/the workbook value.
+> *(History: an earlier build used `·100` instead of `·10000`, which made the `×O173` spread look
+> negligible and prompted a brief "drop ×O173" detour; the real bug was the OAT scale.)*
 
 ### 2.5 FWL = NO  (`PrimaryViewYearly.statOnlyRa`) *(unchanged)*
 
@@ -212,29 +210,25 @@ Annual aggregation over M7–M18 (CRD ÷12; RA STAT/FI/RE summed), OAT point-sam
 (as-of + 1y = 2026Q4 when as-of = 2025Q4):
 
 ```
-stat_det      = −RA_STAT_base / CRD_base
-fire_base_det = −(RA_FI_base + RE_base) / CRD_base
-shock_fi      = (−RA_FI_−100/CRD_−100) − (−RA_FI_base/CRD_base)   # change form (det − det); > 0 for −100 leg
-shock_re      = (−RE_−100  /CRD_−100) − (−RE_base  /CRD_base)
+stat_det      = −RA_STAT_base / CRD_base            = 0.04685834
+fire_base_det = −(RA_FI_base + RE_base) / CRD_base  = 0.00701853
+sensFI        = (−RA_FI_−100/CRD_−100) − (RA_FI_base/CRD_base)   # literal Excel O157
+sensRE        = (−RE_−100  /CRD_−100) − (RE_base  /CRD_base)     # O158 ; sensFI+sensRE = 0.06310285
 
-ΔOAT_adv      = (IR_10Y_FR_adverse,Y2 − IR_10Y_FR_central,Y2) · 100      # < 0
-ΔOAT_ext      = (IR_10Y_FR_extreme,Y2 − IR_10Y_FR_central,Y2) · 100      # < 0, ≠ ΔOAT_adv
+ΔOAT_adv      = (0.03075 − 0.034)·10000 = −32.5
+ΔOAT_ext      = (0.03275 − 0.034)·10000 = −12.5      # ≠ ΔOAT_adv
 
-# shockSign = −1 for Adverse & Extreme (both −100 leg); no ×fire_base_det factor
-fire_adv_det  = fire_base_det + (−1)·(shock_fi + shock_re)·ΔOAT_adv
-fire_ext_det  = fire_base_det + (−1)·(shock_fi + shock_re)·ΔOAT_ext      # differs from adverse (ΔOAT)
-
-RA_adv(1)     = stat_det + fire_adv_det     ;  VECTOR_adv = 1 − RA_adv(1)
-RA_ext(1)     = stat_det + fire_ext_det     ;  VECTOR_ext = 1 − RA_ext(1)
-EAD_RA_RATE(1)= EAD_RA_RATE(0) · VECTOR
+fire_adv_det  = fire_base_det · (1 − (sensFI+sensRE)·ΔOAT_adv)
+              = 0.00701853 · (1 − 0.06310285·(−32.5)) = 0.02141246
+RA_adv(1)     = 0.04685834 + 0.02141246 = 0.06827077
+EAD_RA_RATE_adv(1) = EAD(0) · (1 − RA_adv(1)) = 0.97437351 · 0.93172923 = 0.90785228   ✓ (= workbook)
 ```
-For `BCEF_MORTGAGE_TF_Y` (inputs v3) this gives term 1: Optimistic `0.92368` > Central `0.92208` >
-Extreme `0.91610` > Adverse `0.90654`.
+For `BCEF_MORTGAGE_TF_Y` (inputs v3, corrected RE) this gives term 1: Optimistic `0.92315787` >
+Central `0.92187732` > Extreme `0.91648307` > Adverse `0.90785228`.
 
 > The `YearAnalysisDriver` job emits this breakdown (Markdown + CSV) per matrix/scenario/term against
-> `Scenario_EAD_FWD.xlsx` once the model is implemented; today
-> `localRun/tseadfwd/output/ANALYSIS_YEAR_GENERATED.md` still reflects the **old pure-stress** model
-> (Adverse == Extreme everywhere) and must be regenerated.
+> `Scenario_EAD_FWD.xlsx`. Re-run the engine after any input change; a stale
+> `localRun/tseadfwd/output/*.csv` will not reflect the latest inputs.
 
 ---
 
@@ -287,12 +281,12 @@ MORTGAGE).
 > yearly worked-steps renderer. Quarterly is untouched. Item 1 below is **resolved** (confirmed in all
 > three workbook locations); items 2–6 remain validation questions that do **not** block the build.
 
-1. ~~**`× fire_base_det` factor**~~ — **RESOLVED (reversed 2026-06-22)**: although the factor appears
-   in all three workbook cells, implementing it verbatim collapsed the scenario spread to ~`1e-4`. Per
-   the business decision it is **dropped** in favour of an additive change-form shock with `shockSign`
-   (§2.2/§2.4), which restores a material spread. The literal cells stay in the workbook for reference.
-2. **Sign convention** (§2.2) — whether RA STAT/FI/RE (and CRD) are stored negative; reconcile the
-   `(O134/O131)` baseline term vs `det()`. (`Lisez-moi` notes 2 & 3.)
+1. ~~**`× fire_base_det` factor**~~ — **RESOLVED & KEPT**: the factor is in all three workbook cells
+   and is correct. An earlier build made the spread look negligible, but the cause was the **OAT
+   scale** (`·100` vs the correct `·10000`, §2.3), not the factor. With the right scale the `×O173`
+   form reproduces the workbook **exactly** (`A;1 = 0.90785228`, §2.4). No `shockSign` is used.
+2. **Sign convention** (§2.2) — implemented as the **literal** Excel cell `(−O150/O147)−(O134/O131)`
+   (`det(leg) − ratio(base)`); validated by the exact workbook match in §2.4. (`Lisez-moi` notes 2 & 3.)
 3. **OAT sampling** (§1/§2.3) — **RESOLVED to point-at-anniversary** (`(period−1)·4`), confirmed by
    the ground-truth 2026Q4 values matching engine Y2. Open sub-point: this anniversary sampling is
    offset by the half-year Y1 from the engine's RA windows (Y2 RA = M7–M18 spans 2026Q2–2027Q1, but
