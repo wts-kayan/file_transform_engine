@@ -1,7 +1,7 @@
 # EAD FWD — Year (Annual) Calculation Specification
 
-Authoritative description of how the engine **must** compute the **yearly** EAD term structure
-(`EAD_MATRIX_ID` ending in `_Y`).
+Authoritative description of how the engine computes the **yearly** EAD term structure
+(`EAD_MATRIX_ID` ending in `_Y`). **Implemented and merged to `main`.**
 
 > **STATUS — IMPLEMENTED & VALIDATED.** This revision replaces the previous *pure-stress* yearly model
 > with the **OAT-10Y forward-looking sensitivity model** from
@@ -9,9 +9,12 @@ Authoritative description of how the engine **must** compute the **yearly** EAD 
 > tabs `Règles de calcul (extraites)` / `Term 1 – Règles ordonnées`), **including the workbook's `×O173`
 > factor**, with the OAT spread scaled `·10000` (§2.3). It reproduces the workbook to 8 dp
 > (`BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`). The previous behaviour is kept
-> verbatim in `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md` for reference. Items still to be
-> confirmed against the source workbook are flagged **⚠ CONFIRM** inline and collected in
-> [§7 Open points](#7-open-points-to-confirm-before-coding).
+> verbatim in `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md` for reference. Remaining
+> validation questions against the source workbook are collected in
+> [§7 Open points](#7-open-points). The model is **merged to `main`**; the functional/technical
+> framing (output columns, the `exclude_ead_ra_rate_ge_1` option) lives in
+> [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §4.7.2/§4.9 and
+> [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md) §4.3.
 
 **Scope of this change.** *Yearly only.* The quarterly path (`PrimaryView.scenarioRa`) is **not**
 changed and is **not** described here. The yearly scenario formula is a **separate computation** that
@@ -19,8 +22,8 @@ lives in `PrimaryViewYearly` (see [§6 Code separation](#6-code-separation)). Wh
 to coincide structurally with the quarterly macro-shock path, that is noted but the two remain
 independent code paths.
 
-Core code (target): **`PrimaryViewYearly`** — standalone yearly formula core (own aggregation, period
-loop, RA-detail formulas, and the new OAT-sensitivity scenario formula); `PrimaryView` — shared
+Core code: **`PrimaryViewYearly`** — standalone yearly formula core (own aggregation, period
+loop, RA-detail formulas, and the OAT-sensitivity scenario formula); `PrimaryView` — shared
 frequency-agnostic primitives only (`vectorFactored`, `termGrid`/`termSeries`, constants);
 `PrimaryMapper` — parsing, leg selection, OAT-curve wiring, and frequency dispatch.
 
@@ -257,19 +260,18 @@ MORTGAGE).
 
 ## 6. Code separation
 
-- **Yearly scenario formula → `PrimaryViewYearly.scenarioRa`** is **rewritten** to take the baseline
-  series **and** the selected stress leg series **and** the per-year OAT spread, implementing §2. It
-  no longer delegates to `centralRa` on the leg.
+- **Yearly scenario formula → `PrimaryViewYearly.scenarioRa`** takes the baseline series, the selected
+  stress leg series, and the per-year OAT spread, implementing §2 (it does **not** delegate to
+  `centralRa` on the leg, as the old pure-stress model did).
 - **`PrimaryView` (quarterly) is untouched.** Its `scenarioRa` keeps the additive macro-shock form;
-  the frequency dispatch in `PrimaryMapper` continues to route `Yearly → PrimaryViewYearly`,
-  everything else → `PrimaryView`.
-- **`PrimaryMapper`** gains the yearly OAT wiring: read `IR_10Y_FR` per scenario from
-  `Scenario_EAD_FWD.xlsx`, aggregate to the annual window (§1), compute `ΔOAT_scen` (§2.3), and pass
-  the baseline + leg series + `ΔOAT_scen` into `PrimaryViewYearly.scenarioRa`. It already selects the
-  leg by scenario (Optimistic → STRESS(+), Adverse/Extreme → STRESS(−)); that mapping is reused.
-- Keep the yearly OAT helpers (annual OAT aggregation, sensitivity, `ΔOAT`) in `PrimaryViewYearly`
-  (or a small `YearlyScenario` helper) so the quarterly and yearly shock maths stay physically
-  separate files/functions.
+  the frequency dispatch in `PrimaryMapper` routes `Yearly → PrimaryViewYearly`, everything else →
+  `PrimaryView`.
+- **`PrimaryMapper`** holds the yearly OAT wiring: `oatDeltaYearly` reads `IR_10Y_FR` per scenario from
+  `Scenario_EAD_FWD.xlsx`, samples `ΔOAT_scen` at the year anniversary (§2.3), and passes the baseline
+  + leg series + `ΔOAT_scen` into `PrimaryViewYearly.scenarioRa`. The leg-by-scenario mapping
+  (Optimistic → STRESS(+), Adverse/Extreme → STRESS(−)) is shared with the quarterly path.
+- The quarterly and yearly shock maths live in **separate functions** (`PrimaryView.scenarioRa` /
+  `oatDeltaYearly` vs `PrimaryViewYearly.scenarioRa`), so the two frequencies evolve independently.
 
 ---
 
@@ -278,8 +280,8 @@ MORTGAGE).
 > **Implementation status.** The model in §1–§6 is **implemented**:
 > `PrimaryViewYearly.scenarioRa` (new OAT-sensitivity formula), `PrimaryMapper.oatDeltaYearly` +
 > the `Yearly` dispatch in `matrixRows`/`termRowsFor` (OAT wiring), and the `Term0AnalysisDriver`
-> yearly worked-steps renderer. Quarterly is untouched. Item 1 below is **resolved** (confirmed in all
-> three workbook locations); items 2–6 remain validation questions that do **not** block the build.
+> yearly worked-steps renderer. Quarterly is untouched. Items 1–3 below are **resolved** (workbook
+> match in §2.4); items 4–6 remain validation questions that do **not** block the build.
 
 1. ~~**`× fire_base_det` factor**~~ — **RESOLVED & KEPT**: the factor is in all three workbook cells
    and is correct. An earlier build made the spread look negligible, but the cause was the **OAT
@@ -304,6 +306,8 @@ MORTGAGE).
 
 ## Cross-references
 
+- Functional framing (output columns, exclusion option): [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §4.7.2, §4.9
+- Technical framing (code dispatch, `oatDeltaYearly`, config): [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md) §3.3, §4.3
 - Excel reference: `docs/EDB_EAD_FWD_BCEF_reconstruction.xlsx`
 - OAT curve input: `localRun/tseadfwd/input/Scenario_EAD_FWD.xlsx` (`IR_10Y_FR`)
 - Previous (pure-stress) spec: `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md`

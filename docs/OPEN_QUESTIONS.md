@@ -444,3 +444,22 @@ Legend: ✅ chosen answer reproduces the target · ⚠️ judgement call, please
 - **Code:** `PrimaryView.scenarioRa`, `PrimaryMapper.matrixRows`, `Term0AnalysisDriver.termSteps`.
   **Related:** Q6, Q10 (superseded), Q12, Q15, Q17.
 - Confirmed: [x] (sign implemented; `×Rate/100` and the yearly shock magnitude pending business confirmation)
+
+## Q34 — OAT-spread scale: quarterly `macro_delta_scale = 100` vs yearly `·10000` ⚠️ NEW
+- **Finding (2026-06-22, during the yearly OAT-10Y work):** the YEARLY model (`PrimaryViewYearly` /
+  `PrimaryMapper.oatDeltaYearly`) was validated to reproduce the business workbook exactly only with the
+  OAT spread scaled **`·10000`** on the decimal scenario file: the workbook computes
+  `O167 = (OAT_scen − OAT_base)·100` with OAT in **percent** (e.g. `3.40`), but `Scenario_EAD_FWD.xlsx`
+  stores `IR_10Y_FR` in **decimal** (`0.034`), and `percent = decimal·100`, so the equivalent factor is
+  `·100·100 = ·10000` (e.g. Adverse 2026Q4 → `−32.5`). This gives `BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`,
+  matching the workbook to 8 dp.
+- **Question:** the QUARTERLY path uses `parameters.macro_delta_scale = 100` (a separate config knob)
+  for the same macro variable. If the quarterly shock is meant to follow the **same OAT convention**,
+  `100` is **100× smaller** than the yearly `·10000` and would understate the quarterly scenario spread.
+  Are the two scales intentionally different (different shock formulas — quarterly additive vs yearly
+  ×O173 — may legitimately need different unit conversions), or is the quarterly `100` a latent bug?
+- **Impact:** quarterly non-Central magnitudes only. The yearly path is unaffected (it ignores
+  `macro_delta_scale` and hardcodes `·10000`). No yearly output changes from resolving this.
+- **Code:** `PrimaryMapper.oatDeltaYearly` (`·10000`, yearly) vs `PrimaryMapper.macroDeltaArray` +
+  `parameters.macro_delta_scale` (quarterly). **Related:** Q13 (macro-delta ×100), Q33.
+- Confirmed: [ ] (pending business/methodology confirmation of the quarterly scale)
