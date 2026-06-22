@@ -277,6 +277,9 @@ emitted value = min(1, max(0, EAD_RA_RATE_p))   (clamp backstop: an exposure fac
 ### 4.8 Output term grid & flat tail  `termGrid` / `termSeries`
 - **Quarterly grid:** `0, 0.25, …, 50.25`, then `100` → 203 points.
 - **Yearly grid:** `0, 1, …, 50`, then `100` → 52 points.
+- These per-(matrix, scenario) counts (203 / 52) hold only when **`exclude_ead_ra_rate_ge_1 = false`**;
+  with the filter on, the full-exposure (`EAD_RA_RATE >= 1`) rows are dropped, so a matrix/scenario
+  emits **fewer** rows (and could emit none if every term is full-exposure).
 - For each grid term `t`: `idx = min(round(t/step)+1, len) - 1` → reads the computed vector,
   **holding the last computed value flat** for every term beyond the last computed period
   (and for the `100` tail term).
@@ -374,7 +377,9 @@ java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
 ## 9. Validation & open items
 
 - Central / FWL=NO matches the target to ~`1e-5`.
-- Deep-tail deviation and FWL=YES magnitude are **data-dependent** open items — see
+- **Yearly FWL=YES (OAT-10Y model in `PrimaryViewYearly`)** reproduces the business workbook to 8 dp
+  (`BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`); covered by `PrimaryViewSpec` unit tests.
+- Deep-tail deviation and **quarterly** FWL=YES magnitude are **data-dependent** open items — see
   [`MISSING_INPUTS.md`](../MISSING_INPUTS.md) (a scenario file whose macro path differentiates Adverse
   vs Extreme under `apply_rate_to_shock`; and the 25Q4-matching INPUTS_RA vintage). No logic change is
   expected once the corrected inputs arrive.
@@ -383,10 +388,15 @@ java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
 
 ## 10. Auxiliary jobs
 
-Both are objects with a `main` in the same jar; select with `--class` and pass the same
+All are objects with a `main` in the same jar; select with `--class` and pass the same
 `application.conf`.
 
-### 10.1 `Term0AnalysisDriver` — analysis generator
+> The analysis generator has **two entry points** sharing one private `run(freq, blockName, …)`:
+> `Term0AnalysisDriver` (`freq = Quarterly`, block `TERM0_ANALYSIS`) and `YearAnalysisDriver`
+> (`freq = Yearly`, block `YEAR_ANALYSIS`). They differ only in the aggregation grid and the config
+> sub-block (`terms`/`tol`/`enginePath`/paths); the yearly run renders the OAT-model worked steps.
+
+### 10.1 `Term0AnalysisDriver` / `YearAnalysisDriver` — analysis generator
 Regenerates the worked computation breakdown per *(matrix, scenario, term)* as a Markdown narrative
 and a decimal-comma CSV. It reads inputs via `PrimaryReader` and calls
 `PrimaryMapper.term0AnalysisRows(terms)`, which reuses the **same** parsing + `PrimaryView` formulas as

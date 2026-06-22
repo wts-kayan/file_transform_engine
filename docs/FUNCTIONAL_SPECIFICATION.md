@@ -221,7 +221,12 @@ value. See `TECHNICAL_SPECIFICATION.md` §5.
 
 - **Central / FWL = NO** matches the reference target to ~`1e-5`
   (e.g. `BCEF_MORTGAGE_Q` term 1: computed `0.993422715` vs target `0.993416733`).
-- The computation logic is therefore considered correct.
+- **Yearly FWL = YES (OAT-10Y model)** reproduces the business workbook
+  (`EDB_EAD_FWD_BCEF_reconstruction.xlsx`) to **8 dp** — e.g. `BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`,
+  with the scenario ordering Optimistic > Central > Extreme > Adverse at term 1.
+- The computation logic is therefore considered correct. Remaining open items are **data-dependent**
+  (quarterly, §8) and yearly **convention** confirmations (see
+  [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md) §7).
 
 ## 6. Decisions / assumptions
 
