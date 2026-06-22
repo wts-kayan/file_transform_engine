@@ -11,7 +11,10 @@ Authoritative description of how the engine **must** compute the **yearly** EAD 
 > (`BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`). The previous behaviour is kept
 > verbatim in `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md` for reference. Items still to be
 > confirmed against the source workbook are flagged **⚠ CONFIRM** inline and collected in
-> [§7 Open points](#7-open-points-to-confirm-before-coding).
+> [§7 Open points](#7-open-points). The model is **merged to `main`**; the functional/technical
+> framing (output columns, the `exclude_ead_ra_rate_ge_1` option) lives in
+> [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §4.7.2/§4.9 and
+> [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md) §4.3.
 
 **Scope of this change.** *Yearly only.* The quarterly path (`PrimaryView.scenarioRa`) is **not**
 changed and is **not** described here. The yearly scenario formula is a **separate computation** that
@@ -304,6 +307,8 @@ MORTGAGE).
 
 ## Cross-references
 
+- Functional framing (output columns, exclusion option): [`FUNCTIONAL_SPECIFICATION.md`](FUNCTIONAL_SPECIFICATION.md) §4.7.2, §4.9
+- Technical framing (code dispatch, `oatDeltaYearly`, config): [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md) §3.3, §4.3
 - Excel reference: `docs/EDB_EAD_FWD_BCEF_reconstruction.xlsx`
 - OAT curve input: `localRun/tseadfwd/input/Scenario_EAD_FWD.xlsx` (`IR_10Y_FR`)
 - Previous (pure-stress) spec: `docs/YEAR_CALCULATION_SPECIFICATION.pure-stress.bak.md`

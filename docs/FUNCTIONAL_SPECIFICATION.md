@@ -75,6 +75,10 @@ metric) — the **perimeter is part of the key**, so a segment name shared acros
 | `SCENARIO_ID` | `C`/`A`/`O`/`E` (see §4.2) |
 | `TERM` | Term in years (see §4.3) |
 | `EAD_RA_RATE` | Final factored survival value in `[0,1]` |
+| `EAD_CCF_RATE` | **Placeholder column, emitted empty** (CCF rate not computed by this engine yet; reserved so downstream consumers can rely on the column existing). |
+
+Optionally, rows whose `EAD_RA_RATE >= 1` (the *full-exposure* terms — leading terms before any loss
+accrues, plus any run-off backstop term) can be **excluded** from the file — see §4.9.
 
 ---
 
@@ -152,7 +156,15 @@ freezes the curve if a per-period `RA_i ≥ 1` cliff appears in the deep run-off
 
 For **FWL = NO**, all scenarios equal the Central value (no scenario differentiation).
 
-### 4.7 FWL = YES — scenario shock (macro path)
+### 4.7 FWL = YES — scenario shock
+
+The forward-looking scenario adjustment uses **two different models by frequency** (they are separate
+code paths and must evolve independently):
+- **Quarterly** — a macro-path additive shock on FI+RE (§4.7.1).
+- **Yearly** — the OAT-10Y sensitivity model reconstructed from the business workbook (§4.7.2),
+  specified in full in [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md).
+
+#### 4.7.1 Quarterly (macro-path additive shock)
 For non-Central scenarios the shock is **term-varying**, read from the scenario macro path
 over the matrix's window (`as_of_date_quarter .. as_of_date_quarter + PROJECTION_HORIZON`):
 term 0 = window start, step 1 quarter (yearly steps 1 year); past the window end (the projection
@@ -172,10 +184,36 @@ The shock is scaled by the macro `delta` (`Rate/100`) when `apply_rate_to_shock 
 Adverse ≠ Extreme and the magnitude follows the macro path; with `false` it is applied full-size
 (factor `1.0`), making Adverse = Extreme. There is **no `ref_shock` calibration knob**.
 
+#### 4.7.2 Yearly (OAT-10Y sensitivity model)
+The yearly path does **not** use the quarterly shock above. It implements the business workbook
+(`EDB_EAD_FWD_BCEF_reconstruction.xlsx`): RA STAT and the CRD denominator stay at **baseline**; only
+the FI/RE component is adjusted, by each stress leg's per-100bp sensitivity scaled by the **OAT-10Y
+spread** (macro `IR_10Y_FR`), with the workbook's `×fire_base_det` factor. Per year:
+```
+stat_det      = -RA_STAT_base / CRD_base
+fire_base_det = -(RA_FI_base + RE_base) / CRD_base
+sensFI/sensRE = (-FI_leg/CRD_leg) - (FI_base/CRD_base)   (each leg's own CRD; leg by scenario)
+ΔOAT          = (IR_10Y_FR_scen - IR_10Y_FR_central) · 10000     (point-sampled at the year anniversary)
+fire_scen_det = fire_base_det · (1 - (sensFI + sensRE) · ΔOAT)
+RA_i          = stat_det + fire_scen_det
+```
+The leg is fixed by scenario (Optimistic → STRESS(+), Adverse/Extreme → STRESS(−)); the **sign of
+ΔOAT** gives the direction, so **Adverse ≠ Extreme** (distinct OAT spreads). This reproduces the
+workbook to 8 dp (e.g. `BCEF_MORTGAGE_TF_Y;A;1 = 0.90785228`). Full derivation, scaling rationale and
+open points: [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md).
+
 ### 4.8 Aggregation (e.g. INVEST)
 When several PARAMETRAGE rows share an `AGGREGATED_SEGMENT_NAME`, their monthly metric
 series are **summed element-wise** before the formula is applied. The combined
 `FWL_TO_BE_APPLIED` flag is **YES if any** constituent applies it.
+
+### 4.9 Optional exclusion of full-exposure rows (`EAD_RA_RATE >= 1`)
+The survival factor is capped at `1` (and a sub-zero running product is reported as `1`), so an
+`EAD_RA_RATE` of exactly `1` marks a **full-exposure** term — a leading term before any loss has
+accrued, or a run-off backstop term. When the config flag
+`parameters.exclude_ead_ra_rate_ge_1 = true` these rows are **omitted from the output** (default
+`false` → every term is emitted). The flag only filters output rows; it does not change any computed
+value. See `TECHNICAL_SPECIFICATION.md` §5.
 
 ---
 

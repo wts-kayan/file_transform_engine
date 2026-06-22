@@ -40,14 +40,16 @@ MainDriver
 | File | Responsibility |
 |------|----------------|
 | `job/MainDriver.scala` | Production entry point; builds session, reads config, runs pipeline, writes output |
-| `job/Term0AnalysisDriver.scala` | Analysis generator job — per-(matrix, scenario, term) breakdown (Markdown + CSV) with optional engine reconciliation |
+| `job/Term0AnalysisDriver.scala` | Analysis generator job (shared `run`) — per-(matrix, scenario, term) breakdown (Markdown + CSV) with optional engine reconciliation; quarterly entry point |
+| `job/YearAnalysisDriver.scala` | Yearly entry point for the analysis generator (same `run`, `freq = Yearly`) |
 | `job/EadFwdCompare.scala` | Compare job — diffs an output CSV against a target CSV (per-key error report + CSV) |
 | `sessionmanager/SparkSessionManager.scala` | SparkSession factory (one for local **and** cluster) |
 | `reader/PrimaryReader.scala` | Reads RA / scenario / PARAMETRAGE via Typesafe config |
 | `common/RunnerProvider.scala`, `common/PrimaryRunner.scala` | Lazy inputs; invoke mapper |
 | `common/MapperProvider.scala` | Mapper interface (`getMapping_tseadfwd`) |
-| `mapping/PrimaryView.scala` | **Pure computation core** (no Spark) |
-| `mapping/PrimaryMapper.scala` | Spark glue: parse, aggregate, compute, build output DF, debug trace; exposes `term0AnalysisRows` for the analysis job |
+| `mapping/PrimaryView.scala` | **Pure quarterly computation core** + shared frequency-agnostic primitives (no Spark) |
+| `mapping/PrimaryViewYearly.scala` | **Pure yearly computation core** (no Spark) — own annual aggregation + the OAT-10Y sensitivity scenario formula; deliberately separate from the quarterly core (see `YEAR_CALCULATION_SPECIFICATION.md`) |
+| `mapping/PrimaryMapper.scala` | Spark glue: parse, aggregate, compute (freq-dispatch to `PrimaryView`/`PrimaryViewYearly`), build output DF, debug trace; exposes `term0AnalysisRows` for the analysis job |
 | `mapping/Term0RowView.scala` | Per-(matrix, scenario, term) breakdown record consumed by the analysis job |
 | `validation/DataControlView.scala` | Pre-calculation data-control report render + CSV (`ControlCheck` / `Severity`) |
 | `writer/PrimaryWriter.scala`, `utility/PrimaryUtilities.scala` | Write + single-file collapse, Excel/CSV readers, HDFS helpers |
@@ -99,6 +101,14 @@ Aggregation windows (1-based months):
 `computeRa` stops a series when the window exceeds available months or term > 30; the
 flat tail in `termSeries` covers the remaining grid points.
 
+> **Yearly core is separate.** The functions above are the **quarterly** core. The **yearly** path
+> lives in `PrimaryViewYearly` (own `aggregate`/`centralRa`/`statOnlyRa`/`scenarioRa`/`computeRa`),
+> because the two frequencies use different conventions (annual aggregation, and the OAT-10Y
+> sensitivity scenario model with the `×fire_base_det` factor). It reuses only the
+> frequency-agnostic primitives from `PrimaryView` (`vectorFactored`, `termGrid`/`termSeries`,
+> run-off cap, horizon). The full yearly arithmetic is in
+> [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md).
+
 > The **complete arithmetic** — segment aggregation, period windows, the Central and
 > FWL=YES `RA` formulas, the macro delta path, both run-off guards (`CRD==0` and the
 > `RA≥1` cliff freeze), the survival product, the term grid, and number formatting — is
@@ -121,8 +131,13 @@ flat tail in `termSeries` covers the remaining grid points.
   then map a 1-based projection period to it (term 0 = window start, step 1 quarter; yearly step =
   4 quarters; held past the window end / projection horizon). PROJECTION_HORIZON comes from
   PARAMETRAGE per matrix (e.g. `"3Y"`); a blank cell falls back to `last_quarter_projection_horizon`.
-- `matrixRows` — selects `centralRa` (FWL=NO or Central) or `scenarioRa` (FWL=YES,
-  non-Central), then `vectorFactored` + `termSeries`; emits output rows.
+- `oatDeltaYearly` — **yearly only**: the OAT-10Y spread `(scenario − Central)·10000` for the
+  matrix's `MACRO_VARIABLE`, point-sampled at each year's anniversary (`(period−1)·4`); held `0` past
+  the shock window. Independent of the quarterly `macro_delta_scale` (see `YEAR_CALCULATION_SPECIFICATION.md`).
+- `matrixRows` — **frequency dispatch**: Central/FWL=NO → `centralRa`/`statOnlyRa`; FWL=YES non-Central
+  → `PrimaryView.scenarioRa` (Quarterly) or `PrimaryViewYearly.scenarioRa` (Yearly, OAT model). Then
+  `vectorFactored` + `termSeries`; emits output rows. When `exclude_ead_ra_rate_ge_1 = true` it drops
+  rows with `EAD_RA_RATE >= 1`. Each row also carries the empty `EAD_CCF_RATE` placeholder column.
 - `fmtNumber` — decimal-comma formatting (half-up, trailing zeros stripped; non-finite → `0`).
 
 ### 3.4 Number parsing — IMPORTANT
@@ -192,8 +207,9 @@ RA_p = -RA_STAT_p / CRD_p
 ```
 RA_p = -(RA_STAT_p + RA_FI_p + RE_p) / CRD_p
 ```
-**FWL=YES, non-Central scenario** (`scenarioRa`) — RA_STAT stays baseline; only FI+RE are shocked.
-The stress leg is fixed by scenario: **Adverse/Extreme → STRESS(-)**, **Optimistic → STRESS(+)**:
+**FWL=YES, non-Central scenario — QUARTERLY** (`PrimaryView.scenarioRa`) — RA_STAT stays baseline; only
+FI+RE are shocked. The stress leg is fixed by scenario: **Adverse/Extreme → STRESS(-)**,
+**Optimistic → STRESS(+)**:
 ```
 det(x, c)     = if c == 0 then 0 else -x / c
 RA_STAT       = det(RA_STAT_base, CRD_base)
@@ -207,6 +223,24 @@ RA_p          = RA_STAT + RA_FI_RE_scen
 > factor, while STEP 3 computes `Rate`. The engine multiplies by `delta = Rate/100`, so Adverse ≠
 > Extreme and the magnitude follows the macro path (matches the agreed formula; there is no
 > `ref_shock` knob). See OPEN_QUESTIONS Q12/Q15/Q33.
+
+**FWL=YES, non-Central scenario — YEARLY** (`PrimaryViewYearly.scenarioRa`) — a **different** model
+(OAT-10Y sensitivity from the business workbook), not the quarterly form above. RA_STAT and the CRD
+denominator stay baseline; FI+RE are scaled by the per-leg sensitivity × the OAT-10Y spread, **with**
+the `×fire_base_det` factor:
+```
+det(x,c)      = -x/c (0 if c==0) ;  ratio(x,c) = x/c
+stat_det      = det(RA_STAT_base, CRD_base)
+fire_base_det = det(FI_base, CRD_base) + det(RE_base, CRD_base)
+sensFI        = det(FI_leg, CRD_leg) - ratio(FI_base, CRD_base)     # literal Excel O155/O157
+sensRE        = det(RE_leg, CRD_leg) - ratio(RE_base, CRD_base)     # O156/O158
+ΔOAT          = (IR_10Y_FR_scen - IR_10Y_FR_central) · 10000        # signed; oatDeltaYearly (§3.3)
+fire_scen_det = fire_base_det · (1 - (sensFI + sensRE) · ΔOAT)      # ×O173 factor
+RA_p          = stat_det + fire_scen_det
+```
+The leg is fixed by scenario (Optimistic → STRESS(+), Adverse/Extreme → STRESS(−)); the sign of `ΔOAT`
+gives the direction (no `shockSign`). Reproduces the workbook to 8 dp. Full rationale (incl. the
+`·10000` scale) and open points: [`YEAR_CALCULATION_SPECIFICATION.md`](YEAR_CALCULATION_SPECIFICATION.md).
 
 ### 4.4 Macro delta path (FWL=YES)  `macroDeltaArray` / `deltaPath`
 ```
@@ -251,6 +285,9 @@ emitted value = min(1, max(0, EAD_RA_RATE_p))   (clamp backstop: an exposure fac
 - `EAD_RA_RATE`: `BigDecimal` half-up to **9 dp**, trailing zeros stripped, decimal point → **comma**;
   non-finite (`NaN`/`Inf`) → `"0"`.
 - `TERM`: same formatter at **2 dp** (e.g. `0`, `0,25`, `100`).
+- `EAD_CCF_RATE`: emitted **empty** (`""`) — a reserved placeholder column (CCF rate not computed yet).
+
+Output header: `EAD_MATRIX_ID;SCENARIO_ID;TERM;EAD_RA_RATE;EAD_CCF_RATE`.
 
 ---
 
@@ -262,12 +299,14 @@ blocks) are grouped under a `parameters { … }` object; input blocks (`RA_*`, `
 
 | Key | Meaning | Current value |
 |-----|---------|---------------|
-| `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet | `Inputs_RA_v2.xlsx` / `RA_BCEF` |
+| `RA_BCEF.path` / `.sheetNames` | INPUTS_RA Excel path/sheet (`RA_BGL/BNL/FORTIS/LS` blocks also exist; absent sheets are skipped with a warning) | `Inputs_RA_v3.xlsx` / `RA_BCEF` |
 | `PARAMETRAGE.path` / `.sheetNames` | PARAMETRAGE Excel | `PARAMETRAGE_corrected.xlsx` / `PARAMETRAGE` |
 | `MACRO_VARIABLE.path` / `.sheetNames` | scenario **Excel workbook, one sheet per scenario** (read + unioned by `readScenarioFromExcelSheets`; sheet name → `Scenario_ID`) | `Scenario_EAD_FWD.xlsx` / `["Central","Adverse","Optimistic","Extreme"]` |
 | `parameters.as_of_date_quarter` | projection start = term 0; the FWL shock macro path is read from here (step 1Q) | `"2025Q4"` |
 | `parameters.last_quarter_projection_horizon` | fallback shock-window end, used only when a matrix's PARAMETRAGE `PROJECTION_HORIZON` is blank (normally end = `as_of + PROJECTION_HORIZON`) | `"2028Q4"` |
-| `parameters.apply_rate_to_shock` | FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
+| `parameters.apply_rate_to_shock` | **Quarterly** FWL=YES shock scaling — `true` = ×macro `Rate/100` (Adverse ≠ Extreme); `false` = full-size (Adverse = Extreme) | `true` |
+| `parameters.macro_delta_scale` | **Quarterly only** — unit scale on the raw macro delta before it scales the shock (yearly uses a fixed `·10000` in `oatDeltaYearly`, not this knob) | `100` |
+| `parameters.exclude_ead_ra_rate_ge_1` | Drop output rows whose final `EAD_RA_RATE >= 1` (full-exposure terms). Output-only filter | `true` (localRun); default `false` |
 | `parameters.debug` | enable titled `show()` of inputs + per-term trace | `false` |
 | `parameters.validation.strict` | abort the run on a data-control FAIL (`true`) or only warn | `true` |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output | csv / overwrite / 1 / … / true |
