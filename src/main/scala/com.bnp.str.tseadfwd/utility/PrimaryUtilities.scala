@@ -337,6 +337,9 @@ object PrimaryUtilities {
       .format(format)
       .option("header", "true")
       .option("delimiter", ";")
+      // Write empty cells (e.g. the EAD_CCF_RATE placeholder) as a bare empty field, not Spark's
+      // default quoted empty string ("\"\""). Keeps the output `…;EAD_RA_RATE;` with nothing after.
+      .option("emptyValue", "")
       .mode(mode)
       .save(tmp_output)
 
