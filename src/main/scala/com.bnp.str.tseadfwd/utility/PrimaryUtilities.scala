@@ -351,6 +351,12 @@ object PrimaryUtilities {
     val singleFile =
       if (outConfig.hasPath("singleFile")) outConfig.getBoolean("singleFile") else true
     if (singleFile) collapseToSingleFile(path, outTableName, format)
+
+    // Optionally emit an additional .xlsx copy of the SAME data alongside the CSV (for teams
+    // that consume Excel). Controlled by `alsoExcel = true`; the CSV above is unaffected.
+    val alsoExcel =
+      outConfig.hasPath("alsoExcel") && outConfig.getBoolean("alsoExcel")
+    if (alsoExcel) writeDataframeToExcel(dataframe, outConfig, mode, numPartition, path, outTableName)
   }
 
   /** True when the configured output format targets an Excel workbook. */
