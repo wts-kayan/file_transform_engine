@@ -329,6 +329,11 @@ object PrimaryUtilities {
     val path = outConfig.getString("tmpPath")
     val outTableName = outConfig.getString("tableName")
 
+    if (isExcelFormat(format)) {
+      writeDataframeToExcel(dataframe, outConfig, mode, numPartition, path, outTableName)
+      return
+    }
+
     val tmp_output = s"$path/$outTableName"
 
     dataframe
@@ -346,6 +351,44 @@ object PrimaryUtilities {
     val singleFile =
       if (outConfig.hasPath("singleFile")) outConfig.getBoolean("singleFile") else true
     if (singleFile) collapseToSingleFile(path, outTableName, format)
+  }
+
+  /** True when the configured output format targets an Excel workbook. */
+  private def isExcelFormat(format: String): Boolean =
+    format.equalsIgnoreCase("excel") ||
+      format.equalsIgnoreCase("xlsx") ||
+      format.equalsIgnoreCase("com.crealytics.spark.excel")
+
+  /**
+   * Write the DataFrame as a single `.xlsx` workbook via crealytics spark-excel (the same
+   * library used for reading). Unlike the CSV path, the crealytics writer emits one clean
+   * file directly at the save path, so no part-file collapse is needed. The target sheet
+   * name is taken from the `sheetName` config key (default: the output table name).
+   */
+  private def writeDataframeToExcel(dataframe: DataFrame,
+                                    outConfig: Config,
+                                    mode: String,
+                                    numPartition: Int,
+                                    path: String,
+                                    outTableName: String)
+                                   (implicit sparkSession: SparkSession): Unit = {
+
+    val sheetName =
+      if (outConfig.hasPath("sheetName")) outConfig.getString("sheetName") else outTableName
+    val outPath = s"$path/$outTableName.xlsx"
+
+    log.info(s"\n *** Write started (excel: $outPath, sheet: $sheetName) ... ***\n")
+
+    dataframe
+      .coalesce(numPartition)
+      .write
+      .format("com.crealytics.spark.excel")
+      .option("dataAddress", s"'$sheetName'!A1")
+      .option("header", "true")
+      .mode(mode)
+      .save(outPath)
+
+    log.info(s"\n *** Write Completed -> $outPath *** \n")
   }
 
   /**
