@@ -5,7 +5,7 @@ import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.slf4j.LoggerFactory
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.functions.lit
+import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.sql.types.StructType
 
 import java.io.{BufferedReader, BufferedWriter, InputStreamReader, OutputStreamWriter, Reader, Writer}
@@ -364,6 +364,11 @@ object PrimaryUtilities {
    * library used for reading). Unlike the CSV path, the crealytics writer emits one clean
    * file directly at the save path, so no part-file collapse is needed. The target sheet
    * name is taken from the `sheetName` config key (default: the output table name).
+   *
+   * Every column is cast to string before writing so each cell lands as an Excel TEXT cell
+   * holding the exact same characters as the CSV field (e.g. the decimal-comma "0,987451416"),
+   * rather than a numeric cell Excel would re-render per the viewer's locale. This guarantees
+   * the workbook matches the CSV value-for-value even if an upstream column is ever numeric.
    */
   private def writeDataframeToExcel(dataframe: DataFrame,
                                     outConfig: Config,
@@ -379,7 +384,11 @@ object PrimaryUtilities {
 
     log.info(s"\n *** Write started (excel: $outPath, sheet: $sheetName) ... ***\n")
 
-    dataframe
+    // Force TEXT cells: select every column cast to string (no-op on the already-string
+    // mapper output; a safety net if a column is ever numeric). Empty cells stay empty.
+    val asText = dataframe.select(dataframe.columns.map(c => col(c).cast("string").as(c)): _*)
+
+    asText
       .coalesce(numPartition)
       .write
       .format("com.crealytics.spark.excel")
