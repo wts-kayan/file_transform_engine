@@ -15,6 +15,9 @@ target/
 # generated output
 localRun/tseadfwd/output/
 localRun/tseadfwd/output_analysis/
+localRun/run_history/
+localRun/run_history_smoke/
+/out/
 
 # Excel temp lock files
 ~$*
