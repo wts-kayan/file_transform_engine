@@ -4,34 +4,29 @@ import com.typesafe.config.Config
 import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
 
-import java.io.{PrintWriter, StringWriter}
-import java.net.InetAddress
-import java.time.{Instant, ZoneOffset}
-import java.time.format.DateTimeFormatter
+import java.sql.Timestamp
 import java.util.UUID
 
 /**
- * Reusable, JOB-AGNOSTIC run auditor for the whole jar. Any driver (tseadfwd or a future sibling
- * module) records its execution to the shared `run_history` ORC external table with one call at
- * start and one at the end:
+ * Reusable, MODULE-AGNOSTIC run auditor for the whole jar. Any module (tseadfwd, climatetables,
+ * addons, excelor, …) records its execution to the shared `run_history` ORC external table with
+ * one call at start and one at the end:
  *
  * {{{
- *   val audit = RunAudit.start("tseadfwd", "TS_EAD_FWD", getClass.getName, auditConfig)(spark)
+ *   val audit = RunAudit.start("tseadfwd", auditConfig, usedConf = confPath)(spark)
  *   try {
- *     val df = run()
- *     audit.succeeded(outputCount = Some(df.count()), outputPath = out)
+ *     run()
+ *     audit.succeeded()
  *   } catch { case e: Throwable => audit.failed(e); throw e }
  * }}}
  *
- * Design notes:
- *  - STORAGE: an EXTERNAL Hive table stored as ORC, PARTITIONED BY (module, runid) — see
- *    [[RunAuditStore]]. Each run owns one partition; the RUNNING row written at start is replaced
- *    in place by the final SUCCESS/FAILED row (dynamic partition overwrite), and concurrent
- *    runs/IHM never touch each other's partition.
- *  - NEVER BREAKS THE JOB: all audit IO is guarded; a failure to write only logs a warning.
- *  - IDENTITY (who / which IHM) is resolved per field: explicit override > `-Drun.*` system property
- *    > `RUN_*` env var > config > sensible default — so each IHM stamps its identity via JVM args or
- *    env without any code change here.
+ * Storage is an EXTERNAL Hive table stored as ORC, PARTITIONED BY (module_name, run_id) — see
+ * [[RunAuditStore]]. A row is written at start (end_date/duration null) and replaced in place with
+ * the finalized row at the end. All audit IO is guarded: a failure only logs a warning and never
+ * breaks the job.
+ *
+ * Identity/metadata that a launcher supplies is resolved per field:
+ * explicit override > `-Drun.*` system property > `RUN_*` env var > config > default.
  */
 class RunAudit private(private var record: RunAuditRecord,
                        table: String,
@@ -42,57 +37,44 @@ class RunAudit private(private var record: RunAuditRecord,
 
   import RunAudit.log
 
-  /** Unique id of this run (echo it back to the IHM / logs to correlate). */
+  /** Unique id of this run (echo it back to the launcher / logs to correlate). */
   def runId: String = record.runId
 
   /** The current (possibly not-yet-finished) record. */
   def current: RunAuditRecord = record
 
-  /** Mark the run SUCCESS and persist the final record. Returns the finalized record. */
-  def succeeded(outputCount: Option[Long] = None,
-                inputCount: Option[Long] = None,
-                outputPath: String = null): RunAuditRecord =
-    finish(RunStatus.SUCCESS, None, outputCount, inputCount, outputPath)
+  /** Mark the run finished (success) and persist the final record. */
+  def succeeded(): RunAuditRecord = finish(None)
 
-  /** Mark the run FAILED (capturing the throwable) and persist the final record. */
-  def failed(t: Throwable,
-             outputCount: Option[Long] = None,
-             inputCount: Option[Long] = None,
-             outputPath: String = null): RunAuditRecord =
-    finish(RunStatus.FAILED, Option(t), outputCount, inputCount, outputPath)
+  /** Mark the run finished after a failure (logs the throwable) and persist the final record. */
+  def failed(t: Throwable): RunAuditRecord = finish(Option(t))
 
-  private def finish(status: String,
-                     error: Option[Throwable],
-                     outputCount: Option[Long],
-                     inputCount: Option[Long],
-                     outputPath: String): RunAuditRecord = {
-    val end = Instant.now()
+  /** Finalize end_date + duration and persist. (No status column in this schema.) */
+  def end(): RunAuditRecord = finish(None)
+
+  private def finish(error: Option[Throwable]): RunAuditRecord = {
+    val endTs      = new Timestamp(System.currentTimeMillis())
+    val durationMs = (System.nanoTime() - startNanos) / 1000000L
+    error.foreach(e => log.error(s"[audit] run ${record.runId} (${record.moduleName}) failed", e))
     record = record.copy(
-      status          = status,
-      endTs           = Some(RunAudit.iso(end)),
-      durationMs      = Some((System.nanoTime() - startNanos) / 1000000L),
-      outputCount     = outputCount.orElse(record.outputCount),
-      inputCount      = inputCount.orElse(record.inputCount),
-      outputPath      = Option(outputPath).getOrElse(record.outputPath),
-      errorType       = error.map(_.getClass.getName),
-      errorMessage    = error.flatMap(e => Option(e.getMessage)),
-      errorStacktrace = error.map(e => RunAudit.stackTrace(e))
+      endDate  = Some(endTs),
+      duration = Some(RunAudit.formatDuration(durationMs))
     )
     persist()
     record
   }
 
-  /** Write the current record to its (module, runid) ORC partition. Guarded: never propagates. */
+  /** Write the current record to its (module_name, run_id) ORC partition. Guarded: never propagates. */
   private def persist(): Unit = {
     if (!enabled) return
     try {
       RunAuditStore.write(record, table, location)
-      log.info(s"[audit] run ${record.runId} (${record.module}/${record.jobName}) " +
-        s"status=${record.status} -> $table")
+      log.info(s"[audit] run ${record.runId} (${record.moduleName}) " +
+        s"${if (record.endDate.isDefined) "ended" else "started"} -> $table")
     } catch {
       case e: Throwable =>
         log.warn(s"[audit] failed to write run_history for run ${record.runId} " +
-          s"(${record.module}/${record.jobName}); continuing without audit: " +
+          s"(${record.moduleName}); continuing without audit: " +
           s"${e.getClass.getSimpleName}: ${e.getMessage}")
     }
   }
@@ -101,81 +83,75 @@ class RunAudit private(private var record: RunAuditRecord,
 object RunAudit {
 
   private val log = LoggerFactory.getLogger(classOf[RunAudit])
-  private val ISO = DateTimeFormatter.ISO_INSTANT
 
-  private def iso(i: Instant): String = ISO.format(i)
-
-  private def stackTrace(t: Throwable, maxChars: Int = 8000): String = {
-    val sw = new StringWriter()
-    t.printStackTrace(new PrintWriter(sw))
-    val s = sw.toString
-    if (s.length <= maxChars) s else s.substring(0, maxChars) + "...[truncated]"
+  /** Format an elapsed millisecond count as e.g. "0h 20mn 27s". */
+  def formatDuration(ms: Long): String = {
+    val totalSec = ms / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    s"${h}h ${m}mn ${s}s"
   }
 
   /**
-   * Begin auditing a run: builds the record, stamps identity/environment, and writes an initial
-   * RUNNING row so an interrupted run is still visible. Returns a handle to finish with
-   * [[RunAudit.succeeded]] / [[RunAudit.failed]].
+   * Begin auditing a run: build the record, resolve launcher-supplied metadata, and write the
+   * initial row (end_date/duration null) so an interrupted run is still visible. Returns a handle
+   * to finish with [[succeeded]] / [[failed]].
    *
-   * @param module         logical module/package that owns the job (PARTITION), e.g. "tseadfwd"
-   * @param jobName        logical job name, e.g. "TS_EAD_FWD"
-   * @param jobClass       fully-qualified driver class (usually `this.getClass.getName`)
-   * @param auditConfig    the `audit { }` config block (keys: enabled, table, root/location,
-   *                       environment, appVersion, triggeredBy, launchChannel)
-   * @param configPath     path of the application.conf used (for traceability); optional
-   * @param paramsJson     compact JSON snapshot of key run params (build with [[AuditJson.obj]])
-   * @param inputCount     input record/file count if known at start
-   * @param outputPath     intended output path if known at start
-   * @param triggeredBy    override for the launching user/service (else resolved from -D/env/config)
-   * @param launchChannel  override for the launching IHM/entry point (else resolved from -D/env/config)
-   * @param spark          the SparkSession (Hive-enabled) used to write the ORC external table
+   * @param moduleName       module that owns the run (PARTITION), e.g. "tseadfwd", "climatetables"
+   * @param auditConfig      the `audit { }` config block (keys: enabled, table, root/location,
+   *                         runId, userLauncher, motor, usedJar — all optional except root when enabled)
+   * @param usedConf         path of the application.conf used
+   * @param runId            override for the run id (else config `runId`, else a generated UUID)
+   * @param userLauncher     override for the launching user (else -D/env/config, else JVM user.name)
+   * @param motor            override for the compute motor (else config `motor`, else "UNKNOWN")
+   * @param usedJar          override for the launched jar name (else config `usedJar`, else auto-detected)
+   * @param projectionDates  module-specific projection years string, e.g. "[2030, 2040, 2050]"
+   * @param scenarios        module-specific scenarios string, e.g. "[\"FW\", \"NZ50\"]"
+   * @param baseFolderName   module-specific base folder name
+   * @param spark            the SparkSession (Hive-enabled on the cluster) used to write the ORC table
    */
-  def start(module: String,
-            jobName: String,
-            jobClass: String,
+  def start(moduleName: String,
             auditConfig: Config,
-            configPath: String = "",
-            paramsJson: String = "{}",
-            inputCount: Option[Long] = None,
-            outputPath: String = "",
-            triggeredBy: Option[String] = None,
-            launchChannel: Option[String] = None)
+            usedConf: String = "",
+            runId: Option[String] = None,
+            userLauncher: Option[String] = None,
+            motor: Option[String] = None,
+            usedJar: Option[String] = None,
+            projectionDates: Option[String] = None,
+            scenarios: Option[String] = None,
+            baseFolderName: Option[String] = None)
            (implicit spark: SparkSession): RunAudit = {
 
     val enabled  = getBool(auditConfig, "enabled", default = true)
     val table    = getStr(auditConfig, "table", default = RunAuditStore.DEFAULT_TABLE)
     val location = normalizeLocation(resolveRoot(auditConfig))
-    val now      = Instant.now()
+
+    val resolvedRunId =
+      runId.filter(nonBlank)
+        .orElse(if (auditConfig.hasPath("runId")) Some(auditConfig.getString("runId")).filter(nonBlank) else None)
+        .getOrElse(UUID.randomUUID().toString)
 
     val record = RunAuditRecord(
-      module        = module,
-      runId         = UUID.randomUUID().toString,
-      jobName       = jobName,
-      jobClass      = jobClass,
-      appVersion    = getStr(auditConfig, "appVersion", default = "UNKNOWN"),
-      status        = RunStatus.RUNNING,
-      triggeredBy   = resolve(triggeredBy, "run.triggeredBy", "RUN_TRIGGERED_BY",
-                              auditConfig, "triggeredBy", System.getProperty("user.name", "UNKNOWN")),
-      launchChannel = resolve(launchChannel, "run.launchChannel", "RUN_LAUNCH_CHANNEL",
-                              auditConfig, "launchChannel", "UNKNOWN"),
-      environment   = resolve(None, "run.env", "RUN_ENV", auditConfig, "environment", "UNKNOWN"),
-      hostname      = hostName,
-      configPath    = configPath,
-      params        = if (paramsJson == null || paramsJson.trim.isEmpty) "{}" else paramsJson,
-      inputCount    = inputCount,
-      outputCount   = None,
-      outputPath    = outputPath,
-      startTs       = iso(now),
-      endTs         = None,
-      durationMs    = None,
-      errorType     = None,
-      errorMessage  = None,
-      errorStacktrace = None,
-      runDate       = now.atOffset(ZoneOffset.UTC).toLocalDate.toString
+      runId         = resolvedRunId,
+      applicationId = try spark.sparkContext.applicationId catch { case _: Throwable => "UNKNOWN" },
+      moduleName    = moduleName,
+      usedJar       = usedJar.filter(nonBlank).getOrElse(
+                        getOpt(auditConfig, "usedJar").getOrElse(detectJar.getOrElse("UNKNOWN"))),
+      usedConf      = usedConf,
+      userLauncher  = resolve(userLauncher, "run.userLauncher", "RUN_USER_LAUNCHER",
+                              auditConfig, "userLauncher", System.getProperty("user.name", "UNKNOWN")),
+      creationDate  = new Timestamp(System.currentTimeMillis()),
+      endDate       = None,
+      duration      = None,
+      motor         = resolve(motor, "run.motor", "RUN_MOTOR", auditConfig, "motor", "UNKNOWN"),
+      projectionDates = projectionDates.filter(nonBlank),
+      scenarios       = scenarios.filter(nonBlank),
+      baseFolderName  = baseFolderName.filter(nonBlank)
     )
 
     val audit = new RunAudit(record, table, location, enabled, System.nanoTime())
-    audit.persist() // initial RUNNING row
+    audit.persist()
     audit
   }
 
@@ -202,8 +178,11 @@ object RunAudit {
     overrideVal.filter(nonBlank)
       .orElse(Option(System.getProperty(sysProp)).filter(nonBlank))
       .orElse(Option(System.getenv(envVar)).filter(nonBlank))
-      .orElse(if (cfg.hasPath(cfgKey)) Some(cfg.getString(cfgKey)).filter(nonBlank) else None)
+      .orElse(getOpt(cfg, cfgKey))
       .getOrElse(default)
+
+  private def getOpt(cfg: Config, key: String): Option[String] =
+    if (cfg.hasPath(key)) Some(cfg.getString(key)).filter(nonBlank) else None
 
   private def nonBlank(s: String): Boolean = s != null && s.trim.nonEmpty
 
@@ -213,7 +192,11 @@ object RunAudit {
   private def getBool(cfg: Config, key: String, default: Boolean): Boolean =
     if (cfg.hasPath(key)) cfg.getBoolean(key) else default
 
-  private def hostName: String =
-    try InetAddress.getLocalHost.getHostName
-    catch { case _: Throwable => Option(System.getenv("HOSTNAME")).getOrElse("UNKNOWN") }
+  /** Best-effort: the jar file this code was loaded from (None in an IDE/classes-dir run). */
+  private def detectJar: Option[String] =
+    try {
+      val loc = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation
+      val name = new java.io.File(loc.toURI).getName
+      if (name.toLowerCase.endsWith(".jar")) Some(name) else None
+    } catch { case _: Throwable => None }
 }

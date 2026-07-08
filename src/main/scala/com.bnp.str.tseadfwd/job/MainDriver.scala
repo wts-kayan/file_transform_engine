@@ -7,7 +7,7 @@ import com.bnp.str.tseadfwd.common.PrimaryRunner
 import com.bnp.str.tseadfwd.reader.PrimaryReader
 import com.bnp.str.tseadfwd.utility.{PrimaryConstants, PrimaryUtilities}
 import com.bnp.str.tseadfwd.writer.PrimaryWriter
-import com.bnp.str.utilities.audit.{AuditJson, RunAudit}
+import com.bnp.str.utilities.audit.RunAudit
 import org.slf4j.LoggerFactory
 
 object MainDriver {
@@ -44,24 +44,13 @@ object MainDriver {
     val outputTableName =
       PrimaryConstants.OUTPUT_EAD_FWD
 
-    // ---- run audit: record this execution in run_history (shared, job-agnostic) ----
+    // ---- run audit: record this execution in run_history (shared, module-agnostic) ----
     val auditConfig =
       config.getConfig(s"${PrimaryConstants.APP_CONF}.audit")
-    val runParams = config.getConfig(s"${PrimaryConstants.APP_CONF}.parameters")
-    val paramsJson = AuditJson.obj(
-      "as_of_date_quarter"        -> runParams.getString("as_of_date_quarter"),
-      "projection_horizon"        -> runParams.getString("last_quarter_projection_horizon"),
-      "apply_rate_to_shock"       -> runParams.getBoolean("apply_rate_to_shock"),
-      "macro_delta_scale"         -> runParams.getDouble("macro_delta_scale"),
-      "exclude_ead_ra_rate_ge_1"  -> runParams.getBoolean("exclude_ead_ra_rate_ge_1")
-    )
     val audit = RunAudit.start(
-      module       = "tseadfwd",
-      jobName      = outputTableName,
-      jobClass     = this.getClass.getName,
-      auditConfig  = auditConfig,
-      configPath   = absoluteConfigPath,
-      paramsJson   = paramsJson
+      moduleName = "tseadfwd",
+      auditConfig = auditConfig,
+      usedConf   = absoluteConfigPath
     )(sparkSession)
     logger.info(s"Run audit started: runId=${audit.runId}")
 
@@ -73,12 +62,9 @@ object MainDriver {
       logger.info(s"OUTPUT - $outputTableName (final term structure)")
       df.show(false)
 
-      val outputCount = df.count()
       primaryWriter.write(df, outputTableName)(sparkSession, config)
 
-      val outConf = config.getConfig(s"${PrimaryConstants.APP_CONF}.$outputTableName")
-      val outPath = s"${outConf.getString("tmpPath")}/${outConf.getString("tableName")}"
-      audit.succeeded(outputCount = Some(outputCount), outputPath = outPath)
+      audit.succeeded()
 
       logger.info(s"End ${PrimaryConstants.APPLICATION_NAME} (${this.getClass.getName})")
     } catch {

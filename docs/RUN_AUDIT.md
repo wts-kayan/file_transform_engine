@@ -1,79 +1,68 @@
 # Run Audit — `run_history`
 
-A **shared, job-agnostic** execution audit for every job packaged in the jar. It lives in
+A **shared, module-agnostic** execution audit for every module packaged in the jar. It lives in
 `com.bnp.str.utilities.audit` (a sibling of `com.bnp.str.tseadfwd`) so any current or future
-driver — launched by any IHM — records its runs to the same `run_history` table with two calls.
+module — addons / climatetables / excelor / tseadfwd — records its runs to the same `run_history`
+table with two calls.
 
-## Storage — ORC external table, partitioned by (module, runid)
+## Storage — ORC external table, partitioned by (module_name, run_id)
 
 - Records are written as **ORC** files laid out in Hive-style partitions:
 
   ```
-  <root>/module=<module>/runid=<runid>/part-*.orc
+  <root>/module_name=<module_name>/run_id=<run_id>/part-*.orc
   ```
 
-- Exposed as an **EXTERNAL** Hive table `run_history`, `PARTITIONED BY (module, runid)`,
-  `STORED AS ORC`, `LOCATION <root>`. Being EXTERNAL, dropping the table never deletes the data,
-  and a fresh metastore can be re-pointed at the same location.
-- **One partition per run.** Writing a run overwrites only its own `module=…/runid=…` partition
-  (dynamic partition overwrite), so the `RUNNING` row written at start is replaced in place by the
-  final `SUCCESS`/`FAILED` row, and concurrent runs/IHM never touch each other's partition.
+- Exposed as an **EXTERNAL** Hive table `run_history`, `PARTITIONED BY (module_name, run_id)`,
+  `STORED AS ORC`, `LOCATION <root>`. Being EXTERNAL, dropping the table never deletes the data.
+- **One partition per run.** Writing a run overwrites only its own `module_name=…/run_id=…`
+  partition (dynamic partition overwrite), so the row written at start (with `end_date`/`duration`
+  null) is replaced in place by the finalized row, and concurrent runs never contend.
 
 ### Two-phase persistence (why it's robust)
 
 | Phase | Mechanism | Needs metastore? |
 |---|---|---|
-| **Data write** | Spark ORC datasource, `partitionBy("module","runid")`, dynamic overwrite | **No** — works locally and on the cluster |
+| **Data write** | Spark ORC datasource, `partitionBy("module_name","run_id")`, dynamic overwrite | **No** — works locally and on the cluster |
 | **Table registration** | `CREATE EXTERNAL TABLE IF NOT EXISTS … STORED AS ORC` + `ADD PARTITION` | Yes — **best-effort & guarded** |
 
 If the metastore is unavailable (e.g. a local box without Hadoop native IO / winutils), the ORC
 data is still written and the run still audited; only the catalog entry is skipped with a warning.
-On a Hive-enabled cluster the table and partitions register automatically. And the audit **never
-breaks the job** — all audit IO is guarded (warn-only on failure).
+And the audit **never breaks the job** — all audit IO is guarded (warn-only on failure).
 
 ## Schema (`run_history`)
 
-Partition columns are **`module`** and **`runid`**; the rest are regular columns.
+Partition columns are **`module_name`** and **`run_id`**; the rest are regular columns.
 
-| Column | Type | Part? | Null? | Meaning |
-|---|---|---|---|---|
-| `module` | string | **P** | no | Logical module/package that owns the job, e.g. `tseadfwd` |
-| `runid` | string (UUID) | **P** | no | Unique id of the run (primary key) |
-| `job_name` | string | | no | Logical job, e.g. `TS_EAD_FWD` |
-| `job_class` | string | | no | Fully-qualified driver class that ran |
-| `app_version` | string | | no | Application / jar version |
-| `status` | string | | no | `RUNNING` \| `SUCCESS` \| `FAILED` |
-| `triggered_by` | string | | no | User / service account that launched the run |
-| `launch_channel` | string | | no | Which IHM / entry point (e.g. `IHM_RISK`, `SCHEDULER`, `CLI`) |
-| `environment` | string | | no | `DEV` \| `UAT` \| `PROD` \| `LOCAL` |
-| `hostname` | string | | no | Machine that executed the driver |
-| `config_path` | string | | yes | Path of the `application.conf` used |
-| `params` | string (JSON) | | no | Snapshot of key run parameters (free-form per job) |
-| `input_count` | bigint | | yes | Input records/files read (null if not measured) |
-| `output_count` | bigint | | yes | Output rows written (null if not measured) |
-| `output_path` | string | | yes | Where the job wrote its output |
-| `start_ts` | string (ISO-8601 UTC) | | no | Run start instant |
-| `end_ts` | string (ISO-8601 UTC) | | yes | Run end (null while `RUNNING`) |
-| `duration_ms` | bigint | | yes | Wall-clock duration (null while `RUNNING`) |
-| `error_type` | string | | yes | Exception class on failure |
-| `error_message` | string | | yes | Exception message on failure |
-| `error_stacktrace` | string | | yes | Truncated stack trace (≤ 8000 chars) on failure |
-| `run_date` | string (date) | | no | `yyyy-MM-dd` of start (handy for filtering) |
+| Column | Type | Part? | Null? | Meaning | Example |
+|---|---|---|---|---|---|
+| `run_id` | string | **P** | no | Unique run id — generated (UUID) or given in the conf | `5afc5010-3e62-46f3-a5ea-3856f01dcf0d` |
+| `application_id` | string | | no | Spark application id | `application_1773889567248_10449` |
+| `module_name` | string | **P** | no | Module that ran | `addons` / `climatetables` / `excelor` / `tseadfwd` |
+| `used_jar` | string | | no | Jar the run was launched from | `str-file-transform-engine-1.0-RELEASE-Climate-Tables.jar` |
+| `used_conf` | string | | no | Path of the `application.conf` used | `/Projects/…/application_climate_tables_run_2.conf` |
+| `user_launcher` | string | | no | User who launched the run (from the conf) | `j03627` |
+| `creation_date` | timestamp | | no | Run start | `2026-03-25 09:34:53.828` |
+| `end_date` | timestamp | | yes | Run end (null while running) | `2026-03-25 09:55:21.22` |
+| `duration` | string | | yes | Human-readable elapsed time (null while running) | `0h 20mn 27s` |
+| `motor` | string | | no | Compute motor/engine | `iris` |
+| `projection_dates` | string | | yes | Projection years (module-specific) | `[2030, 2040, 2050]` |
+| `scenarios` | string | | yes | Scenarios (module-specific) | `["FW", "NZ50", "DT", "NDC"]` |
+| `base_folder_name` | string | | yes | Run base folder (module-specific) | `ICAAP_TR_2025Q1_251016_v1` |
 
-A `RUNNING` row is written at start, then **overwritten** in place with the final `SUCCESS` /
-`FAILED` row. A row left in `RUNNING` state = a run whose JVM was killed / crashed.
+A row is written at start (`end_date`/`duration` null), then **overwritten** in place with the
+finalized row (`end_date` + `duration`) at the end. A row left with a null `end_date` = a run whose
+JVM was killed / crashed.
 
 ### Table DDL
 
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS run_history (
-  job_name STRING, job_class STRING, app_version STRING, status STRING,
-  triggered_by STRING, launch_channel STRING, environment STRING, hostname STRING,
-  config_path STRING, params STRING, input_count BIGINT, output_count BIGINT,
-  output_path STRING, start_ts STRING, end_ts STRING, duration_ms BIGINT,
-  error_type STRING, error_message STRING, error_stacktrace STRING, run_date STRING
+  application_id STRING, used_jar STRING, used_conf STRING, user_launcher STRING,
+  creation_date TIMESTAMP, end_date TIMESTAMP, duration STRING, motor STRING,
+  projection_dates STRING, scenarios STRING, base_folder_name STRING
 )
-PARTITIONED BY (module STRING, runid STRING)
+PARTITIONED BY (module_name STRING, run_id STRING)
 STORED AS ORC
 LOCATION 'hdfs:///…/run_history';
 ```
@@ -81,7 +70,7 @@ LOCATION 'hdfs:///…/run_history';
 `RunAuditStore.createTableDDL(table, location)` returns exactly this string;
 `RunAuditStore.schema` is the equivalent Spark `StructType`.
 
-## Identity — who / which IHM launched the run
+## Launcher-supplied metadata
 
 Resolved per field, first non-blank wins:
 
@@ -89,55 +78,49 @@ Resolved per field, first non-blank wins:
 
 | Field | System property | Env var | Config key | Default |
 |---|---|---|---|---|
-| `triggered_by` | `run.triggeredBy` | `RUN_TRIGGERED_BY` | `audit.triggeredBy` | JVM `user.name` |
-| `launch_channel` | `run.launchChannel` | `RUN_LAUNCH_CHANNEL` | `audit.launchChannel` | `UNKNOWN` |
-| `environment` | `run.env` | `RUN_ENV` | `audit.environment` | `UNKNOWN` |
+| `run_id` | — | — | `audit.runId` | generated UUID |
+| `user_launcher` | `run.userLauncher` | `RUN_USER_LAUNCHER` | `audit.userLauncher` | JVM `user.name` |
+| `motor` | `run.motor` | `RUN_MOTOR` | `audit.motor` | `UNKNOWN` |
+| `used_jar` | — | — | `audit.usedJar` | auto-detected from the running jar |
 
-So each IHM stamps its identity **without code changes** — e.g.:
-
-```
-spark-submit -Drun.triggeredBy=alice -Drun.launchChannel=IHM_RISK ...
-# or
-RUN_TRIGGERED_BY=svc_batch RUN_LAUNCH_CHANNEL=SCHEDULER spark-submit ...
-```
+`application_id` is read from `spark.sparkContext.applicationId`. `projection_dates`, `scenarios`
+and `base_folder_name` are module-specific and passed by the driver (null when not applicable).
 
 ## Config block
 
 ```hocon
 audit {
-  enabled     = true
-  table       = "run_history"            # external Hive table name (optionally db.table)
-  root        = "localRun/run_history"   # table LOCATION; hdfs://… on the cluster
-  environment = "LOCAL"
-  appVersion  = "1.0.0"
-  # triggeredBy   = "batch"   # optional fallback if the IHM sets neither -D nor env
-  # launchChannel = "CLI"     # optional fallback
+  enabled = true
+  table   = "run_history"            # external Hive table name (optionally db.table)
+  root    = "localRun/run_history"   # table LOCATION; hdfs://… on the cluster
+  # runId        = "..."             # optional: pin the run_id (else a UUID is generated)
+  userLauncher = "j03627"
+  motor        = "tseadfwd"
+  # usedJar     = "str-file-transform-engine-1.0-RELEASE.jar"
 }
 ```
 
 ## Usage in a driver
 
 ```scala
-import com.bnp.str.utilities.audit.{AuditJson, RunAudit}
+import com.bnp.str.utilities.audit.RunAudit
 
 implicit val spark: SparkSession = ...   // Hive-enabled on the cluster
 val audit = RunAudit.start(
-  module      = "tseadfwd",
-  jobName     = "TS_EAD_FWD",
-  jobClass    = this.getClass.getName,
+  moduleName = "tseadfwd",
   auditConfig = config.getConfig("tseadfwd_app.audit"),
-  configPath  = absoluteConfigPath,
-  paramsJson  = AuditJson.obj("as_of_date_quarter" -> "2025Q4", "macro_delta_scale" -> 100)
+  usedConf    = absoluteConfigPath
+  // climatetables also passes: projectionDates=…, scenarios=…, baseFolderName=…
 )
 try {
-  val df = run()
-  audit.succeeded(outputCount = Some(df.count()), outputPath = out)
+  run()
+  audit.succeeded()
 } catch {
   case e: Throwable => audit.failed(e); throw e
 }
 ```
 
-Each new module in the jar calls the same `RunAudit.start(module = "<its-module>", …)`.
+Each new module calls the same `RunAudit.start(moduleName = "<its-module>", …)`.
 
 ## Reading the history back
 
@@ -147,14 +130,13 @@ import com.bnp.str.utilities.audit.RunAuditStore
 val hist = RunAuditStore.read("run_history")
 // or straight from ORC files (no metastore needed):
 val hist = RunAuditStore.readFiles("hdfs:///…/run_history")
-hist.groupBy("module", "status").count().show()
+hist.groupBy("module_name").count().show()
 ```
 
 ## Notes
 
-- **`runid` as a partition** means one partition per run — convenient for point lookups and
-  in-place status updates, but the partition count grows with the number of runs. If that becomes
-  large, periodically compact/expire old `runid` partitions (they are plain ORC dirs) or add a
-  coarser partition (e.g. `run_date`) upstream of `runid`.
+- **`run_id` as a partition** means one partition per run — convenient for point lookups and
+  in-place updates, but the partition count grows with the number of runs. If that becomes large,
+  periodically compact/expire old `run_id` partitions or add a coarser partition upstream.
 - Local Windows dev without Hadoop native IO (winutils) writes the ORC data fine but skips the
   metastore registration (logged as a warning); use `RunAuditStore.readFiles(root)` there.
