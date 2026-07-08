@@ -23,10 +23,29 @@ own root), add a row above, and a `## <NAME>` section below.
 mvn clean package -DskipTests      # -> target/wts-training-spark.jar (fat jar; Spark/Hadoop are 'provided')
 ```
 
-Scala 2.12.18 · Spark 3.5.4 · Java 8 · Maven. Every job takes one argument — the path to an
+Scala 2.12.18 · Spark 3.5.4 · **Java 17** · Maven. Every job takes one argument — the path to an
 `application.conf` — read via Hadoop FileSystem, so a local path, a `--files`-shipped conf, or an HDFS
 path all work. On a cluster, drop `--master local[*]`: `spark-submit` provides the master and
 `SparkSessionManager` adapts automatically.
+
+### Java 17 note
+
+Java 17 strongly encapsulates JDK internals, which Spark accesses by reflection. This is handled for you
+in the two normal cases:
+
+- **`spark-submit`** (cluster or local) — Spark 3.5 injects the required `--add-opens` into the driver/
+  executor JVMs automatically. Nothing to do.
+- **`mvn test`** — surefire is configured with the opens (`${spark.addopens}` in `pom.xml`).
+
+Only a **plain `java -cp …` / IDE run** needs the flags passed manually. Add the value of the pom's
+`spark.addopens` property to the JVM args (IntelliJ: *Run config → VM options*), e.g.:
+
+```bash
+java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED … \
+     -cp "target/classes;$(cat cp.txt)" com.bnp.str.tseadfwd.job.MainDriver <conf>
+```
+
+(The fat jar's manifest also carries `Add-Opens`, so `java -jar` picks them up without flags.)
 
 > On Windows a harmless `Failed to delete temp dir` stack trace may print at JVM shutdown *after* the
 > output is written; set `HADOOP_HOME` with `winutils.exe` to silence it.

@@ -13,7 +13,8 @@
   <!--         PROPERTIES           -->
   <!-- ============================ -->
   <properties>
-    <java.version>1.8</java.version>
+    <!-- Java 17 (LTS). Spark 3.5 supports Java 8/11/17. -->
+    <java.version>17</java.version>
 
     <!-- Spark 3.5 requires Scala 2.12 -->
     <scala.version>2.12.18</scala.version>
@@ -24,6 +25,12 @@
 
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <mainClass>com.bnp.str.tseadfwd.job.MainDriver</mainClass>
+
+    <!-- Java 17 strong encapsulation: Spark reaches into JDK internals by reflection, so these
+         module opens are required to RUN on Java 17 (compilation does not need them). spark-submit
+         adds an equivalent set automatically on the cluster; they are needed for local `java -cp`
+         runs and for surefire below. Kept on one line so it can be reused as a JVM arg string. -->
+    <spark.addopens>--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED</spark.addopens>
   </properties>
 
   <!-- ============================ -->
@@ -152,8 +159,17 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.11.0</version>
         <configuration>
-          <source>${java.version}</source>
-          <target>${java.version}</target>
+          <release>${java.version}</release>
+        </configuration>
+      </plugin>
+
+      <!-- Tests spin up a local Spark session, so they need the same Java 17 module opens -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <argLine>${spark.addopens}</argLine>
         </configuration>
       </plugin>
 
@@ -166,6 +182,12 @@
             <manifest>
               <mainClass>${mainClass}</mainClass>
             </manifest>
+            <!-- Java 17: open JDK internals to the unnamed module so `java -jar wts-training-spark.jar`
+                 works without passing the add-opens flags on the command line. (spark-submit injects
+                 its own set on the cluster; this covers direct local jar execution.) -->
+            <manifestEntries>
+              <Add-Opens>java.base/java.lang java.base/java.lang.invoke java.base/java.lang.reflect java.base/java.io java.base/java.net java.base/java.nio java.base/java.util java.base/java.util.concurrent java.base/java.util.concurrent.atomic java.base/sun.nio.ch java.base/sun.nio.cs java.base/sun.security.action java.base/sun.util.calendar java.security.jgss/sun.security.krb5</Add-Opens>
+            </manifestEntries>
           </archive>
           <descriptorRefs>
             <descriptorRef>jar-with-dependencies</descriptorRef>
