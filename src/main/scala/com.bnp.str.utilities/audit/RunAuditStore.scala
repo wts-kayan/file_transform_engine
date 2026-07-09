@@ -31,6 +31,7 @@ object RunAuditStore {
     StructField("used_jar",         StringType),
     StructField("used_conf",        StringType),
     StructField("user_launcher",    StringType),
+    StructField("status",           StringType),
     StructField("creation_date",    TimestampType),
     StructField("end_date",         TimestampType),
     StructField("duration",         StringType),
@@ -64,7 +65,7 @@ object RunAuditStore {
   /** Write (or overwrite) this run's ORC partition, then best-effort register it in the metastore. */
   def write(record: RunAuditRecord, table: String, location: String)(implicit spark: SparkSession): Unit = {
     val row = Row(
-      record.applicationId, record.usedJar, record.usedConf, record.userLauncher,
+      record.applicationId, record.usedJar, record.usedConf, record.userLauncher, record.status,
       record.creationDate, record.endDate.orNull, record.duration.orNull, record.motor,
       record.projectionDates.orNull, record.scenarios.orNull, record.baseFolderName.orNull,
       record.moduleName, record.runId

@@ -42,6 +42,7 @@ Partition columns are **`module_name`** and **`run_id`**; the rest are regular c
 | `used_jar` | string | | no | Jar the run was launched from | `str-file-transform-engine-1.0-RELEASE-Climate-Tables.jar` |
 | `used_conf` | string | | no | Path of the `application.conf` used | `/Projects/…/application_climate_tables_run_2.conf` |
 | `user_launcher` | string | | no | User who launched the run (from the conf) | `j03627` |
+| `status` | string | | no | Spark run state: `RUNNING` \| `SUCCESS` \| `FAILED` | `SUCCESS` |
 | `creation_date` | timestamp | | no | Run start | `2026-03-25 09:34:53.828` |
 | `end_date` | timestamp | | yes | Run end (null while running) | `2026-03-25 09:55:21.22` |
 | `duration` | string | | yes | Human-readable elapsed time (null while running) | `0h 20mn 27s` |
@@ -50,16 +51,16 @@ Partition columns are **`module_name`** and **`run_id`**; the rest are regular c
 | `scenarios` | string | | yes | Scenarios (module-specific) | `["FW", "NZ50", "DT", "NDC"]` |
 | `base_folder_name` | string | | yes | Run base folder (module-specific) | `ICAAP_TR_2025Q1_251016_v1` |
 
-A row is written at start (`end_date`/`duration` null), then **overwritten** in place with the
-finalized row (`end_date` + `duration`) at the end. A row left with a null `end_date` = a run whose
-JVM was killed / crashed.
+A row is written at start with `status = RUNNING` (`end_date`/`duration` null), then **overwritten**
+in place at the end with `status = SUCCESS` or `FAILED` plus `end_date` + `duration`. A row left in
+`RUNNING` (null `end_date`) = a run whose JVM was killed / crashed.
 
 ### Table DDL
 
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS run_history (
   application_id STRING, used_jar STRING, used_conf STRING, user_launcher STRING,
-  creation_date TIMESTAMP, end_date TIMESTAMP, duration STRING, motor STRING,
+  status STRING, creation_date TIMESTAMP, end_date TIMESTAMP, duration STRING, motor STRING,
   projection_dates STRING, scenarios STRING, base_folder_name STRING
 )
 PARTITIONED BY (module_name STRING, run_id STRING)

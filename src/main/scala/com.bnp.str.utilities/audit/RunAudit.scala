@@ -43,20 +43,18 @@ class RunAudit private(private var record: RunAuditRecord,
   /** The current (possibly not-yet-finished) record. */
   def current: RunAuditRecord = record
 
-  /** Mark the run finished (success) and persist the final record. */
-  def succeeded(): RunAuditRecord = finish(None)
+  /** Mark the run SUCCESS and persist the final record. */
+  def succeeded(): RunAuditRecord = finish(RunStatus.SUCCESS, None)
 
-  /** Mark the run finished after a failure (logs the throwable) and persist the final record. */
-  def failed(t: Throwable): RunAuditRecord = finish(Option(t))
+  /** Mark the run FAILED (logs the throwable) and persist the final record. */
+  def failed(t: Throwable): RunAuditRecord = finish(RunStatus.FAILED, Option(t))
 
-  /** Finalize end_date + duration and persist. (No status column in this schema.) */
-  def end(): RunAuditRecord = finish(None)
-
-  private def finish(error: Option[Throwable]): RunAuditRecord = {
+  private def finish(status: String, error: Option[Throwable]): RunAuditRecord = {
     val endTs      = new Timestamp(System.currentTimeMillis())
     val durationMs = (System.nanoTime() - startNanos) / 1000000L
     error.foreach(e => log.error(s"[audit] run ${record.runId} (${record.moduleName}) failed", e))
     record = record.copy(
+      status   = status,
       endDate  = Some(endTs),
       duration = Some(RunAudit.formatDuration(durationMs))
     )
@@ -69,8 +67,7 @@ class RunAudit private(private var record: RunAuditRecord,
     if (!enabled) return
     try {
       RunAuditStore.write(record, table, location)
-      log.info(s"[audit] run ${record.runId} (${record.moduleName}) " +
-        s"${if (record.endDate.isDefined) "ended" else "started"} -> $table")
+      log.info(s"[audit] run ${record.runId} (${record.moduleName}) status=${record.status} -> $table")
     } catch {
       case e: Throwable =>
         log.warn(s"[audit] failed to write run_history for run ${record.runId} " +
@@ -141,6 +138,7 @@ object RunAudit {
       usedConf      = usedConf,
       userLauncher  = resolve(userLauncher, "run.userLauncher", "RUN_USER_LAUNCHER",
                               auditConfig, "userLauncher", System.getProperty("user.name", "UNKNOWN")),
+      status        = RunStatus.RUNNING,
       creationDate  = new Timestamp(System.currentTimeMillis()),
       endDate       = None,
       duration      = None,

@@ -57,7 +57,7 @@ object RunAuditSmokeTest {
     println(s">>> run_history rows (read from ORC): ${hist.count()}")
     println(">>> schema:"); hist.printSchema()
     hist.select("run_id", "application_id", "module_name", "used_jar", "used_conf",
-      "user_launcher", "creation_date", "end_date", "duration", "motor",
+      "user_launcher", "status", "creation_date", "end_date", "duration", "motor",
       "projection_dates", "scenarios", "base_folder_name").show(false)
 
     println(">>> ORC partition directories on disk:")
