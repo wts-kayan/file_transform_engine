@@ -4,7 +4,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions.{col, lit, regexp_replace}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{DataFrame, DataFrameReader, SparkSession}
 import org.slf4j.LoggerFactory
 import com.typesafe.config.Config
 import java.time.LocalDate
@@ -16,6 +16,30 @@ import java.io.{BufferedReader, InputStreamReader, Reader}
 object PrimaryUtilities extends SchemaSelector {
 
   private val log = LoggerFactory.getLogger(this.getClass)
+
+  /**
+   * A crealytics spark-excel reader pre-configured with the options shared by every addons read.
+   * The caller still adds the cell addressing (`sheetName` or `dataAddress`) before `.load()`.
+   *
+   * Locale note: with `inferSchema=false` POI's `DataFormatter` renders each cell using the JVM
+   * default locale, so on a non-English host decimals come back with a comma (`-0,05`) and large
+   * numbers with grouping. The obvious lever, `usePlainNumberFormat=true`, is deliberately NOT set
+   * here: it renders EVERY number via BigDecimal.toPlainString, so whole numbers become `"1.0"`
+   * instead of `"1"` — which breaks the downstream string filter `ACTIVE_IND === "1"` and would
+   * change integer output columns (RANK/ACTIVATE) to `5.0`/`1.0`. Locale-dependent DECIMAL columns
+   * are instead normalized explicitly with [[replaceCommaInColunms]] (see the 5-arg reader), which
+   * fixes the comma without touching integer rendering.
+   */
+  private def excelReader(path: String)(implicit sparkSession: SparkSession): DataFrameReader =
+    sparkSession.read
+      .format("com.crealytics.spark.excel")
+      .option("path", path)
+      .option("location", path)
+      .option("header", "true")
+      .option("setErrorCellsToFallbackValues", "true")
+      .option("treatEmptyValuesAsNulls", "true")
+      .option("inferSchema", "false")
+      .option("addColorColumns", "false")
 
   /**
    * Reads a DataFrame from an Excel file.
@@ -34,16 +58,8 @@ object PrimaryUtilities extends SchemaSelector {
 
     log.info(s"Reading Excel file from path: $path, sheet: $sheetName")
 
-    val rawdf = sparkSession.read
-      .format("com.crealytics.spark.excel")
-      .option("sheetName", sheetName) // Required
-      .option("path", path)
-      .option("location", path)
-      .option("header", "true") // Required
-      .option("setErrorCellsToFallbackValues", "true")
-      .option("treatEmptyValuesAsNulls", "true")
-      .option("inferSchema", "false")
-      .option("addColorColumns", "false")
+    val rawdf = excelReader(path)
+      .option("sheetName", sheetName)
       .load()
 
     log.info(s"DataFrame with added sheet name column: $sheetName")
@@ -56,23 +72,26 @@ object PrimaryUtilities extends SchemaSelector {
   }
 
   def readDataFrameFromExcel(tableName: String)(implicit sparkSession: SparkSession, config: Config): DataFrame = {
+    import scala.collection.JavaConverters._
 
     val addonInputConfig = config.getConfig(s"${PrimaryConstants.APP_CONF}.${tableName}")
     val path = addonInputConfig.getString("path")
     val sheetName = addonInputConfig.getString("sheetNames")
     log.info(s"Reading $tableName Excel file from path: $path, sheet: $sheetName")
 
-    sparkSession.read
-      .format("com.crealytics.spark.excel")
-      .option("path", path)
-      .option("location", path)
+    val df = excelReader(path)
       .option("dataAddress", s"'$sheetName'!A1")
-      .option("header", "true")
-      .option("setErrorCellsToFallbackValues", "true")
-      .option("treatEmptyValuesAsNulls", "true")
-      .option("inferSchema", "false")
-      .option("addColorColumns", "false")
       .load()
+
+    // Locale-safe decimals: normalize the configured numeric columns (comma decimal + grouping ->
+    // canonical '.' with no grouping) so the same workbook yields identical values on en-US and
+    // fr-FR hosts. Only listed columns are touched, so integer/text columns are left untouched.
+    val columnsToFix =
+      if (addonInputConfig.hasPath("columnsToFix"))
+        addonInputConfig.getStringList("columnsToFix").asScala.toSeq
+      else Seq.empty[String]
+
+    if (columnsToFix.nonEmpty) replaceCommaInColunms(df, columnsToFix) else df
   }
 
   def readDataFrameFromCsv(tableName: String)(implicit sparkSession: SparkSession, conf: Config) : DataFrame = {
@@ -121,11 +140,19 @@ object PrimaryUtilities extends SchemaSelector {
     renamedDF.selectExpr(schema.fields.map(f => s"cast(${f.name} as ${f.dataType.sql}) as ${f.name}"): _*)
   }
 
+  /**
+   * Normalize locale-formatted numeric text in the given columns to a canonical form: strip
+   * grouping separators (space / non-breaking space U+00A0 / narrow NBSP U+202F) then turn the
+   * decimal comma into a dot — so "-0,05" and "1 234,56" become "-0.05" and "1234.56". Columns not
+   * listed are untouched, so integer and text columns keep their original rendering. A no-op on
+   * already-canonical values (e.g. en-US "-0.05"), so it is safe to apply unconditionally.
+   */
   def replaceCommaInColunms(df: DataFrame,
                             columns: Seq[String]): DataFrame = {
 
     columns.foldLeft(df) { case (acc, colName) =>
-      acc.withColumn(colName, regexp_replace(col(colName), ",", "."))
+      val degrouped = regexp_replace(col(colName), "[\\s\\u00A0\\u202F]", "")
+      acc.withColumn(colName, regexp_replace(degrouped, ",", "."))
     }
 
   }
