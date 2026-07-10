@@ -44,11 +44,11 @@ object PrimaryView {
        |
        |, app.IMPACT_RANK as RANK
        |, app.ACTIVE_IND as ACTIVATE
-       |FROM add_on_application_view app
-       |LEFT JOIN add_on_action_view action
+       |FROM ${PrimaryConstants.VIEW_ADD_ON_APPLICATION} app
+       |LEFT JOIN ${PrimaryConstants.VIEW_ADD_ON_ACTION} action
        |ON app.ACTION_ID = action.ACTION_ID
        |
-       |LEFT JOIN add_on_perimeter_view perimeter
+       |LEFT JOIN ${PrimaryConstants.VIEW_ADD_ON_PERIMETER} perimeter
        |ON app.PERIMETER_ID = perimeter.PERIMETER_ID
        |ORDER BY
        |  app.ACTION_ID,

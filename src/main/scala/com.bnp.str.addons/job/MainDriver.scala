@@ -50,8 +50,7 @@ object MainDriver {
           outputTableName,
           outConfig.getString("tmpPath"),
           outConfig.getString("path"),
-          deleteTmpPath = outConfig.getBoolean("deleteTmpPath"),
-          overwrite = true)(sparkSession, config)
+          deleteTmpPath = outConfig.getBoolean("deleteTmpPath"))(sparkSession, config)
       } else {
         log.info(s"Output '$outputTableName' disabled (enable=false); skipping write and harmonization")
       }

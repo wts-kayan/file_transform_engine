@@ -2,15 +2,14 @@ package com.bnp.str.addons.utility
 
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.functions.{col, lit, regexp_replace}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.functions.{col, regexp_replace}
 import org.apache.spark.sql.{DataFrame, DataFrameReader, SparkSession}
 import org.slf4j.LoggerFactory
 import com.typesafe.config.Config
 import java.io.{BufferedReader, InputStreamReader, Reader}
 
 
-object PrimaryUtilities extends SchemaSelector {
+object PrimaryUtilities {
 
   private val log = LoggerFactory.getLogger(this.getClass)
 
@@ -24,8 +23,8 @@ object PrimaryUtilities extends SchemaSelector {
    * here: it renders EVERY number via BigDecimal.toPlainString, so whole numbers become `"1.0"`
    * instead of `"1"` — which breaks the downstream string filter `ACTIVE_IND === "1"` and would
    * change integer output columns (RANK/ACTIVATE) to `5.0`/`1.0`. Locale-dependent DECIMAL columns
-   * are instead normalized explicitly with [[replaceCommaInColunms]] (see the 5-arg reader), which
-   * fixes the comma without touching integer rendering.
+   * are instead normalized explicitly via the `columnsToFix` config (see [[readDataFrameFromExcel]]
+   * / [[replaceCommaInColunms]]), which fixes the comma without touching integer rendering.
    */
   private def excelReader(path: String)(implicit sparkSession: SparkSession): DataFrameReader =
     sparkSession.read
@@ -39,35 +38,11 @@ object PrimaryUtilities extends SchemaSelector {
       .option("addColorColumns", "false")
 
   /**
-   * Reads a DataFrame from an Excel file.
-   *
-   * @param path The path to the Excel file.
-   * @param sheetName The name of the sheet to read.
-   * @param schema The schema to apply to the DataFrame.
-   * @param sparkSession The SparkSession to use.
-   * @return The DataFrame read from the Excel file.
+   * Read one sheet of an addons input workbook (path + sheet from the `tableName` config block).
+   * When the input config lists `columnsToFix`, those decimal columns are normalized to a
+   * locale-independent form ('.' decimal, no grouping) so the same workbook yields identical values
+   * on en-US and fr-FR hosts; integer/text columns are left untouched.
    */
-  def readDataFrameFromExcel(path: String,
-                             sheetName: String,
-                             schema: StructType,
-                             columnsToFix: Seq[String],
-                             isColumnsToFix: Boolean)(implicit sparkSession: SparkSession): DataFrame = {
-
-    log.info(s"Reading Excel file from path: $path, sheet: $sheetName")
-
-    val rawdf = excelReader(path)
-      .option("sheetName", sheetName)
-      .load()
-
-    log.info(s"DataFrame with added sheet name column: $sheetName")
-    if (isColumnsToFix) {
-      val df = PrimaryUtilities.replaceCommaInColunms(rawdf, columnsToFix)
-      applySchema(df, schema).withColumn("sheetName", lit(sheetName))
-    } else {
-      rawdf.withColumn("sheetName", lit(sheetName))
-    }
-  }
-
   def readDataFrameFromExcel(tableName: String)(implicit sparkSession: SparkSession, config: Config): DataFrame = {
     import scala.collection.JavaConverters._
 
@@ -80,9 +55,6 @@ object PrimaryUtilities extends SchemaSelector {
       .option("dataAddress", s"'$sheetName'!A1")
       .load()
 
-    // Locale-safe decimals: normalize the configured numeric columns (comma decimal + grouping ->
-    // canonical '.' with no grouping) so the same workbook yields identical values on en-US and
-    // fr-FR hosts. Only listed columns are touched, so integer/text columns are left untouched.
     val columnsToFix =
       if (addonInputConfig.hasPath("columnsToFix"))
         addonInputConfig.getStringList("columnsToFix").asScala.toSeq
@@ -91,50 +63,10 @@ object PrimaryUtilities extends SchemaSelector {
     if (columnsToFix.nonEmpty) replaceCommaInColunms(df, columnsToFix) else df
   }
 
-  def readDataFrameFromCsv(tableName: String)(implicit sparkSession: SparkSession, conf: Config) : DataFrame = {
-
-    val tablenameConfig = conf.getConfig(s"${PrimaryConstants.APP_CONF}.$tableName")
-
-
-    val path = tablenameConfig.getString(s"path")
-    val format = tablenameConfig.getString(s"format")
-    val header = tablenameConfig.getString(s"header")
-    val delimiter = tablenameConfig.getString(s"delimiter")
-    val schema = getSchema(tableName)
-
-    sparkSession
-      .read
-      .format(format)
-      .schema(schema)
-      .option("header", header)
-      .option("delimiter", delimiter)
-      .load(path)
-  }
-
-  def readDataFrame(tableName: String)(implicit sparkSession: SparkSession, conf: Config) : DataFrame = {
-
-    val path = conf.getString(s"${PrimaryConstants.APP_CONF}.${tableName.toLowerCase}.path")
-    val format = conf.getString(s"${PrimaryConstants.APP_CONF}.${tableName.toLowerCase}.format")
-    val schema = getSchema(tableName)
-
-    sparkSession
-      .read
-      .format(format)
-      .schema(schema)
-      .load(path)
-      .selectExpr(ColumnSelector.getColumnSequence(tableName):_*)
-  }
-
   def getHdfsReader(filePath: String)(sc: SparkContext): Reader = {
     val fs = FileSystem.get(sc.hadoopConfiguration)
     val path = new Path(filePath)
     new BufferedReader(new InputStreamReader(fs.open(path)))
-  }
-
-  def applySchema(df: DataFrame, schema: StructType): DataFrame = {
-
-    val renamedDF = df.toDF(schema.fieldNames:_*)
-    renamedDF.selectExpr(schema.fields.map(f => s"cast(${f.name} as ${f.dataType.sql}) as ${f.name}"): _*)
   }
 
   /**
@@ -152,71 +84,6 @@ object PrimaryUtilities extends SchemaSelector {
       acc.withColumn(colName, regexp_replace(degrouped, ",", "."))
     }
 
-  }
-
-
-  def writeDataframe(dataframe: DataFrame,
-                     partitionColumns: String,
-                     tableName: String,
-                     mode: String,
-                     format:String="parquet",
-                     numPartition: Int,
-                     path: String): Unit = {
-
-
-    // Split the partitionColumns string into a sequence of columns
-    val partitionColumnSeq: Seq[String] = if (partitionColumns.trim.nonEmpty) {
-      partitionColumns.split(",").map(_.trim)
-    } else {
-      Seq.empty[String]
-    }
-
-    dataframe
-      .coalesce(numPartition)
-      .write
-      .format(format)
-      .partitionBy(partitionColumnSeq: _*)
-      .mode(mode)
-      .save(s"$path/$tableName")
-
-  }
-
-  def copyFilesWithOverwrite(
-                              sourcePath: String,
-                              targetPath: String,
-                              fileName: String,
-                              overwrite: Boolean = true
-                            )(sc: SparkContext): Unit = {
-    log.info(s"Copying file $fileName from $sourcePath to $targetPath (overwrite: $overwrite)")
-    // Get Hadoop filesystem
-    val fs = FileSystem.get(sc.hadoopConfiguration)
-
-    // Construct full source and target paths
-    val sourceFile = new Path(sourcePath, fileName)
-    val targetFile = new Path(targetPath, fileName)
-
-    // Check if source file exists
-    if (!fs.exists(sourceFile)) {
-      log.error(s"Source file does not exist: $sourceFile")
-      throw new IllegalArgumentException(s"Source file does not exist: $sourceFile")
-    }
-
-    // Create target directory if it doesn't exist
-    if (!fs.exists(new Path(targetPath))) {
-      log.info(s"Creating target directory: $targetPath")
-      fs.mkdirs(new Path(targetPath))
-    }
-
-    // Delete target file if it exists and overwrite is true
-    if (overwrite && fs.exists(targetFile)) {
-      log.info(s"Deleting existing target file: $targetFile")
-      fs.delete(targetFile, false)
-    }
-
-    // Copy file
-    log.info(s"Copying file from $sourceFile to $targetFile")
-    fs.copyFromLocalFile(false, sourceFile, targetFile)
-    log.info(s"Successfully copied file to $targetFile")
   }
 
   /**
@@ -255,9 +122,7 @@ object PrimaryUtilities extends SchemaSelector {
   def harmonizeFilesInDirectory(tableName: String,
                                 sourcePath: String,
                                 targetPath: String,
-                                deleteTmpPath: Boolean = true,
-                                overwrite: Boolean = true)(implicit sparkSession: SparkSession, conf: Config): Unit = {
-
+                                deleteTmpPath: Boolean = true)(implicit sparkSession: SparkSession, conf: Config): Unit = {
 
     log.info(s"Starting harmonization for table: $tableName from $sourcePath to $targetPath")
     val fs = FileSystem.get(sparkSession.sparkContext.hadoopConfiguration)
@@ -288,8 +153,6 @@ object PrimaryUtilities extends SchemaSelector {
     }
 
     log.info(s"Harmonization completed successfully for table: $tableName")
-
-
   }
 
   /**

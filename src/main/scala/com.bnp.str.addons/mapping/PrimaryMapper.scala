@@ -19,9 +19,14 @@ class PrimaryMapper(add_on_application: DataFrame,
                    (implicit sparkSession: SparkSession, config: Config) extends MapperProvider {
 
   override def getDataFrame_addons: DataFrame = {
-    add_on_application.where(col("ACTIVE_IND") === "1").createOrReplaceTempView("add_on_application_view")
-    add_on_action.where(col("VARIABLE") =!= "CCF").createOrReplaceTempView("add_on_action_view")
-    add_on_perimeter.createOrReplaceTempView("add_on_perimeter_view")
+    add_on_application
+      .where(col(PrimaryConstants.COL_ACTIVE_IND) === PrimaryConstants.ACTIVE_IND_ON)
+      .createOrReplaceTempView(PrimaryConstants.VIEW_ADD_ON_APPLICATION)
+    add_on_action
+      .where(col(PrimaryConstants.COL_VARIABLE) =!= PrimaryConstants.VARIABLE_CCF)
+      .createOrReplaceTempView(PrimaryConstants.VIEW_ADD_ON_ACTION)
+    add_on_perimeter
+      .createOrReplaceTempView(PrimaryConstants.VIEW_ADD_ON_PERIMETER)
 
     val outConfig = config.getConfig(s"${PrimaryConstants.APP_CONF}.$outputTableName")
     val queryName = outConfig.getString("queryName")
