@@ -260,6 +260,14 @@ object PrimaryUtilities extends SchemaSelector {
 
 
     log.info(s"Starting harmonization for table: $tableName from $sourcePath to $targetPath")
+    val fs = FileSystem.get(sparkSession.sparkContext.hadoopConfiguration)
+
+    // Create the output folder if it does not exist yet.
+    val outDir = new Path(targetPath)
+    if (!fs.exists(outDir)) {
+      log.info(s"Output directory $targetPath does not exist; creating it")
+      fs.mkdirs(outDir)
+    }
 
     val newFileName = getNewFileName(tableName)(sparkSession, conf)
     log.info(s"Generated new file name: $newFileName")
@@ -267,9 +275,7 @@ object PrimaryUtilities extends SchemaSelector {
     renameFilesInDirectory(s"$sourcePath/$tableName", targetPath, newFileName)(sparkSession)
     log.info(s"File renaming completed")
 
-    if (deleteTmpPath)
-    {
-      val fs = FileSystem.get(sparkSession.sparkContext.hadoopConfiguration)
+    if (deleteTmpPath) {
       log.info(s"Deleting source directory: $sourcePath")
       fs.delete(new Path(s"$sourcePath/$tableName"), true)
     }
