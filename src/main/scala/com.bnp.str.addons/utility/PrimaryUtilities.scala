@@ -7,9 +7,6 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, DataFrameReader, SparkSession}
 import org.slf4j.LoggerFactory
 import com.typesafe.config.Config
-import java.time.LocalDate
-
-import java.time.format.DateTimeFormatter
 import java.io.{BufferedReader, InputStreamReader, Reader}
 
 
@@ -222,16 +219,37 @@ object PrimaryUtilities extends SchemaSelector {
     log.info(s"Successfully copied file to $targetFile")
   }
 
-  def renameFilesInDirectory(directoryPath: String
-                             , targetPath: String
-                             , newFileName: String)(implicit sparkSession: SparkSession): Unit = {
-    log.info(s"Renaming files in directory: $directoryPath to new file name: $newFileName")
+  /**
+   * Collapse a Spark output directory into a single file `$targetPath/$newFileName` by renaming its
+   * lone `part-*` file. Fails fast with a clear message when there is no part-file, or more than one
+   * (which would silently drop data — write with numPartition = 1). Creates the target directory,
+   * overwrites any existing output, and removes the checksum sidecar so the folder stays clean.
+   */
+  def renameFilesInDirectory(directoryPath: String,
+                             targetPath: String,
+                             newFileName: String)(implicit sparkSession: SparkSession): Unit = {
+    log.info(s"Renaming the part-file in $directoryPath to $targetPath/$newFileName")
     val fs = FileSystem.get(sparkSession.sparkContext.hadoopConfiguration)
-    val partFile = fs.globStatus(new Path(s"$directoryPath/part-*"))(0).getPath
-    log.info(s"Found file to rename: ${partFile.getName}")
-    fs.rename(partFile, new Path(s"$targetPath/$newFileName"))
-    log.info(s"Successfully renamed file to: $newFileName")
 
+    val parts = Option(fs.globStatus(new Path(s"$directoryPath/part-*"))).getOrElse(Array.empty)
+    if (parts.isEmpty)
+      throw new IllegalStateException(s"No part-* file found under '$directoryPath' to rename")
+    if (parts.length > 1)
+      throw new IllegalStateException(
+        s"Expected exactly one part-* file under '$directoryPath' but found ${parts.length}; " +
+          "write with numPartition = 1 so the output collapses to a single file")
+
+    val partFile = parts(0).getPath
+    val target = new Path(targetPath, newFileName)
+    Option(target.getParent).foreach(p => fs.mkdirs(p)) // ensure the target directory exists
+    if (fs.exists(target)) fs.delete(target, false)     // overwrite an existing output
+    fs.rename(partFile, target)
+
+    // drop the checksum sidecar (.<name>.crc) so the output folder stays clean
+    val crc = new Path(target.getParent, s".${target.getName}.crc")
+    if (fs.exists(crc)) fs.delete(crc, false)
+
+    log.info(s"Renamed ${partFile.getName} -> $target")
   }
 
   def harmonizeFilesInDirectory(tableName: String,
@@ -261,38 +279,19 @@ object PrimaryUtilities extends SchemaSelector {
 
   }
 
-  def getCurrentDateInDDMMYYYY: String = {
-    val formatter = DateTimeFormatter.ofPattern("ddMMyyyy")
-    LocalDate.now().format(formatter)
-  }
-
+  /**
+   * Final output file name = the configured `tableName` plus the format extension, e.g.
+   * `crr_param_add_on_ste.csv`. (No quarter/date suffix.)
+   */
   def getNewFileName(tableName: String)(implicit sparkSession: SparkSession, conf: Config): String = {
-    val Quarter = getCurrentQuarter
     val outConfig = conf.getConfig(s"${PrimaryConstants.APP_CONF}.${tableName}")
-
     val outTableName = outConfig.getString("tableName")
     val format = outConfig.getString("format")
-
-    s"${outTableName}_${Quarter}_${getCurrentDateInDDMMYYYY}.${format}"
-
+    s"$outTableName.$format"
   }
-
-
-  private def getCurrentQuarter: String = {
-    val currentMonth = LocalDate.now().getMonth
-    val currentYear = LocalDate.now().getYear
-    currentMonth.getValue match {
-      case month if month >= 1 && month <= 3 => s"Q1$currentYear"
-      case month if month >= 4 && month <= 6 => s"Q2$currentYear"
-      case month if month >= 7 && month <= 9 => s"Q3$currentYear"
-      case _ => s"Q4$currentYear" // months 10-12
-    }
-  }
-
 
   def writeDataframe(dataframe: DataFrame,
                      tableName: String)(implicit sparkSession: SparkSession, conf: Config): Unit = {
-
 
     val outConfig = conf.getConfig(s"${PrimaryConstants.APP_CONF}.${tableName}")
     val format = outConfig.getString("format")
@@ -300,17 +299,22 @@ object PrimaryUtilities extends SchemaSelector {
     val numPartition = outConfig.getInt("numPartition")
     val path = outConfig.getString("tmpPath")
     val outTableName = outConfig.getString("tableName")
+    val delimiter = if (outConfig.hasPath("delimiter")) outConfig.getString("delimiter") else ";"
+    val header = if (outConfig.hasPath("header")) outConfig.getString("header") else "true"
 
-    val tmp_output = s"$path/$outTableName"
+    val tmpOutput = s"$path/$outTableName"
+    log.info(s"Writing $tableName ($format, mode=$mode, numPartition=$numPartition) to $tmpOutput")
 
     dataframe
       .coalesce(numPartition)
       .write
       .format(format)
-      .option("header", "true")
-      .option("delimiter", ";")
+      .option("header", header)
+      .option("delimiter", delimiter)
+      // write empty cells as a bare field (not the default quoted empty string "")
+      .option("emptyValue", "")
       .mode(mode)
-      .save(tmp_output)
+      .save(tmpOutput)
   }
 
 }
