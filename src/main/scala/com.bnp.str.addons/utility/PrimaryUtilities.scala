@@ -276,8 +276,15 @@ object PrimaryUtilities extends SchemaSelector {
     log.info(s"File renaming completed")
 
     if (deleteTmpPath) {
-      log.info(s"Deleting source directory: $sourcePath")
-      fs.delete(new Path(s"$sourcePath/$tableName"), true)
+      val tmpTable = new Path(s"$sourcePath/$tableName")
+      log.info(s"Deleting temp directory: $tmpTable")
+      fs.delete(tmpTable, true)
+      // also drop the temp parent folder if it is now empty (leave it if other outputs share it)
+      val tmpRoot = new Path(sourcePath)
+      if (fs.exists(tmpRoot) && fs.listStatus(tmpRoot).isEmpty) {
+        log.info(s"Removing empty temp directory: $sourcePath")
+        fs.delete(tmpRoot, true)
+      }
     }
 
     log.info(s"Harmonization completed successfully for table: $tableName")
