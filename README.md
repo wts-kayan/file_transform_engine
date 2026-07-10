@@ -134,4 +134,5 @@ mvn -o dependency:build-classpath -Dmdep.outputFile=cp.txt -DincludeScope=test
 java -cp "target/classes;target/test-classes;$(cat cp.txt)" com.bnp.str.tseadfwd.EadFwdValidationApp
 ```
 
-Full business + technical specs: `docs/FUNCTIONAL_SPECIFICATION.md`, `docs/TECHNICAL_SPECIFICATION.md`.
+Full business + technical specs: `docs/tseadfwd/FUNCTIONAL_SPECIFICATION.md`, `docs/tseadfwd/TECHNICAL_SPECIFICATION.md`.
+Addons technical spec: `docs/addons/TECHNICAL_SPECIFICATION.md`.
