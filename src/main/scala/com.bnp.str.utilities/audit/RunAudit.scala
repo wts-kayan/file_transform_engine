@@ -96,8 +96,10 @@ object RunAudit {
    * to finish with [[succeeded]] / [[failed]].
    *
    * @param moduleName       module that owns the run (PARTITION), e.g. "tseadfwd", "climatetables"
-   * @param auditConfig      the `audit { }` config block (keys: enabled, table, root/location,
-   *                         runId, userLauncher, motor, usedJar — all optional except root when enabled)
+   * @param auditConfig      the `audit { }` config block (keys: enabled, table, database, root/location,
+   *                         runId, userLauncher, motor, usedJar — all optional). When `database` is set
+   *                         the table LOCATION is derived from that Hive database's own warehouse dir
+   *                         (`<db.locationUri>/<table>`); otherwise `root`/`location` is used.
    * @param usedConf         path of the application.conf used
    * @param runId            override for the run id (else config `runId`, else a generated UUID)
    * @param userLauncher     override for the launching user (else -D/env/config, else JVM user.name)
@@ -121,8 +123,9 @@ object RunAudit {
            (implicit spark: SparkSession): RunAudit = {
 
     val enabled  = getBool(auditConfig, "enabled", default = true)
-    val table    = getStr(auditConfig, "table", default = RunAuditStore.DEFAULT_TABLE)
-    val location = normalizeLocation(resolveRoot(auditConfig))
+    val database = getOpt(auditConfig, "database")
+    val rawTable = getStr(auditConfig, "table", default = RunAuditStore.DEFAULT_TABLE)
+    val (table, location) = resolveTableAndLocation(auditConfig, database, rawTable)
 
     val resolvedRunId =
       runId.filter(nonBlank)
@@ -154,6 +157,38 @@ object RunAudit {
   }
 
   // ---- config / identity resolution helpers ----
+
+  /**
+   * Resolve the (qualified table name, storage LOCATION) pair used to write the audit ORC.
+   *
+   * When a Hive `database` is configured, the table lives inside that database and its LOCATION is
+   * derived dynamically from the database's own warehouse directory — `<db.locationUri>/<table>` —
+   * so nothing is hard-coded and the ORC lands where Hive expects the database's tables:
+   * {{{
+   *   val dbPath   = spark.catalog.getDatabase(database).locationUri
+   *   val location = dbPath + "/" + table.toLowerCase
+   * }}}
+   * Falls back to the config `root`/`location` (normalized to an absolute local path) with an
+   * unqualified table name when no database is set, or when the metastore lookup fails (e.g. a local
+   * box without Hive).
+   */
+  private def resolveTableAndLocation(cfg: Config, database: Option[String], table: String)
+                                     (implicit spark: SparkSession): (String, String) =
+    database.filter(nonBlank) match {
+      case Some(db) =>
+        try {
+          val dbPath   = spark.catalog.getDatabase(db).locationUri
+          val location = s"${dbPath.stripSuffix("/")}/${table.toLowerCase}"
+          (s"$db.$table", location)
+        } catch {
+          case e: Throwable =>
+            log.warn(s"[audit] could not resolve location from database '$db' " +
+              s"(${e.getClass.getSimpleName}: ${e.getMessage}); falling back to config root")
+            (table, normalizeLocation(resolveRoot(cfg)))
+        }
+      case None =>
+        (table, normalizeLocation(resolveRoot(cfg)))
+    }
 
   /** Audit table LOCATION: `root` (preferred) or legacy `location` key. */
   private def resolveRoot(cfg: Config): String =

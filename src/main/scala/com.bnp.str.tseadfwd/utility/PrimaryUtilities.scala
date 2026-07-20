@@ -192,31 +192,6 @@ object PrimaryUtilities {
     df.format(date)
   }
 
-  /**
-   * Writes a DataFrame to a specified path with a given mode and number of partitions.
-   *
-   * @param dataFrame The DataFrame to write.
-   * @param mode The save mode (e.g., "overwrite", "append").
-   * @param numPartition The number of partitions to use when writing the DataFrame.
-   * @param env Implicit environment string for the write operation.
-   */
-  def writeDataFrame(dataFrame: DataFrame,
-                     mode: String,
-                     numPartition: Int)(implicit env: String): Unit = {
-
-    log.info(s"\n *** Write started (mode: $mode, numPartition: $numPartition) ... ***\n")
-
-    dataFrame
-      .coalesce(numPartition)
-      .write
-      .format("parquet")
-      .partitionBy("location")
-      .mode(mode)
-      .save(s"/src/main/resources/data/datalake/clients_orders/")
-
-    log.info(s"\n *** Write Completed ... *** \n")
-  }
-
   def readDataFrameFromExcel(tableName: String)
                             (implicit sparkSession: SparkSession,
                              config: Config): DataFrame = {
@@ -250,19 +225,6 @@ object PrimaryUtilities {
       .load()
 
     rawdf
-  }
-
-  def readDataFrameFromCsv(tableName: String)
-                          (implicit sparkSession: SparkSession,
-                           conf: Config): DataFrame = {
-
-    val config =
-      conf.getConfig(s"${PrimaryConstants.APP_CONF}.$tableName")
-
-    sparkSession.read
-      .option("header", config.getString("header"))
-      .option("delimiter", config.getString("delimiter"))
-      .csv(config.getString("path"))
   }
 
   /**

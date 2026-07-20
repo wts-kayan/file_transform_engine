@@ -14,7 +14,13 @@ table with two calls.
   ```
 
 - Exposed as an **EXTERNAL** Hive table `run_history`, `PARTITIONED BY (module_name, run_id)`,
-  `STORED AS ORC`, `LOCATION <root>`. Being EXTERNAL, dropping the table never deletes the data.
+  `STORED AS ORC`, `LOCATION <root>`. Being EXTERNAL — and pinned with
+  `TBLPROPERTIES ('external.table.purge'='FALSE')` — dropping the table never deletes the data.
+- **Location resolution.** If `audit.database` is set, the `LOCATION` is derived dynamically from
+  that Hive database's own warehouse directory — `spark.catalog.getDatabase(database).locationUri +
+  "/" + table.toLowerCase` — and the table is registered as `database.table`. Otherwise the location
+  falls back to the config `root`/`location` (normalized to an absolute local path) with an
+  unqualified table name. The same fallback applies if the database lookup fails (e.g. no metastore).
 - **One partition per run.** Writing a run overwrites only its own `module_name=…/run_id=…`
   partition (dynamic partition overwrite), so the row written at start (with `end_date`/`duration`
   null) is replaced in place by the finalized row, and concurrent runs never contend.
@@ -69,7 +75,9 @@ LOCATION 'hdfs:///…/run_history';
 ```
 
 `RunAuditStore.createTableDDL(table, location)` returns exactly this string;
-`RunAuditStore.schema` is the equivalent Spark `StructType`.
+`RunAuditStore.schema` is the equivalent Spark `StructType`. Right after creating the table,
+`RunAuditStore.alterProps(table)` runs `ALTER TABLE … SET TBLPROPERTIES ('external.table.purge'='FALSE')`
+so a later `DROP TABLE` keeps the ORC data.
 
 ## Launcher-supplied metadata
 
@@ -92,8 +100,10 @@ and `base_folder_name` are module-specific and passed by the driver (null when n
 ```hocon
 audit {
   enabled = true
-  table   = "run_history"            # external Hive table name (optionally db.table)
-  root    = "localRun/run_history"   # table LOCATION; hdfs://… on the cluster
+  table   = "run_history"            # external Hive table name (unqualified; see `database`)
+  # database = "my_hive_db"          # optional: put the table in this Hive db and derive LOCATION
+  #                                  #   from its warehouse dir (<db.locationUri>/<table>).
+  root    = "localRun/run_history"   # table LOCATION when `database` is unset; hdfs://… on the cluster
   # runId        = "..."             # optional: pin the run_id (else a UUID is generated)
   userLauncher = "j03627"
   motor        = "tseadfwd"

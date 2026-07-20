@@ -62,6 +62,11 @@ object RunAuditStore {
        |STORED AS ORC
        |LOCATION '$location'""".stripMargin
 
+  /** DDL that pins the table's data so DROP TABLE keeps the ORC files (external table, no purge). */
+  def alterProps(fullTableName: String): String =
+    "ALTER TABLE " + fullTableName + "\n" +
+      " SET TBLPROPERTIES ('external.table.purge'='FALSE')"
+
   /** Write (or overwrite) this run's ORC partition, then best-effort register it in the metastore. */
   def write(record: RunAuditRecord, table: String, location: String)(implicit spark: SparkSession): Unit = {
     val row = Row(
@@ -83,6 +88,7 @@ object RunAuditStore {
                                (implicit spark: SparkSession): Unit =
     try {
       spark.sql(createTableDDL(table, location))
+      spark.sql(alterProps(table))
       spark.sql(s"ALTER TABLE $table ADD IF NOT EXISTS PARTITION (`module_name`='$moduleName', `run_id`='$runId')")
     } catch {
       case e: Throwable =>
