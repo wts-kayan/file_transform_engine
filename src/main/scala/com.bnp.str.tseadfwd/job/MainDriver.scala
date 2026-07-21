@@ -7,7 +7,7 @@ import com.bnp.str.tseadfwd.common.PrimaryRunner
 import com.bnp.str.tseadfwd.reader.PrimaryReader
 import com.bnp.str.tseadfwd.utility.{PrimaryConstants, PrimaryUtilities}
 import com.bnp.str.tseadfwd.writer.PrimaryWriter
-import com.bnp.str.utilities.audit.RunAudit
+import com.bnp.str.tseadfwd.audit.TseadfwdAudit
 import org.slf4j.LoggerFactory
 
 object MainDriver {
@@ -45,13 +45,7 @@ object MainDriver {
       PrimaryConstants.OUTPUT_EAD_FWD
 
     // ---- run audit: record this execution in run_history (shared, module-agnostic) ----
-    val auditConfig =
-      config.getConfig(s"${PrimaryConstants.APP_CONF}.audit")
-    val audit = RunAudit.start(
-      moduleName = "tseadfwd",
-      auditConfig = auditConfig,
-      usedConf   = absoluteConfigPath
-    )(sparkSession)
+    val audit = TseadfwdAudit.start(config, usedConf = absoluteConfigPath)(sparkSession)
     logger.info(s"Run audit started: runId=${audit.runId}")
 
     try {
