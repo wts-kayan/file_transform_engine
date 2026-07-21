@@ -225,11 +225,24 @@ object RunAudit {
   private def getBool(cfg: Config, key: String, default: Boolean): Boolean =
     if (cfg.hasPath(key)) cfg.getBoolean(key) else default
 
-  /** Best-effort: the jar file this code was loaded from (None in an IDE/classes-dir run). */
+  /**
+   * Best-effort file name of the jar this code was loaded from. Reads the code-source path as a
+   * plain URI path STRING (robust to the non-hierarchical URIs a spark-submit / YARN classloader
+   * produces — `new File(uri)` throws on those) and takes its basename. Returns None only when
+   * there is no code source or the basename is blank (e.g. an IDE / classes-dir run whose path ends
+   * with a separator), in which case the caller falls back to "UNKNOWN".
+   */
   private def detectJar: Option[String] =
     try {
-      val loc = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation
-      val name = new java.io.File(loc.toURI).getName
-      if (name.toLowerCase.endsWith(".jar")) Some(name) else None
+      val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
+      Some(jarBaseName(path)).filter(nonBlank)
     } catch { case _: Throwable => None }
+
+  /** Basename of a path: everything after the last '/' or '\' (the whole path when neither is present). */
+  private def jarBaseName(path: String): String = {
+    if (path == null || path.isEmpty) return ""
+    var idx = path.lastIndexOf('/')
+    if (idx == -1) idx = path.lastIndexOf('\\')
+    path.substring(idx + 1)
+  }
 }
