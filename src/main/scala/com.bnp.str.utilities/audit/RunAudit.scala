@@ -136,8 +136,12 @@ object RunAudit {
       runId         = resolvedRunId,
       applicationId = try spark.sparkContext.applicationId catch { case _: Throwable => "UNKNOWN" },
       moduleName    = moduleName,
-      usedJar       = usedJar.filter(nonBlank).getOrElse(
-                        getOpt(auditConfig, "usedJar").getOrElse(detectJar.getOrElse("UNKNOWN"))),
+      usedJar       = usedJar.filter(nonBlank)
+                        .orElse(Option(System.getProperty("run.usedJar")).filter(nonBlank))
+                        .orElse(Option(System.getenv("RUN_USED_JAR")).filter(nonBlank))
+                        .orElse(getOpt(auditConfig, "usedJar"))
+                        .orElse(detectJar)
+                        .getOrElse("UNKNOWN"),
       usedConf      = usedConf,
       userLauncher  = resolve(userLauncher, "run.userLauncher", "RUN_USER_LAUNCHER",
                               auditConfig, "userLauncher", System.getProperty("user.name", "UNKNOWN")),
@@ -226,16 +230,46 @@ object RunAudit {
     if (cfg.hasPath(key)) cfg.getBoolean(key) else default
 
   /**
-   * Best-effort file name of the jar this code was loaded from. Reads the code-source path as a
-   * plain URI path STRING (robust to the non-hierarchical URIs a spark-submit / YARN classloader
-   * produces — `new File(uri)` throws on those) and takes its basename. Returns None only when
-   * there is no code source or the basename is blank (e.g. an IDE / classes-dir run whose path ends
-   * with a separator), in which case the caller falls back to "UNKNOWN".
+   * On YARN the submitted application jar is localized on the cluster under the fixed placeholder
+   * name `__app__.jar`, so the classloader code source reports that placeholder instead of the real
+   * file name. Treat it as "not a real name" so detection falls through to the Spark config.
    */
-  private def detectJar: Option[String] =
+  private val YarnAppJarPlaceholder = "__app__.jar"
+
+  /**
+   * Best-effort file name of the jar this code was launched from. Preference order:
+   *   1. the classloader code-source basename (works for an IDE / plain `java -jar` / YARN client run);
+   *   2. the real submitted jar recovered from the Spark configuration (YARN cluster mode, where the
+   *      code source is the useless `__app__.jar` placeholder).
+   * Returns None only when neither yields a usable `*.jar` name, in which case the caller falls back
+   * to "UNKNOWN". A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` / config.
+   */
+  private def detectJar(implicit spark: SparkSession): Option[String] =
+    codeSourceJar.orElse(jarFromSparkConf)
+
+  /** Basename of the jar this code was loaded from, ignoring the YARN `__app__.jar` placeholder. */
+  private def codeSourceJar: Option[String] =
     try {
       val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
-      Some(jarBaseName(path)).filter(nonBlank)
+      Some(jarBaseName(path)).filter(nonBlank).filterNot(_ == YarnAppJarPlaceholder)
+    } catch { case _: Throwable => None }
+
+  /**
+   * Recover the real submitted jar name from the Spark configuration, for the YARN-cluster case where
+   * the code source is `__app__.jar`. Scans `spark.jars` then `spark.yarn.dist.jars` for the first
+   * `*.jar` basename that is not the placeholder. Best-effort: returns None if nothing usable is found.
+   */
+  private def jarFromSparkConf(implicit spark: SparkSession): Option[String] =
+    try {
+      val conf = spark.sparkContext.getConf
+      Seq("spark.jars", "spark.yarn.dist.jars")
+        .flatMap(k => conf.getOption(k).toSeq)
+        .flatMap(_.split(","))
+        .map(_.trim).filter(nonBlank)
+        .map(jarBaseName)
+        .filter(_.toLowerCase.endsWith(".jar"))
+        .filterNot(_ == YarnAppJarPlaceholder)
+        .headOption
     } catch { case _: Throwable => None }
 
   /** Basename of a path: everything after the last '/' or '\' (the whole path when neither is present). */
