@@ -18,6 +18,8 @@ localRun/tseadfwd/output_analysis/
 localRun/run_history/
 localRun/run_history_smoke/
 /out/
+localRun/addons/output/
+localRun/addons/output_tmp/
 
 # Excel temp lock files
 ~$*
