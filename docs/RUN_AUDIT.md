@@ -90,7 +90,12 @@ Resolved per field, first non-blank wins:
 | `run_id` | — | — | `audit.runId` | generated UUID |
 | `user_launcher` | `run.userLauncher` | `RUN_USER_LAUNCHER` | `audit.userLauncher` | JVM `user.name` |
 | `motor` | `run.motor` | `RUN_MOTOR` | `audit.motor` | `UNKNOWN` |
-| `used_jar` | — | — | `audit.usedJar` | auto-detected from the running jar |
+| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected from the running jar |
+
+> On YARN **cluster** mode the app jar is localized under the placeholder `__app__.jar`, so
+> auto-detection cannot see the real file name from the classloader. It falls back to `spark.jars` /
+> `spark.yarn.dist.jars`; if those don't carry the app jar, set the name explicitly via
+> `-Drun.usedJar`, `RUN_USED_JAR`, or `audit.usedJar`.
 
 `application_id` is read from `spark.sparkContext.applicationId`. `projection_dates`, `scenarios`
 and `base_folder_name` are module-specific and passed by the driver (null when not applicable).
