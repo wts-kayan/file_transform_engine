@@ -1,43 +1,17 @@
-// Package declaration which organizes the code modules, similar to a folder structure.
 package com.bnp.str.ageing.sessionmanager
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
-/**
- * Singleton object to manage Spark Session creation.
- *
- * @author Mehdi TAJMOUATI
- * @note Big Data/Cloud Trainer at WyTaSoft.
- *       For queries, training or further information, contact mehdi.tajmouati@wytasoft.com
- *
- * One factory for BOTH local and cluster — no `isLocalhost` flag. The runtime environment
- * decides: when the job is launched via `spark-submit` the cluster sets `spark.master` (yarn,
- * k8s, …) and provides the Hive metastore / warehouse, so those are kept untouched. When no
- * master is supplied (IDE run, unit test, laptop) or it is an explicit `local[…]`, a
- * self-contained local session is built (in-memory Derby metastore, local warehouse). The same
- * `enableHiveSupport()` works in both cases.
- * @see <a href="https://www.wytasoft.com/wytasoft-group/">Visit WyTaSoft for more information on courses and training sessions.</a>
- */
 object StrSparkSessionManager {
 
-  /**
-   * Fetches or creates a SparkSession suited to wherever it runs (local or cluster), decided from
-   * the environment rather than a caller-supplied flag.
-   *
-   * @param appName The name of the application. This name will be displayed in the Spark UI.
-   * @return An instance of SparkSession tailored for the detected environment.
-   */
   def fetchSparkSession(appName: String): SparkSession = {
 
-    // `new SparkConf()` loads the `spark.*` system properties / SPARK_ env that spark-submit sets.
-    // No master, or an explicit `local[…]` master, means a local run; anything else is a cluster.
     val isLocal = new SparkConf().getOption("spark.master").forall(_.startsWith("local"))
 
     val builder = SparkSession
       .builder()
       .appName(appName)
-      // ---- common to both environments ----
       .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
       .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
       .config("hive.exec.dynamic.partition", "true")
@@ -45,7 +19,6 @@ object StrSparkSessionManager {
 
     val tuned =
       if (isLocal) {
-        // ---- self-contained local run: embedded Derby metastore + local warehouse, no cluster deps ----
         val warehouse = s"${System.getProperty("user.dir")}/out/warehouse"
         builder
           .master("local[*]")
@@ -58,7 +31,6 @@ object StrSparkSessionManager {
           .config("spark.sql.warehouse.dir", warehouse)
           .config("hive.metastore.warehouse.dir", warehouse)
       } else {
-        // ---- cluster: spark-submit provides master / queue / metastore; only set engine tuning ----
         builder
           .config("hive.execution.engine", "spark")
           .config("spark.sql.autoBroadcastJoinThreshold", 1073741824L)
@@ -67,7 +39,6 @@ object StrSparkSessionManager {
     tuned
       .enableHiveSupport()
       .getOrCreate()
-    // getOrCreate manages resource efficiency and ensures a single session per JVM.
   }
 
 }

@@ -4,10 +4,6 @@ import com.bnp.str.ageing.utility.{PrimaryConstants, PrimaryUtilities}
 import com.typesafe.config.Config
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
-/**
- * Appends aged scenario DataFrames, one sheet at a time, to the output macroeconomic workbook whose
- * path is resolved from the module config.
- */
 class PrimaryWriter()(implicit sparkSession: SparkSession, conf: Config) {
 
   private val outputPath: String =
@@ -15,5 +11,13 @@ class PrimaryWriter()(implicit sparkSession: SparkSession, conf: Config) {
 
   def write(dataframe: DataFrame, scenario: String): Unit =
     PrimaryUtilities.writeScenario(dataframe, outputPath, scenario)
+
+  def writeCsv(dataframe: DataFrame, scenario: String): Unit =
+    PrimaryUtilities.writeScenarioCsv(dataframe, csvPathFor(scenario))
+
+  private def csvPathFor(scenario: String): String = {
+    val base = outputPath.replaceAll(PrimaryConstants.XLSX_EXTENSION_REGEX, "")
+    s"${base}_$scenario.${PrimaryConstants.CSV_EXTENSION}"
+  }
 
 }

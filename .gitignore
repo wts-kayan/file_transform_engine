@@ -20,6 +20,7 @@ localRun/run_history_smoke/
 /out/
 localRun/addons/output/
 localRun/addons/output_tmp/
+localRun/ageing/output/
 
 # Excel temp lock files
 ~$*
