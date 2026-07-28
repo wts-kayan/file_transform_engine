@@ -63,10 +63,108 @@ application.conf ─▶ MainDriver ─▶ PrimaryReader ─▶ PrimaryRunner ─
 Note the one genuine shape difference: `ageing` produces a *map* of scenario → DataFrame (it writes
 one Excel sheet per scenario plus a single combined CSV), where the other two produce a single table.
 
-**Adding a module.** Create `com.bnp.str.<name>` with the layout above, give it a config block named
-`<name>_app`, wire the run audit in `MainDriver` (two calls — see [Run audit](#run-audit)), then add a
-row to the [Modules](#modules) table and a `## <NAME>` section below. No repo-wide change is needed:
-the fat jar picks the module up from `--class`.
+**Adding a module.** Create `com.bnp.str.<name>` with the layout above, honour the
+[contract interface](#contract-interface) in its `MainDriver`, give it a config block named
+`<name>_app`, wire the run audit (two calls — see [Run audit](#run-audit)), then add a row to the
+[Modules](#modules) table and a `## <NAME>` section below. No repo-wide change is needed: the fat jar
+picks the module up from `--class`.
+
+## Contract interface
+
+The part of the contract a **caller** sees: the entry point (`main`) and the configuration file it is
+handed as its parameter. It is identical across modules, which is what makes them interchangeable from
+a scheduler's point of view — the [module contract](#module-contract) above is the internal counterpart.
+
+### The entry point
+
+```scala
+object MainDriver {
+  def main(args: Array[String]): Unit   // args(0) = path to the application.conf — the ONLY argument
+}
+```
+
+Every module is launched the same way, and takes **exactly one argument**: the path to its
+configuration file. There are no flags, no environment-dependent switches, and no second argument —
+everything else the run needs comes from the config.
+
+```bash
+spark-submit --class com.bnp.str.<module>.job.MainDriver \
+  --master "local[*]" target/wts-training-spark.jar <path-to-application.conf>
+```
+
+**What `main` does, in order** — the same seven steps in each module:
+
+| # | Step | Notes |
+|---|---|---|
+| 1 | Validate the argument | `require(args.nonEmpty, "Missing argument: path to the application.conf")` |
+| 2 | Build the SparkSession | app name from `PrimaryConstants.APPLICATION_NAME`, **not** from the config — the session exists before the config is read, because reading it needs the Hadoop configuration |
+| 3 | Read the config file | via the Hadoop FileSystem (see below) into a `Config` |
+| 4 | Build reader + writer | given `(SparkSession, Config)`, usually implicitly |
+| 5 | Start the run audit | `RunAudit.start(..., usedConf = <the config path>)` — the config path is recorded in `run_history` |
+| 6 | Run and write | `PrimaryRunner.run_<module>_runner()` → `PrimaryWriter.write(...)` |
+| 7 | Close the audit | `succeeded()`, or `failed(e)` then **rethrow** — a failed run always exits non-zero |
+
+Two deviations exist today: `tseadfwd/MainDriver` reads `args(0)` without the step-1 `require`, so a
+missing argument surfaces as `ArrayIndexOutOfBoundsException` instead of the explicit message; and
+`addons/MainDriver` has no audit (steps 5 and 7), logging and rethrowing instead.
+
+| Module | Main class | Config root block | Audit |
+|---|---|---|---|
+| tseadfwd | `com.bnp.str.tseadfwd.job.MainDriver` | `tseadfwd_app` | ✅ `run_history` |
+| addons | `com.bnp.str.addons.job.MainDriver` | `addons_app` | — |
+| ageing | `com.bnp.str.ageing.job.MainDriver` | `ageing_macroeconomic_scenarios_app` | ✅ `run_history` |
+
+### The configuration file
+
+A single [HOCON](https://github.com/lightbend/config) file, passed as `args(0)`. One file drives one
+run: it names every input, every output and every run parameter.
+
+**How it is located.** The path is opened through the **default Hadoop FileSystem**
+(`FileSystem.get(sparkContext.hadoopConfiguration)`), not through the local JVM file API. What that
+means in practice:
+
+- running `local[*]`, the default FS is the local disk, so ordinary relative or absolute paths work
+  (`localRun/ageing/application.conf`);
+- on a cluster the default FS is HDFS, so **the config must be on HDFS** — pass an `hdfs://…` or
+  cluster-absolute path. A conf shipped with `--files` lands on the executor's local disk, which is a
+  *different* filesystem, so it is not what gets read; a `file://` path is rejected outright with
+  `Wrong FS`.
+
+**How it is parsed.** With `ConfigFactory.parseReader(…)` — deliberately narrow, and worth knowing:
+
+- **the file is the entire configuration.** There is no merge with a classpath `reference.conf` /
+  `application.conf`, and no system-property or environment overrides. What you pass is what runs.
+- **substitutions are not resolved.** The production drivers do not call `.resolve()`, so HOCON
+  substitutions (`${foo.bar}`, `${?ENV_VAR}`) fail when the key is read. Repeat the value instead.
+  (The `tseadfwd` side jobs `Term0AnalysisDriver` and `EadFwdCompare` do call `.resolve()` — they are
+  analysis tools, not the production path.)
+
+**Shape.** One root block per module, named after the module; everything the run needs is nested under
+it, grouped by input, output and parameters:
+
+```hocon
+<module>_app {
+
+  <input_name>  { path = "…", sheetNames = "…" }   # one block per input
+  output        { … }                              # where results go
+  parameters    { … }                              # run parameters (tseadfwd)
+  audit         { enabled = true, table = "run_history", root = "…" }
+}
+```
+
+Each module reads its own block via `conf.getConfig(PrimaryConstants.APP_CONF)`, so two modules'
+blocks can live side by side in one file without colliding. Every key name is declared as a constant
+in the module's `utility/PrimaryConstants`, never inline at the use site — so the config surface of a
+module is readable from that one file.
+
+**Required vs optional.** Keys are read with `getString`/`getBoolean`, which throw
+`ConfigException.Missing` at startup if absent — a typo fails the run immediately rather than halfway
+through. Optional keys are guarded with `hasPath` and documented as optional in the module's
+configuration table (for example `ageing`'s `output.macroeconomic.csv_path`, which falls back to a
+derived path).
+
+The three working examples are `localRun/{tseadfwd,addons,ageing}/application.conf`; each module's
+`### Configuration` section below is the reference for its keys.
 
 ## Build (repo-wide)
 
@@ -75,10 +173,9 @@ mvn clean package -DskipTests      # -> target/wts-training-spark.jar (fat jar; 
 ```
 
 Scala 2.12.18 · Spark 3.5.4 · Java 8 · Maven. Every job takes one argument — the path to an
-`application.conf` — read via Hadoop FileSystem, so a local path, a `--files`-shipped conf, or an HDFS
-path all work. On a cluster, drop `--master local[*]`: `spark-submit` provides the master and the
-session manager adapts automatically. The jar's default main class is
-`com.bnp.str.tseadfwd.job.MainDriver`.
+`application.conf` (see [Contract interface](#contract-interface)).
+On a cluster, drop `--master local[*]`: `spark-submit` provides the master and the session manager
+adapts automatically. The jar's default main class is `com.bnp.str.tseadfwd.job.MainDriver`.
 
 > On Windows a harmless `Failed to delete temp dir` stack trace may print at JVM shutdown *after* the
 > output is written; set `HADOOP_HOME` with `winutils.exe` to silence it.
