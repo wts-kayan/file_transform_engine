@@ -14,7 +14,8 @@ object PrimaryConstants {
 
   val CENTRAL = "Central"
 
-  val COL_DATE = "date"
+  val COL_DATE = "Date"
+  val COL_SCENARIO = "scenario"
 
   val PROJECTION_QUARTERS = 12
 

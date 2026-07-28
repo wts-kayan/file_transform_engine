@@ -44,11 +44,9 @@ object MainDriver {
     try {
       val aged = new PrimaryRunner(primaryReader).run_ageing_runner()
 
-      log.info("Writing aged scenarios (Excel workbook + one CSV per scenario)")
-      primaryReader.scenarioNames.foreach { scenario =>
-        primaryWriter.write(aged(scenario), scenario)
-        primaryWriter.writeCsv(aged(scenario), scenario)
-      }
+      log.info("Writing aged scenarios (Excel workbook + a single CSV holding every scenario)")
+      primaryReader.scenarioNames.foreach(scenario => primaryWriter.write(aged(scenario), scenario))
+      primaryWriter.writeCsv(primaryReader.scenarioNames.map(scenario => scenario -> aged(scenario)))
 
       audit.succeeded()
 

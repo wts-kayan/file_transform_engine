@@ -12,12 +12,13 @@ class PrimaryWriter()(implicit sparkSession: SparkSession, conf: Config) {
   def write(dataframe: DataFrame, scenario: String): Unit =
     PrimaryUtilities.writeScenario(dataframe, outputPath, scenario)
 
-  def writeCsv(dataframe: DataFrame, scenario: String): Unit =
-    PrimaryUtilities.writeScenarioCsv(dataframe, csvPathFor(scenario))
+  /** Writes all the scenarios into a single CSV, each row tagged with its scenario. */
+  def writeCsv(scenarios: Seq[(String, DataFrame)]): Unit =
+    PrimaryUtilities.writeScenariosCsv(scenarios, csvPath)
 
-  private def csvPathFor(scenario: String): String = {
+  private def csvPath: String = {
     val base = outputPath.replaceAll(PrimaryConstants.XLSX_EXTENSION_REGEX, "")
-    s"${base}_$scenario.${PrimaryConstants.CSV_EXTENSION}"
+    s"$base.${PrimaryConstants.CSV_EXTENSION}"
   }
 
 }
