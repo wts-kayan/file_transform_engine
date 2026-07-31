@@ -128,3 +128,63 @@ Full `<spark-opts>` (A + B):
 - Warehouse path is HDFS (`hdfs://hahdfsnameservice/...`) on both clusters, so the classic
   `FileOutputCommitter` is the correct committer here anyway; the S3A committer stack on INT was a
   mismatch for an HDFS target.
+
+---
+
+## Message pour ouvrir un ticket bug (admins Cloudera)
+
+> À copier-coller dans l'outil de ticketing.
+
+**Titre :** [INT] Divergence de configuration Spark avec la PROD — `spark.sql.sources.commitProtocolClass` provoque des doublons dans `dbiris.run_history`
+
+**Priorité :** Moyenne · **Cluster :** Intégration (CDH-7.1.9, CDS 3) · **Composant :** Spark 3 / commit protocol
+
+**Description :**
+
+Sur le cluster d'**intégration**, le job Spark `AgeingMacroeconomicScenarios` (Oozie, deploy-mode
+`cluster`) écrit **deux lignes pour le même `run_id`** dans la table Hive externe ORC
+`dbiris.run_history` : une ligne `status=RUNNING` (écrite au démarrage) et une ligne `status=SUCCESS`
+(écrite à la fin). En **production**, le même code écrit **une seule ligne** (la ligne finale remplace
+la ligne `RUNNING` en place).
+
+**Cause identifiée :** le job s'appuie sur le *dynamic partition overwrite* de Spark pour remplacer la
+partition `run_id=<id>` en place. En INT, la variable `spark.sql.sources.commitProtocolClass` est
+positionnée sur le committer objet/cloud `org.apache.spark.internal.io.cloud.PathOutputCommitProtocol`,
+qui **ne supprime pas** la partition cible avant d'écrire : le fichier `RUNNING` est conservé et le
+fichier `SUCCESS` est ajouté à côté → deux fichiers ORC → deux lignes. En PROD, cette variable est
+**non positionnée** (`<unset>` → committer par défaut `SQLHadoopMapReduceCommitProtocol`), qui supprime
+bien la partition → une seule ligne.
+
+**Différence de configuration à corriger (aligner INT sur PROD) :**
+
+| Paramètre | INT (actuel) | PROD (cible) | Action demandée |
+|---|---|---|---|
+| `spark.sql.sources.commitProtocolClass` | `org.apache.spark.internal.io.cloud.PathOutputCommitProtocol` | `<unset>` (défaut `SQLHadoopMapReduceCommitProtocol`) | **Retirer l'override** sur INT |
+| `spark.hadoop.fs.s3a.committer.name` | `directory` | *absent* | Retirer (parité) |
+| `spark.iceberg.enabled` / `iceberg.engine.hive.enabled` | `true` | *absent* | Retirer (parité) |
+| `spark.sql.sources.partitionOverwriteMode` | `dynamic` | `dynamic` | Ne pas toucher |
+| `mapreduce.fileoutputcommitter.algorithm.version` | `1` | `1` | Ne pas toucher |
+
+> À noter : le `SparkConf` complet fait **90 entrées** en INT contre **57** en PROD ; l'écart vient de
+> la pile committer objet (S3A) / Iceberg présente uniquement en INT, alors que l'entrepôt est HDFS
+> (`hdfs://hahdfsnameservice/...`) sur les deux clusters — le committer S3A n'est donc pas adapté à une
+> cible HDFS.
+
+**Demande :** retirer l'override `spark.sql.sources.commitProtocolClass` (=`PathOutputCommitProtocol`)
+au niveau du cluster / des defaults Spark d'INT, afin que le comportement du committer soit identique à
+la PROD. Idéalement, retirer aussi `fs.s3a.committer.name=directory` et les deux flags `iceberg` pour
+une parité complète.
+
+**Contournement déjà validé côté job** (à retirer une fois la config cluster corrigée) — passé en
+`--conf` / `<spark-opts>` Oozie, il rétablit le bon comportement :
+
+```
+--conf spark.sql.sources.commitProtocolClass=org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
+--conf spark.hadoop.mapreduce.outputcommitter.factory.scheme.hdfs=org.apache.hadoop.mapreduce.lib.output.FileOutputCommitterFactory
+--conf spark.sql.sources.partitionOverwriteMode=dynamic
+```
+
+**Vérification après correction :** un seul fichier `part-*.orc` sous
+`.../run_history/module_name=ageing/run_id=<id>/`, et la requête
+`SELECT run_id, COUNT(*) FROM dbiris.run_history WHERE module_name='ageing' GROUP BY run_id HAVING COUNT(*)>1`
+ne renvoie aucune ligne pour les runs postérieurs au changement.
