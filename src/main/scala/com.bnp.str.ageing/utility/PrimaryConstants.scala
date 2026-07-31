@@ -7,6 +7,7 @@ object PrimaryConstants {
 
   val MACRO_INPUT_PATH = "macroeconomic.path"
   val OUTPUT_PATH = "output.macroeconomic.path"
+  val OUTPUT_CSV_PATH = "output.macroeconomic.csv_path"
   val INITIAL_AS_OF_DATE = "as_of_date.initial"
   val AGEING_AS_OF_DATE = "as_of_date.ageing"
 
@@ -14,7 +15,8 @@ object PrimaryConstants {
 
   val CENTRAL = "Central"
 
-  val COL_DATE = "date"
+  val COL_DATE = "Date"
+  val COL_SCENARIO = "scenario"
 
   val PROJECTION_QUARTERS = 12
 
