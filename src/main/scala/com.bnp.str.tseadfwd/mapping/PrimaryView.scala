@@ -39,8 +39,16 @@ object PrimaryView {
    * cumulative product negative. The documented `CRD == 0` guard misses it because CRD lands on a
    * tiny non-zero value. When RA crosses this cap we treat the book as run off and FREEZE the curve
    * (computeRa stops -> termSeries holds the last good value flat). See OPEN_QUESTIONS Q26.
+   *
+   * Every RA function takes the cap as a parameter defaulting to this value. Passing
+   * [[NO_RUNOFF_CAP]] instead disables the freeze, which — together with `vectorFactored`'s
+   * `emitNegative` — is what lets a NEGATIVE `EAD_RA_RATE` reach the output for the data-quality
+   * rule to report. Driven by `parameters.allow_negative_ead_ra_rate` (default false).
    */
   val RUNOFF_RA_CAP = 1.0
+
+  /** Cap value that disables the run-off freeze entirely (no RA is ever "too large"). */
+  val NO_RUNOFF_CAP: Double = Double.PositiveInfinity
 
   /** Expected monthly input length (30y horizon = 30*12 + 1). Schema preamble: a shorter series is
    *  forward-filled to this length with its last month's value (see `padForward`). */
@@ -127,9 +135,10 @@ object PrimaryView {
                  raStat: Array[Double],
                  raFi: Array[Double],
                  re: Array[Double],
-                 freq: Frequency
+                 freq: Frequency,
+                 raCap: Double = RUNOFF_RA_CAP
                ): Vector[Double] = freq match {
-    case Yearly => PrimaryViewYearly.centralRa(crd, raStat, raFi, re) // standalone yearly core
+    case Yearly => PrimaryViewYearly.centralRa(crd, raStat, raFi, re, raCap) // standalone yearly core
     case Quarterly => computeRa(freq) { period =>
       (for {
         c <- aggregate(crd, period, freq, isCrd = true)
@@ -137,7 +146,7 @@ object PrimaryView {
         f <- aggregate(raFi, period, freq, isCrd = false)
         r <- aggregate(re, period, freq, isCrd = false)
       } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> exposure run off, no further loss
-      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+      ).filter(_ < raCap) // RA >= cap (run-off cliff) -> None -> freeze at last good value
     }
   }
 
@@ -146,15 +155,16 @@ object PrimaryView {
    *   RA_i = -RA_STAT_i / CRD_i      — **FI and RE are NOT included for FWL=NO**.
    * Contrast `centralRa`, which is the FWL=YES Central case (STAT + FI + RE).
    */
-  def statOnlyRa(crd: Array[Double], raStat: Array[Double], freq: Frequency): Vector[Double] =
+  def statOnlyRa(crd: Array[Double], raStat: Array[Double], freq: Frequency,
+                 raCap: Double = RUNOFF_RA_CAP): Vector[Double] =
     freq match {
-      case Yearly => PrimaryViewYearly.statOnlyRa(crd, raStat) // standalone yearly core
+      case Yearly => PrimaryViewYearly.statOnlyRa(crd, raStat, raCap) // standalone yearly core
       case Quarterly => computeRa(freq) { period =>
         (for {
           c <- aggregate(crd, period, freq, isCrd = true)
           s <- aggregate(raStat, period, freq, isCrd = false)
         } yield if (c == 0.0) 0.0 else -s / c
-        ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+        ).filter(_ < raCap) // RA >= cap (run-off cliff) -> None -> freeze at last good value
       }
     }
 
@@ -182,7 +192,8 @@ object PrimaryView {
                   crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
                   freq: Frequency,
                   deltaAt: Int => Double,
-                  shockSign: Double
+                  shockSign: Double,
+                  raCap: Double = RUNOFF_RA_CAP
                 ): Vector[Double] = computeRa(freq) { period =>
     // QUARTERLY only. The yearly non-Central path is the standalone pure-stress
     // [[PrimaryViewYearly.scenarioRa]] (= centralRa on the stress leg), dispatched in PrimaryMapper.
@@ -205,7 +216,7 @@ object PrimaryView {
         statDet + fireBaseDet + shockSign * (shockFi + shockRe) * deltaAt(period)
       }
     }
-    ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+    ).filter(_ < raCap) // RA >= cap (run-off cliff) -> None -> freeze at last good value
   }
 
   /** Build the RA prefix: keep periods while the window is valid and term <= horizon. */
@@ -226,15 +237,24 @@ object PrimaryView {
 
   /**
    * Cumulative product of (1 - RA). Emitted value is capped at 1 (an exposure factor can't exceed 1).
-   * A NEGATIVE running product is reported as 1 (treat a sub-zero result as "full exposure", per
-   * request). NOTE: this lower backstop is currently unreachable — the RUNOFF_RA_CAP=1.0 guard
-   * truncates the RA series at the first RA >= 1, so every (1-RA) factor stays > 0 and the product
-   * never goes negative; it only matters if that truncation is ever relaxed. `acc` keeps the true
-   * running product so subsequent terms still compound correctly.
+   *
+   * `emitNegative` decides what happens BELOW zero:
+   *  - false (default) — a NEGATIVE running product is reported as 1 (treat a sub-zero result as
+   *    "full exposure", per the original request). With the default [[RUNOFF_RA_CAP]] this backstop
+   *    is unreachable anyway: the RA series is truncated at the first RA >= 1, so every (1-RA)
+   *    factor stays > 0 and the product never goes negative.
+   *  - true — the true running product is emitted, so a negative `EAD_RA_RATE` reaches the output
+   *    and the data-quality rule `R02` can report it. Only meaningful together with
+   *    [[NO_RUNOFF_CAP]]; with the cap in place there is still nothing negative to emit.
+   *
+   * `acc` always keeps the true running product, so subsequent terms compound correctly either way.
    */
-  def vectorFactored(ra: Vector[Double]): Vector[Double] = {
+  def vectorFactored(ra: Vector[Double], emitNegative: Boolean = false): Vector[Double] = {
     var acc = 1.0
-    ra.map { x => acc *= (1.0 - x); if (acc < 0.0) 1.0 else math.min(1.0, acc) }
+    ra.map { x =>
+      acc *= (1.0 - x)
+      if (acc < 0.0 && !emitNegative) 1.0 else math.min(1.0, acc)
+    }
   }
 
   /**
