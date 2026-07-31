@@ -1,6 +1,7 @@
 // Package declaration which organizes the code modules, similar to a folder structure.
 package com.bnp.str.tseadfwd.sessionmanager
 
+import com.bnp.str.utilities.SparkConfLogger
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
@@ -64,10 +65,13 @@ object SparkSessionManager {
           .config("spark.sql.autoBroadcastJoinThreshold", 1073741824L)
       }
 
-    tuned
+    // getOrCreate manages resource efficiency and ensures a single session per JVM.
+    val session = tuned
       .enableHiveSupport()
       .getOrCreate()
-    // getOrCreate manages resource efficiency and ensures a single session per JVM.
+
+    SparkConfLogger.logEffectiveConf(session)
+    session
   }
 
 }

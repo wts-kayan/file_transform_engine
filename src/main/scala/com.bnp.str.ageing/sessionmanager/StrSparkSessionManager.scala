@@ -1,5 +1,6 @@
 package com.bnp.str.ageing.sessionmanager
 
+import com.bnp.str.utilities.SparkConfLogger
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
@@ -36,9 +37,12 @@ object StrSparkSessionManager {
           .config("spark.sql.autoBroadcastJoinThreshold", 1073741824L)
       }
 
-    tuned
+    val session = tuned
       .enableHiveSupport()
       .getOrCreate()
+
+    SparkConfLogger.logEffectiveConf(session)
+    session
   }
 
 }
