@@ -4,6 +4,7 @@
 **Symptom:** two rows share the same `run_id` — one `status = RUNNING` (null `end_date`/`duration`)
 and one `status = SUCCESS` (populated `end_date`/`duration`).
 **Scope:** reproduces on the Cloudera integration cluster; **not** reproducible on production.
+**Status:** **confirmed** by comparing the captured `SparkConf` of both clusters (see § 3).
 
 ---
 
@@ -93,28 +94,36 @@ that **dynamic partition overwrite is not supported / not equivalent** to the cl
 pre-existing partition data is not cleaned. Applied to `run_history`, "not cleaned" means the
 `RUNNING` row from `start()` is left behind when `succeeded()` writes the final row.
 
-### Config evidence (from the captured `SparkConf` dump)
+### Config evidence — the two `SparkConf` dumps side by side
 
-The provided YARN container log shows this cluster runs with the cloud committer and S3A committer
-wiring — the settings that flip the behaviour away from production:
+The captured driver-log `SparkConf` from **both** clusters isolates a single decisive difference:
 
-```
-spark.sql.sources.partitionOverwriteMode   = dynamic
-spark.sql.sources.commitProtocolClass      = org.apache.spark.internal.io.cloud.PathOutputCommitProtocol
-mapreduce.fileoutputcommitter.algorithm.version = 1
-spark.hadoop.fs.s3a.committer.name         = directory
-```
+| Setting | **Production** (works) | **Cloudera integration** (duplicates) |
+|---|---|---|
+| `spark.sql.sources.partitionOverwriteMode` | `dynamic` | `dynamic` |
+| **`spark.sql.sources.commitProtocolClass`** | **`<unset>`** → default `SQLHadoopMapReduceCommitProtocol` | **`org.apache.spark.internal.io.cloud.PathOutputCommitProtocol`** |
+| `spark.hadoop.fs.s3a.committer.name` | *(absent)* | `directory` |
+| `spark.iceberg.enabled` / `iceberg.engine.hive.enabled` | *(absent)* | `true` / `true` |
+| `spark.sql.warehouse.dir` | `hdfs://hahdfsnameservice/...` | `hdfs://hahdfsnameservice/...` |
+| Spark version | `3.3.2.3.3.7191000.0-54` | CDS 3 (CDH-7.1.9 parcel) |
+| `full SparkConf` size | **57 entries** | **90 entries** |
 
-- `commitProtocolClass = PathOutputCommitProtocol` is the smoking gun — this is **not** the Spark
-  default, and it is almost certainly injected at the cluster / Oozie / Spark-defaults level on this
-  environment, not by the application (the app never sets it).
-- `fs.s3a.committer.name = directory` + `PathOutputCommitProtocol` are the S3A "zero-rename"
-  committer stack. They are being applied even though the warehouse is HDFS
-  (`spark.sql.warehouse.dir = hdfs://hahdfsnameservice/...`), which is itself a misconfiguration for
-  an HDFS target and changes commit semantics vs. production.
-- `partitionOverwriteMode = dynamic` is present on **both** clusters (the app forces it in
-  `StrSparkSessionManager`), so the overwrite *mode* is **not** the differentiator — the **commit
-  protocol** is.
+Reading the table row by row:
+
+- **`partitionOverwriteMode = dynamic` is identical on both clusters** (the app forces it in
+  `StrSparkSessionManager`, line 17). So the overwrite *mode* is **not** the differentiator.
+- **`commitProtocolClass` is the smoking gun.** Production logs it as **`<unset>`** — Spark then uses
+  its default `SQLHadoopMapReduceCommitProtocol` (classic `FileOutputCommitter`), which *deletes* the
+  target partition on a dynamic overwrite → replace-in-place works → **1 row**. The integration
+  cluster sets it to **`PathOutputCommitProtocol`** (the cloud/S3A committer), which does not → the
+  `RUNNING` file is left behind → **2 rows**. This is exactly the mechanism in the table above.
+- The integration cluster's extra `fs.s3a.committer.name = directory`, the Iceberg flags, and the
+  jump from **57 → 90** conf entries all show that environment layers on an object-store / cloud
+  committer stack (applied even though the warehouse is HDFS — itself a misconfiguration for an HDFS
+  target) that production simply does not have.
+
+Because the **only** commit-relevant difference between a working and a failing run is
+`commitProtocolClass`, the root cause in § 1 is **confirmed**, not merely hypothesised.
 
 ---
 
@@ -223,11 +232,13 @@ belt-and-braces guard while (1) rolls out.
 
 ## 7. Why production is unaffected
 
-Production does not inject `PathOutputCommitProtocol` — it uses Spark's default
+Production does not inject `PathOutputCommitProtocol` — its `SparkConf` logs
+`spark.sql.sources.commitProtocolClass = <unset>`, so Spark uses its default
 `SQLHadoopMapReduceCommitProtocol` with the classic `FileOutputCommitter`. There, a dynamic partition
 overwrite deletes the `run_id=<id>` partition before committing the final file, so the `RUNNING` file
 is replaced and exactly one row survives. Same application code, same `partitionOverwriteMode =
-dynamic`; the **only** behavioural difference is the environment-supplied commit protocol.
+dynamic` (both dumps show it); the **only** commit-relevant difference is the environment-supplied
+commit protocol — `<unset>` in production vs. `PathOutputCommitProtocol` on the integration cluster.
 
 ---
 
