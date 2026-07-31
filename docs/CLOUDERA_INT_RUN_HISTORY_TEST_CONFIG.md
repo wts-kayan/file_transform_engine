@@ -141,7 +141,12 @@ Full `<spark-opts>` (A + B):
 
 **Description :**
 
-Sur le cluster d'**intégration**, le job Spark `AgeingMacroeconomicScenarios` (Oozie, deploy-mode
+**Contexte :** nous constatons un **comportement différent entre les environnements PROD et Suite**
+(intégration) pour un **même code applicatif** et un **même déploiement** : le job se comporte
+correctement en PROD mais produit des doublons en Suite. L'écart provient uniquement de la
+configuration Spark du cluster (committer), détaillée ci-dessous.
+
+Sur le cluster d'**intégration (Suite)**, le job Spark `AgeingMacroeconomicScenarios` (Oozie, deploy-mode
 `cluster`) écrit **deux lignes pour le même `run_id`** dans la table Hive externe ORC
 `dbiris.run_history` : une ligne `status=RUNNING` (écrite au démarrage) et une ligne `status=SUCCESS`
 (écrite à la fin). En **production**, le même code écrit **une seule ligne** (la ligne finale remplace
