@@ -202,8 +202,24 @@ object PrimaryUtilities {
     val path = addonInputConfig.getString("path")
     val sheetName = addonInputConfig.getString("sheetNames")
 
+    readExcelSheet(path, sheetName, label = tableName)
+  }
+
+  /**
+   * Read ONE sheet of a workbook with the locale-safe options every Excel input here relies on.
+   *
+   * Split out of [[readDataFrameFromExcel]] so a sheet can be read without a conf block naming it —
+   * which is what [[com.bnp.str.tseadfwd.reader.RaSheetDiscovery]] needs: it finds the sheets in the
+   * workbook itself, so there is no `tableName` to look up. Both paths share these options, so a
+   * discovered sheet parses exactly like a configured one.
+   *
+   * @param label what to call this read in the log (a conf key, or "discovered")
+   */
+  def readExcelSheet(path: String, sheetName: String, label: String)
+                    (implicit sparkSession: SparkSession): DataFrame = {
+
     log.info(
-      s"Reading $tableName Excel file from path: $path, sheet: $sheetName"
+      s"Reading $label Excel file from path: $path, sheet: $sheetName"
     )
 
     val rawdf = sparkSession.read

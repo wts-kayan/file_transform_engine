@@ -1,5 +1,9 @@
 # Dynamic RA sheet loading — feasibility analysis
 
+> **Status: implemented.** Option **C** below, with the safety rules of §5. What was actually built,
+> and the one thing the analysis did not foresee, are in [§9](#9-as-implemented) at the end. The rest
+> of this document is the reasoning that led there, kept as written.
+
 **Question.** The RA input workbook holds one sheet per entity (`RA_BCEF`, `RA_BGL`, `RA_BNL`, …).
 Today each one is named in `application.conf` *and* in the code. When the business adds an entity,
 can the engine pick the new sheet up on its own, with no code change?
@@ -205,3 +209,69 @@ of the work is the safety rules in §5.
 a scenario without a conf edit. It is deliberately **not** part of this proposal: scenario names carry
 meaning in the engine (`Central` is the baseline every shock is measured against, and the output
 `SCENARIO_ID` codes are fixed), so discovering them needs its own analysis.
+
+---
+
+## 9. As implemented
+
+### The shape
+
+```hocon
+RA {
+  paths          = ["…/Inputs_RA_v3.xlsx", "…/Inputs_RA.xlsx"]   # in order; first wins a duplicate
+  sheetPattern   = "^RA[_ ].*"                                    # gate 1: the NAME
+  requireColumns = ["PERIMETER","SEGMENT","RATE_TYPE","FWL_TYPE","METRIC"]   # gate 2: the CONTENT
+  includeSheets  = []
+  excludeSheets  = []
+}
+```
+
+| File | What it does |
+|---|---|
+| `reader/RaSheetDiscovery.scala` | `RaSheetConfig` (the block, `None` when absent), `sheetNames` (one workbook, via spark-excel), `select` (**pure**: filter, exclusions, duplicates), `missingColumns` (gate 2) |
+| `reader/PrimaryReader.scala` | `raInput` picks `raInputDiscovered` or the unchanged `raInputConfigured` |
+| `utility/PrimaryUtilities.scala` | `readExcelSheet(path, sheet, label)` — the locale-safe options, split out so a sheet can be read with no conf key naming it |
+| `mapping/PrimaryMapper.scala` | the two new controls: `RA.duplicateKeys` (FAIL), `RA.perimeters` (WARN) |
+
+`select` being pure is what makes the awkward cases cheap to test — a divider tab, an entity spelled
+lowercase, the same sheet in two workbooks — without a single Excel file.
+
+### The thing the analysis missed
+
+`include` is a **HOCON keyword**. A block containing `include = []` does not merely ignore the key —
+the *whole configuration file* fails to parse:
+
+```
+ConfigException$Parse: Reader: 32: include keyword is not followed by a quoted string, but by: '='
+```
+
+Hence `includeSheets` / `excludeSheets` in the conf (the Scala fields keep the short names).
+
+### Verified
+
+- 31 new tests (`RaSheetDiscoverySpec` 16, `RaSheetReaderSpec` 10, `RaDataControlSpec` 5); the whole
+  repo suite is green at **121**. `RaSheetReaderSpec` writes real `.xlsx` fixtures reproducing the
+  production oddities — the `Inputs RA ->` divider, a lowercase `ra_bgl`, a tab that matches the
+  pattern but is not an RA table, and `RA_BCEF` present in two workbooks.
+- A production run on the real conf: identical output, **byte for byte** (`md5 99bd7eff…` before and
+  after), with the reader now reporting
+  `RA sheets selected: RA_BCEF; skipped: RA_BCEF (already loaded from …/Inputs_RA_v3.xlsx)`.
+- The end-to-end story, on the real pipeline, with a new entity sheet (`RA_DEMO`, built from the real
+  BCEF sheet) added to a workbook and nothing else touched:
+
+  ```
+  RA sheets selected: RA_BCEF, RA_DEMO; skipped: RA_BCEF (already loaded from …/Inputs_RA_v3.xlsx)
+  RA sheet 'RA_DEMO' loaded from …/Inputs_RA_DEMO.xlsx
+  DATA CONTROL - WARN (14 checks: 0 FAIL, 1 WARN)
+    [WARN] RA.perimeters - perimeter(s) loaded from RA but absent from PARAMETRAGE,
+                           so they produce NO output: DEMO
+  ```
+
+  The sheet was found and read with no code and no conf key naming it, and the run said plainly why
+  the new entity produced nothing — which is the whole point of the WARN.
+
+### Not done
+
+`maxRowsInMemory` streaming (§5 risk 8) is not wired: at the sizes measured here (0.1–0.2 MB, 49×366)
+each sheet read costs a fraction of a second. Measure on the production workbook before enabling
+discovery over a large file — spark-excel re-parses the workbook once per sheet.

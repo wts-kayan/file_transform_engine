@@ -225,11 +225,14 @@ For each **matrix** (PARAMETRAGE group: perimeter × output segment × rate type
 
 All paths/sheets come from the conf block `tseadfwd_app`:
 
-- **RA_BCEF / RA_BGL / RA_BNL / RA_FORTIS / RA_LS** — monthly RA series per perimeter. Columns:
-  `PERIMETER, SEGMENT, RATE_TYPE, FWL_TYPE, METRIC, M1..Mn`; `FWL_TYPE ∈ {BASELINE, STRESS (+),
-  STRESS (-)}`, `METRIC ∈ {CRD, RA STAT, RA FI, RE}`. Present sheets are unioned; missing ones skipped
-  with a warning. **The RA lookup key includes `PERIMETER`**, so the same segment name (e.g.
-  `MORTGAGE`) across entities does not collide.
+- **RA** — monthly RA series per perimeter, **one sheet per entity, discovered in the workbook**.
+  Columns: `PERIMETER, SEGMENT, RATE_TYPE, FWL_TYPE, METRIC, M1..Mn`; `FWL_TYPE ∈ {BASELINE,
+  STRESS (+), STRESS (-)}`, `METRIC ∈ {CRD, RA STAT, RA FI, RE}`. Loaded sheets are unioned; missing
+  or unreadable ones are skipped with a warning. **The RA lookup key includes `PERIMETER`**, so the
+  same segment name (e.g. `MORTGAGE`) across entities does not collide.
+  See [Dynamic RA sheets](#dynamic-ra-sheets) — a new entity tab needs no code and no conf change.
+- **RA_BCEF / RA_BGL / RA_BNL / RA_FORTIS / RA_LS** *(legacy)* — one block per entity, each naming
+  its sheet. Read **only** when the `RA` block is absent, so a conf written before discovery still runs.
 - **MACRO_VARIABLE** — scenario workbook, **one sheet per scenario** (`Central/Adverse/Optimistic/Extreme`),
   a `Date` column (e.g. `2025Q4`) and one column per macro variable (`IR_10Y_FR`, …).
 - **PARAMETRAGE** — matrix definitions: `PERIMETER, SEGMENT, RATE_TYPE, AGGREGATION,
@@ -275,6 +278,7 @@ Input blocks and output/job blocks live at the root; engine **run parameters** a
 | `parameters.allow_negative_ead_ra_rate` | let a negative `EAD_RA_RATE` reach the output instead of reporting it as 1 (see [Business coherence checks](#business-coherence-checks)) |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output settings |
 | `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job |
+| `RA.{paths,sheetPattern,requireColumns,includeSheets,excludeSheets}` | RA sheet discovery (see [Dynamic RA sheets](#dynamic-ra-sheets)) |
 | `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job |
 | `COHERENCE_CHECK.{enabled,htmlPath,sourcePath,rules.*}` | business coherence-check rules + HTML report |
 
@@ -287,6 +291,39 @@ the macro delta is held flat. A blank cell falls back to `last_quarter_projectio
 formulas as production. `terms` = the output terms to break down; `enginePath` = (optional) real
 `TS_EAD_FWD` output to **reconcile** against (each `EAD` tagged `MATCH` / `DIFF` / `MISSING`, so a bad
 input parse surfaces as a `DIFF`).
+
+### Dynamic RA sheets
+
+The RA workbook holds one sheet per entity, and the business adds entities. The engine **finds the
+sheets in the workbook** instead of having them named in the code, so a new `RA_XYZ` tab is picked up
+on the next run — no rebuild, no conf edit. It works because the entity is a **column inside the
+sheet** (`PERIMETER`), never the sheet name: the frames are unioned by name and PARAMETRAGE decides
+which perimeters produce matrices.
+
+```hocon
+RA {
+  paths          = ["…/Inputs_RA_v3.xlsx", "…/Inputs_RA.xlsx"]  # in order; first wins a duplicate sheet
+  sheetPattern   = "^RA[_ ].*"                                   # gate 1: the NAME (case-insensitive)
+  requireColumns = ["PERIMETER","SEGMENT","RATE_TYPE","FWL_TYPE","METRIC"]  # gate 2: the CONTENT
+  includeSheets  = []   # load these whatever the pattern says
+  excludeSheets  = []   # never load these (e.g. a retired entity)
+}
+```
+
+Two gates, because neither is enough alone: real workbooks carry tabs whose **name** looks like data
+(a divider literally called `Inputs RA ->`) and tabs that match a pattern but are **not** RA tables. A
+sheet failing either gate is skipped with its reason on one log line, not fed to the union and not
+fatal. `includeSheets` / `excludeSheets` are spelled with the suffix because `include` is a HOCON
+keyword — a bare `include = [...]` makes the whole file fail to parse.
+
+Removing the `RA` block falls back to the per-entity `RA_*` blocks.
+
+Two pre-calculation controls exist for what discovery makes possible:
+
+| Check | Severity | Why |
+|---|---|---|
+| `RA.duplicateKeys` | **FAIL** | The same series read twice (an entity loaded from two workbooks) would be *silently* halved — `collectRa` builds a `Map`, so one of each pair disappears and the survivor is whichever came last |
+| `RA.perimeters` | **WARN** | An entity loaded from RA that PARAMETRAGE never references produces no output. Without this, "the business added a sheet and the run ignored it" is invisible |
 
 ### Business coherence checks
 
