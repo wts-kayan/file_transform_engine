@@ -50,8 +50,10 @@ object PrimaryViewYearly {
 
   // ----- RA detail (own copy of each formula) --------------------------------
 
-  /** FWL=YES Central (and the base of every scenario): `RA = -(RA_STAT + RA_FI + RE)/CRD`. */
-  def centralRa(crd: Array[Double], raStat: Array[Double], raFi: Array[Double], re: Array[Double]): Vector[Double] =
+  /** FWL=YES Central (and the base of every scenario): `RA = -(RA_STAT + RA_FI + RE)/CRD`.
+   *  `raCap` is the run-off freeze threshold (see [[PrimaryView.RUNOFF_RA_CAP]]). */
+  def centralRa(crd: Array[Double], raStat: Array[Double], raFi: Array[Double], re: Array[Double],
+                raCap: Double = RUNOFF_RA_CAP): Vector[Double] =
     computeRa { period =>
       (for {
         c <- aggregate(crd, period, isCrd = true)
@@ -59,17 +61,18 @@ object PrimaryViewYearly {
         f <- aggregate(raFi, period, isCrd = false)
         r <- aggregate(re, period, isCrd = false)
       } yield if (c == 0.0) 0.0 else -(s + f + r) / c // CRD==0 -> run off, no further loss
-      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+      ).filter(_ < raCap) // RA >= cap (run-off cliff) -> None -> freeze at last good value
     }
 
   /** FWL=NO: `RA = -RA_STAT/CRD` — FI and RE are excluded. */
-  def statOnlyRa(crd: Array[Double], raStat: Array[Double]): Vector[Double] =
+  def statOnlyRa(crd: Array[Double], raStat: Array[Double],
+                 raCap: Double = RUNOFF_RA_CAP): Vector[Double] =
     computeRa { period =>
       (for {
         c <- aggregate(crd, period, isCrd = true)
         s <- aggregate(raStat, period, isCrd = false)
       } yield if (c == 0.0) 0.0 else -s / c
-      ).filter(_ < RUNOFF_RA_CAP)
+      ).filter(_ < raCap)
     }
 
   /**
@@ -101,7 +104,8 @@ object PrimaryViewYearly {
   def scenarioRa(
                   crdBase: Array[Double], raStatBase: Array[Double], raFiBase: Array[Double], reBase: Array[Double],
                   crdLeg: Array[Double], raFiLeg: Array[Double], reLeg: Array[Double],
-                  oatDeltaAt: Int => Double
+                  oatDeltaAt: Int => Double,
+                  raCap: Double = RUNOFF_RA_CAP
                 ): Vector[Double] =
     computeRa { period =>
       (for {
@@ -126,7 +130,7 @@ object PrimaryViewYearly {
           val fireScenDet = fireBaseDet - ((fireBaseDet * sensFi + fireBaseDet * sensRe) * dOat) // O174-176
           statDet + fireScenDet                         // O179-182
         }
-      ).filter(_ < RUNOFF_RA_CAP) // RA >= 1 (run-off cliff) -> None -> freeze at last good value
+      ).filter(_ < raCap) // RA >= cap (run-off cliff) -> None -> freeze at last good value
     }
 
   /** Yearly period loop: keep years while the window is valid and term <= the computed horizon. */

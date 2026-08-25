@@ -73,13 +73,22 @@ class PrimaryMapper(
     if (paramsConf.hasPath("macro_delta_scale")) paramsConf.getDouble("macro_delta_scale") else 1.0
 
   /**
-   * When true, output rows whose final `EAD_RA_RATE >= 1` are EXCLUDED from the result. The factor is
-   * capped at 1 by [[PrimaryView.vectorFactored]] (and a sub-zero running product is reported as 1),
-   * so `>= 1` means exactly the *full-exposure* terms — the leading terms before any loss has
-   * accumulated, and any run-off backstop term. Default `false` (emit every term).
+   * When true, the run-off freeze ([[PrimaryView.RUNOFF_RA_CAP]]) and the negative-to-1 backstop in
+   * [[PrimaryView.vectorFactored]] are BOTH disabled, so a negative `EAD_RA_RATE` reaches the output
+   * instead of being reported as 1 (full exposure). Both are needed: the cap truncates the RA series
+   * before the cumulative product can ever go negative, so relaxing only the backstop changes nothing.
+   *
+   * Default `false` — today's validated behaviour, and what the target output was reconciled against.
+   * Set true when the business wants the sub-zero curves visible; the coherence-check rule `CR02` then
+   * has something to report. NOTE: with the freeze off, a run-off matrix keeps computing past the
+   * cliff instead of holding its last good value flat, so its whole tail changes.
    */
-  private val excludeEadRaRateGe1: Boolean =
-    if (paramsConf.hasPath("exclude_ead_ra_rate_ge_1")) paramsConf.getBoolean("exclude_ead_ra_rate_ge_1") else false
+  private val allowNegativeEadRaRate: Boolean =
+    if (paramsConf.hasPath("allow_negative_ead_ra_rate")) paramsConf.getBoolean("allow_negative_ead_ra_rate") else false
+
+  /** Run-off freeze threshold actually used by this run (see [[allowNegativeEadRaRate]]). */
+  private val raCap: Double =
+    if (allowNegativeEadRaRate) NO_RUNOFF_CAP else RUNOFF_RA_CAP
 
   /** Quarter "yyyyQq" -> ordinal (quarters since year 0); inverse is [[qLabel]]. */
   private def qOrd(q: String): Int = { val p = q.split("Q"); p(0).trim.toInt * 4 + (p(1).trim.toInt - 1) }
@@ -267,18 +276,18 @@ class PrimaryMapper(
 
     val raDetail: Vector[Double] =
       if (!usesShock) {
-        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq) else statOnlyRa(crd, raStat, freq)
+        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq, raCap) else statOnlyRa(crd, raStat, freq, raCap)
       } else freq match {
         case Yearly => // OAT-10Y sensitivity: baseline STAT + FI/RE adjusted by sensitivity×OAT spread (×O173)
-          PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDeltaFn)
+          PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDeltaFn, raCap)
         case _ =>
           val mult: Int => Double =
             if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-          scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
+          scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign, raCap)
       }
     if (raDetail.isEmpty) return Seq.empty
 
-    val vf = vectorFactored(raDetail)
+    val vf = vectorFactored(raDetail, allowNegativeEadRaRate)
     // Macro delta path (raw Rate/100 per term); only meaningful for an FWL=YES non-Central scenario.
     val deltaFn = deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon))
     def agg(a: Array[Double], p: Int, isCrd: Boolean): Double =
@@ -359,8 +368,8 @@ class PrimaryMapper(
     val ra_detail: Vector[Double] =
       if (!usesShock) {
         // FWL=YES Central -> STAT+FI+RE; FWL=NO -> RA_STAT only (per the business schema).
-        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq)
-        else statOnlyRa(crd, raStat, freq)
+        if (m.fwlApplied) centralRa(crd, raStat, raFiB, reB, freq, raCap)
+        else statOnlyRa(crd, raStat, freq, raCap)
       } else {
         // FWL=YES non-Central. Stress leg fixed by scenario: Optimistic -> STRESS(+), Adverse/Extreme -> STRESS(-).
         val (legFwl, crdLeg, fiLeg, reLeg, shockSign) =
@@ -373,12 +382,12 @@ class PrimaryMapper(
             // BASELINE; the leg supplies only FI/RE/CRD for the sensitivity, and the OAT spread makes
             // Adverse != Extreme. See YEAR_CALCULATION_SPECIFICATION.md.
             val oatDelta = oatDeltaYearly(macroData, scenName, m.macroVar, shockWindowFor(m.projectionHorizon))
-            PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDelta)
+            PrimaryViewYearly.scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, oatDelta, raCap)
           case _ =>
             // Quarterly: baseline detail + macro-weighted (Rate/100) stress-vs-baseline shock on FI+RE.
             val mult: Int => Double =
               if (applyRateToShock) deltaPath(macroData, scenName, m.macroVar, freq, shockWindowFor(m.projectionHorizon)) else (_ => 1.0)
-            scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign)
+            scenarioRa(crd, raStat, raFiB, reB, crdLeg, fiLeg, reLeg, freq, mult, shockSign, raCap)
         }
       }
 
@@ -393,7 +402,7 @@ class PrimaryMapper(
       return Seq.empty
     }
 
-    val vf = vectorFactored(ra_detail)
+    val vf = vectorFactored(ra_detail, allowNegativeEadRaRate)
 
     // Debug: show every intermediate calc per term. Skip the redundant A/O/E dumps for
     // FWL=NO matrices (all scenarios equal Central there).
@@ -407,10 +416,12 @@ class PrimaryMapper(
         buildTrace(freq, crd, raStat, raFiB, reB, ra_detail, vf))
     }
 
-    // Emit each term; when excludeEadRaRateGe1 is on, drop the full-exposure terms (EAD_RA_RATE >= 1).
-    termSeries(vf, freq).collect {
-      case (term, value) if !excludeEadRaRateGe1 || value < 1.0 =>
-        Row(m.matrixId(freq), scenCode, fmtNumber(term, 2), fmtNumber(value, 9), "") // EAD_CCF_RATE empty
+    // Emit EVERY computed term. Row removal (the full-exposure `EAD_RA_RATE >= 1` exclusion and the
+    // business coherence-check rules) is applied downstream by
+    // [[com.bnp.str.tseadfwd.coherence.CoherenceCheckMapper]], so the check report can see — and name —
+    // what it dropped. Filtering here would delete the evidence before it is ever reported.
+    termSeries(vf, freq).map { case (term, value) =>
+      Row(m.matrixId(freq), scenCode, fmtNumber(term, 2), fmtNumber(value, 9), "") // EAD_CCF_RATE empty
     }
   }
 

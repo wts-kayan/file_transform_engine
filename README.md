@@ -217,7 +217,8 @@ For each **matrix** (PARAMETRAGE group: perimeter × output segment × rate type
 | `mapping/PrimaryView` | Pure formula core (no Spark): aggregation, RA, vector-factored product, term grid. |
 | `mapping/PrimaryMapper` | Parses inputs and orchestrates `PrimaryView` into the output DataFrame. |
 | `reader/PrimaryReader`, `writer/PrimaryWriter`, `utility/PrimaryUtilities` | Excel/CSV IO, single-file collapse, locale-tolerant parsing. |
-| `validation/DataControlView` | Pre-calculation data-quality checks (labels, numeric integrity, stress legs, scenario coverage). |
+| `validation/DataControlView` | Pre-calculation **input** technical control (labels, numeric integrity, stress legs, scenario coverage). |
+| `coherence/CoherenceCheckMapper` | Post-calculation **business** rules on the output (see [Business coherence checks](#business-coherence-checks)). |
 | `sessionmanager/SparkSessionManager` | One factory for local **and** cluster (decided from the runtime, no flag). |
 
 ### Inputs
@@ -241,6 +242,7 @@ All paths/sheets come from the conf block `tseadfwd_app`:
 | `job.MainDriver` | **Production pipeline** — read inputs → compute → write `TS_EAD_FWD`. (jar default main class) |
 | `job.Term0AnalysisDriver` | Generates the per-*(matrix, scenario, term)* computation **breakdown** (Markdown + CSV), optionally **reconciled** against the real engine output. |
 | `job.EadFwdCompare` | Compares an output CSV against a target CSV (per-key error report + CSV). |
+| `job.CoherenceCheckDriver` | Regenerates the **coherence-check HTML report** from an already produced CSV (report only). |
 
 ```bash
 spark-submit --class com.bnp.str.tseadfwd.job.MainDriver \
@@ -250,6 +252,9 @@ spark-submit --class com.bnp.str.tseadfwd.job.Term0AnalysisDriver \
   --master "local[*]" target/wts-training-spark.jar localRun/tseadfwd/application.conf
 
 spark-submit --class com.bnp.str.tseadfwd.job.EadFwdCompare \
+  --master "local[*]" target/wts-training-spark.jar localRun/tseadfwd/application.conf
+
+spark-submit --class com.bnp.str.tseadfwd.job.CoherenceCheckDriver \
   --master "local[*]" target/wts-training-spark.jar localRun/tseadfwd/application.conf
 ```
 
@@ -266,9 +271,12 @@ Input blocks and output/job blocks live at the root; engine **run parameters** a
 | `parameters.apply_rate_to_shock` | scale the FWL=YES shock by the macro `Rate/100` (true) or apply it full-size (false) |
 | `parameters.debug` | log titled `show()` of inputs + a per-term trace |
 | `parameters.validation.strict` | abort the run on a data-control FAIL (true) or only warn (false) |
+| `parameters.exclude_ead_ra_rate_ge_1` | drop the full-exposure terms (`EAD_RA_RATE >= 1`) — applied by the coherence-check mapper, **after** the rules have seen them |
+| `parameters.allow_negative_ead_ra_rate` | let a negative `EAD_RA_RATE` reach the output instead of reporting it as 1 (see [Business coherence checks](#business-coherence-checks)) |
 | `TS_EAD_FWD.{format,mode,numPartition,tmpPath,tableName,singleFile}` | output settings |
 | `COMPARE.{outputPath,targetPath,stripRateType,tol,comparePath}` | `EadFwdCompare` job |
 | `TERM0_ANALYSIS.{enabled,terms,enginePath,tol,mdPath,csvPath}` | `Term0AnalysisDriver` job |
+| `COHERENCE_CHECK.{enabled,htmlPath,sourcePath,rules.*}` | business coherence-check rules + HTML report |
 
 **Projection horizon** — the FWL=YES shock-window **end** is derived **per matrix** as
 `as_of_date_quarter + PROJECTION_HORIZON` (PARAMETRAGE column, e.g. `2025Q4 + "3Y" = 2028Q4`); past it
@@ -279,6 +287,59 @@ the macro delta is held flat. A blank cell falls back to `last_quarter_projectio
 formulas as production. `terms` = the output terms to break down; `enginePath` = (optional) real
 `TS_EAD_FWD` output to **reconcile** against (each `EAD` tagged `MATCH` / `DIFF` / `MISSING`, so a bad
 input parse surfaces as a `DIFF`).
+
+### Business coherence checks
+
+Business rules on the **output** term structure, requested by the business team. Distinct from
+`validation/DataControlView`, which checks the **inputs** before the calculation. Rules are coded
+`CR<nn>` (*check rule*). Full write-up: [docs/tseadfwd/BUSINESS_COHERENCE_CHECKS.md](docs/tseadfwd/BUSINESS_COHERENCE_CHECKS.md).
+
+| Rule | Checks | Action |
+|---|---|---|
+| **CR01** | lines grouped **by `EAD_MATRIX_ID` and `SCENARIO_ID`** (one group = one curve); flagged when **every** term of the group has `EAD_RA_RATE = 1` — full exposure throughout, so the line carries no information. A single term below 1 keeps the whole group. `EAD_MATRIX_ID` ends in `_Q`/`_Y`, so a matrix's quarterly and yearly curves are two separate groups. | group **removed** from the output and listed in the report |
+| **CR02** | `EAD_RA_RATE` is strictly negative (an exposure factor must lie in `[0, 1]`) | line **and value kept** as computed, and reported. Optionally masked by a `replaceWith` token for a consumer that cannot take a negative |
+
+The split is deliberate: `coherence/CoherenceCheckMapper` never writes a row — it evaluates the rules
+and names the offending keys. The **main job** performs the removal, once, on the frame it is about to
+write, and then writes the report. The report is a single self-contained HTML file (no external
+stylesheet, script or image), written through Hadoop's FileSystem, so `htmlPath` may be local or HDFS.
+
+It **names the output file it was run on** — the file name in the title and the browser tab, the full
+path in the header block — resolved from the `TS_EAD_FWD` block exactly as the writer resolves it
+(`.csv`, `.xlsx`, or the directory marked `(part-file directory)` when `singleFile = false`); a
+standalone run names the CSV it read. Reports for several vintages of the same table land in one
+directory, so a report that does not say which file it judged says very little. The same name opens the
+run log's `COHERENCE CHECK on <file> - <verdict> ...` line.
+
+Two consequences worth knowing:
+
+- **`exclude_ead_ra_rate_ge_1` moved.** `PrimaryMapper` now emits *every* computed term; the
+  full-exposure exclusion is applied by the coherence-check mapper **after** the rules run. Previously it
+  deleted those rows inside the mapper, which is precisely what CR01 needs to see — an all-ones curve
+  had already vanished before any rule could group it. The conf key is unchanged, and so is the
+  written output.
+- **CR02 needs `parameters.allow_negative_ead_ra_rate = true` to ever fire.** By default the run-off
+  freeze truncates the RA series before the cumulative product can go negative, and a sub-zero product
+  is reported as `1` — so a negative value never reaches the output. Setting the flag disables both,
+  at the cost of run-off matrices no longer holding their last good value flat past the cliff.
+- **CR02 keeps the value, it does not mask it.** A negative rate can only appear once
+  `allow_negative_ead_ra_rate` is on, and the point of switching that on is to see the real number, so
+  the default writes it as computed. The *line* stays too — the term exists, and dropping it would
+  leave a hole in the curve. Set `rules.negative_ead_ra_rate.replaceWith = "NV"` (or any token) only
+  for a consumer that cannot take a negative; the substitution then happens **last**, after every
+  numeric filter, and the report still lists the value as computed. A token makes the cell
+  non-numeric: in-repo readers tolerate that (`EadFwdCompare` reports the key as a difference, the
+  analysis drivers as `NaN`), an external consumer may not.
+
+`CoherenceCheckDriver` re-runs the rules against an already produced CSV and rewrites the report; it
+changes nothing. Note it can only report what is still in the file — when the main run already removed
+the CR01 lines (the default), the report that names them is the one `MainDriver` wrote.
+
+The feature was first written as "business data quality"; a conf still carrying the former
+`DATA_QUALITY` block is read as a fallback, so an unconverted configuration keeps applying instead of
+being silently defaulted.
+
+Unit tests: `CoherenceCheckMapperSpec` (rules, tolerance, removal), `CheckHtmlViewSpec` (rendering, escaping).
 
 ### Validation
 

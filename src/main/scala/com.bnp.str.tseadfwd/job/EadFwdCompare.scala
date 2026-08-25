@@ -55,10 +55,14 @@ object EadFwdCompare {
               stripRateType: Boolean, tol: Double, comparePath: String): Unit = {
     import spark.implicits._
 
-    // decimal-comma string -> Double (null-safe; returns java.lang.Double so null is allowed)
+    // decimal-comma string -> Double (null-safe; returns java.lang.Double so null is allowed).
+    // A non-numeric cell yields null rather than killing the job: the coherence-check mapper may write
+    // a marker such as `NV` in place of a non-physical value, and a comparison must report that key
+    // as a difference, not fail on it.
     val toNum = udf((s: String) =>
       if (s == null || s.trim.isEmpty) null.asInstanceOf[java.lang.Double]
-      else java.lang.Double.valueOf(s.trim.replace(",", ".")))
+      else try java.lang.Double.valueOf(s.trim.replace(",", "."))
+      catch { case _: NumberFormatException => null.asInstanceOf[java.lang.Double] })
     // PERIMETER_SEGMENT_RATETYPE_(Q|Y) -> PERIMETER_SEGMENT_(Q|Y)  (drop the rate-type token)
     val stripRt = udf((id: String) => {
       val p = id.split("_")
