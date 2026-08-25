@@ -77,9 +77,11 @@ object DqSimulationApp {
 
     writeCsv(s"$outDir/TS_EAD_FWD_SIMULATED.csv", before)
 
-    // The real thing: same mapper, same settings, removal included.
+    // The real thing: same mapper, same settings, removal included. `outputFile` names the CLEANED
+    // simulation file, not the production output — the report must not claim to judge the real one.
     val outcome = new DataQualityMapper(dq)(spark)
-      .apply(before, source = s"$outDir/TS_EAD_FWD_SIMULATED.csv", runId = "simulation")
+      .apply(before, source = s"$outDir/TS_EAD_FWD_SIMULATED.csv", runId = "simulation",
+        outputFile = s"$outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv")
 
     writeCsv(s"$outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv", outcome.cleaned)
     PrimaryUtilities.writeStringToHdfs(s"$outDir/DQ_SIMULATION.html",

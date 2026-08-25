@@ -97,12 +97,28 @@ object DqHtmlView {
     val kept = report.rowsOut
     val removed = report.rowsIn - report.rowsOut
 
+    // The file the rules were run on. Named twice on purpose: the NAME next to the title, because
+    // that is what a reader checks first when several vintages of the same table sit in one
+    // directory, and the FULL PATH below, because that is what identifies it without ambiguity.
+    // Omitted entirely when unknown — a blank "Output file" line would read as a missing output.
+    val fileTitle =
+      if (report.outputFileName.isEmpty) ""
+      else s"""<span class="file">${esc(report.outputFileName)}</span> - """
+    val fileRow =
+      if (report.outputFile.isEmpty) ""
+      else s"""      <dt>Output file</dt><dd class="mono">${esc(report.outputFile)}</dd>\n"""
+    // Browser tab and print header: the file name distinguishes two reports open side by side,
+    // which "Data quality: TS_EAD_FWD" alone does not.
+    val docTitle =
+      if (report.outputFileName.isEmpty) "Data quality: TS_EAD_FWD"
+      else s"Data quality: ${report.outputFileName}"
+
     s"""<!DOCTYPE html>
        |<html lang="en">
        |<head>
        |<meta charset="utf-8"/>
        |<meta name="viewport" content="width=device-width, initial-scale=1"/>
-       |<title>Data quality: TS_EAD_FWD</title>
+       |<title>${esc(docTitle)}</title>
        |<style>
        |  :root { --line:#dfe3e8; --ink:#1c1c1c; --dim:#5b6470; --head:#f4f6f8; }
        |  * { box-sizing: border-box; }
@@ -112,6 +128,7 @@ object DqHtmlView {
        |  h1 { font-size: 1.45rem; margin: 0 0 .2rem; }
        |  h2 { font-size: 1rem; margin: 0 0 .4rem; }
        |  .sub { color: var(--dim); margin: 0 0 1.4rem; font-size: .9rem; }
+       |  .sub .file { font-family: Consolas, monospace; color: var(--ink); }
        |  .stats { display: flex; flex-wrap: wrap; gap: .6rem; margin: 0 0 1.4rem; padding: 0; list-style: none; }
        |  .stats li { border: 1px solid var(--line); border-radius: .4rem; padding: .45rem .9rem; min-width: 8rem; }
        |  .stats b { display: block; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
@@ -146,7 +163,7 @@ object DqHtmlView {
        |<body>
        |  <main>
        |    <h1>Data quality: TS_EAD_FWD ${badge(report.verdict)}</h1>
-       |    <p class="sub">${report.totalFindings} finding(s) over ${report.rowsIn} output line(s).</p>
+       |    <p class="sub">$fileTitle${report.totalFindings} finding(s) over ${report.rowsIn} output line(s).</p>
        |
        |    <ul class="stats">
        |      <li><b>${report.rowsIn}</b><span>Lines examined</span></li>
@@ -157,7 +174,7 @@ object DqHtmlView {
        |
        |    <dl>
        |      <dt>Source</dt><dd>${esc(report.source)}</dd>
-       |      <dt>Run id</dt><dd class="mono">${esc(report.runId)}</dd>
+       |$fileRow      <dt>Run id</dt><dd class="mono">${esc(report.runId)}</dd>
        |      <dt>Generated</dt><dd>${esc(report.generatedAt)}</dd>
        |      <dt>Lines</dt><dd>${report.rowsIn} examined, $kept kept ($removed removed)</dd>
        |    </dl>

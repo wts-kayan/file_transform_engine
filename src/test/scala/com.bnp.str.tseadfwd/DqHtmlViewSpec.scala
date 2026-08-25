@@ -13,8 +13,9 @@ import org.scalatest.matchers.should.Matchers
  */
 class DqHtmlViewSpec extends AnyFunSuite with Matchers {
 
-  private def report(results: Seq[DqRuleResult], rowsIn: Long = 10L, rowsOut: Long = 8L) =
-    DqReport("TS_EAD_FWD", "run-123", "2026-07-31 10:00:00", rowsIn, rowsOut, results)
+  private def report(results: Seq[DqRuleResult], rowsIn: Long = 10L, rowsOut: Long = 8L,
+                     outputFile: String = "") =
+    DqReport("TS_EAD_FWD", "run-123", "2026-07-31 10:00:00", rowsIn, rowsOut, results, outputFile)
 
   private val r01Hit = DqRuleResult(
     rule = DqRule.AllTermsEqualOne,
@@ -106,6 +107,32 @@ class DqHtmlViewSpec extends AnyFunSuite with Matchers {
     html should not include "<script>alert"
     html should include("C &amp; A")
     html should include("&quot;quoted&quot;")
+  }
+
+  test("the report names the output file it was run on — full path and file name") {
+    val html = DqHtmlView.render(report(Seq(r01Hit, r02Clean),
+      outputFile = "hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv"))
+
+    html should include("<dt>Output file</dt>")
+    html should include("hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv")
+    // the file NAME alone, next to the title and in the browser tab, where the path would not fit
+    html should include("<title>Data quality: TS_EAD_FWD_25Q4_v1.csv</title>")
+    html should include("""<span class="file">TS_EAD_FWD_25Q4_v1.csv</span>""")
+  }
+
+  test("an unknown output file leaves no blank line behind") {
+    val html = DqHtmlView.render(report(Seq(r02Clean), rowsIn = 4L, rowsOut = 4L))
+
+    html should not include "Output file"
+    html should not include """<span class="file">"""
+    html should include("<title>Data quality: TS_EAD_FWD</title>")
+  }
+
+  test("the output file name is HTML-escaped like every other cell") {
+    val html = DqHtmlView.render(report(Seq(r02Clean), outputFile = "out/<TS>&.csv"))
+
+    html should include("&lt;TS&gt;&amp;.csv")
+    html should not include "<TS>"
   }
 
   test("the verdict follows the total findings") {

@@ -67,7 +67,8 @@ object MainDriver {
         } else {
           val outcome =
             new DataQualityMapper(dq)(sparkSession)
-              .apply(df, source = outputTableName, runId = audit.runId)
+              .apply(df, source = outputTableName, runId = audit.runId,
+                outputFile = dq.outputFile) // the file this very frame is about to be written to
           logger.info(outcome.report.summaryLine)
           DqWriter.writeHtml(dq.htmlPath, outcome.report)(sparkSession)
           outcome.cleaned

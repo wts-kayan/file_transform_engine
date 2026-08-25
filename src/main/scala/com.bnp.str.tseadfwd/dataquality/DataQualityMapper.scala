@@ -19,6 +19,11 @@ import java.time.format.DateTimeFormatter
  * [[com.bnp.str.tseadfwd.mapping.PrimaryMapper]]. The key keeps its old name and place, so existing
  * configuration files keep working unchanged; only the place the rows are dropped has changed, which
  * is what lets rule R01 see a full-exposure curve at all (previously those rows were already gone).
+ *
+ * `outputFile` is likewise not a setting but a DERIVED value: the file `TS_EAD_FWD` is written to,
+ * resolved from that block (`tmpPath`, `tableName`, `format`, `singleFile`) the same way
+ * [[com.bnp.str.tseadfwd.utility.PrimaryUtilities.writeDataframe]] resolves it. The report names it,
+ * so a report found on a share says which file it judged.
  */
 final case class DqConfig(
                            enabled: Boolean,
@@ -30,7 +35,8 @@ final case class DqConfig(
                            negativeEnabled: Boolean,
                            maxRowsInReport: Int,
                            negativeMarker: String,
-                           excludeEadRaRateGe1: Boolean
+                           excludeEadRaRateGe1: Boolean,
+                           outputFile: String = ""
                          )
 
 object DqConfig {
@@ -70,6 +76,21 @@ object DqConfig {
     val one = sub("all_terms_equal_one")
     val neg = sub("negative_ead_ra_rate")
 
+    // The file the term structure is actually written to, resolved exactly as
+    // `PrimaryUtilities.writeDataframe` resolves it — the report has to name the file it judges, and
+    // a name that does not match what lands in the directory is worse than no name at all.
+    val format = str(out, "format", "csv")
+    val excelFormat =
+      format.equalsIgnoreCase("excel") || format.equalsIgnoreCase("xlsx") ||
+        format.equalsIgnoreCase("com.crealytics.spark.excel")
+    val singleFile = bool(out, "singleFile", default = true)
+    val outputFile =
+      if (excelFormat) s"$outDir/$outName.xlsx"
+      // singleFile = false leaves a DIRECTORY of Spark part files; naming the directory is the
+      // truthful answer there, so say which it is rather than inventing a file that never exists.
+      else if (!singleFile) s"$outDir/$outName (part-file directory)"
+      else s"$outDir/$outName.${if (format.equalsIgnoreCase("csv")) "csv" else format}"
+
     DqConfig(
       enabled                 = bool(dq, "enabled", default = true),
       htmlPath                = str(dq, "htmlPath", s"$outDir/DQ_$outName.html"),
@@ -84,7 +105,8 @@ object DqConfig {
       // very thing the flag was turned on for. Set a marker (e.g. "NV") only when a downstream
       // consumer cannot take a negative number.
       negativeMarker          = str(neg, "replaceWith", default = ""),
-      excludeEadRaRateGe1     = bool(params, "exclude_ead_ra_rate_ge_1", default = false)
+      excludeEadRaRateGe1     = bool(params, "exclude_ead_ra_rate_ge_1", default = false),
+      outputFile              = outputFile
     )
   }
 }
@@ -125,8 +147,12 @@ class DataQualityMapper(dq: DqConfig)(implicit spark: SparkSession) {
   /**
    * Evaluate every rule WITHOUT touching the data. `rowsOut` equals `rowsIn`, and each result is
    * marked `applied = false` — nothing was removed.
+   *
+   * `outputFile` is the file the rules were run on, named in the report; it defaults to the file the
+   * conf points at, which is what a standalone run reads.
    */
-  def reportOnly(df: DataFrame, source: String, runId: String): DqReport = {
+  def reportOnly(df: DataFrame, source: String, runId: String,
+                 outputFile: String = dq.sourcePath): DqReport = {
     val rowsIn = df.count()
     DqReport(
       source = source,
@@ -138,7 +164,8 @@ class DataQualityMapper(dq: DqConfig)(implicit spark: SparkSession) {
         r01Result(if (dq.allTermsEqualOneEnabled) allOnesGroups(df) else Seq.empty,
           rowsRemoved = 0L, applied = false, reportOnly = true),
         ruleNegative(df)
-      )
+      ),
+      outputFile = outputFile
     )
   }
 
@@ -146,8 +173,12 @@ class DataQualityMapper(dq: DqConfig)(implicit spark: SparkSession) {
    * Evaluate the rules and return both the report and the cleaned output. Removal is applied for
    * R01 when the rule is enabled and `remove = true`, followed by the `exclude_ead_ra_rate_ge_1`
    * engine option (which moved here from the mapper).
+   *
+   * `outputFile` is the file the cleaned frame is about to be written to, named in the report; it
+   * defaults to the path resolved from the `TS_EAD_FWD` conf block.
    */
-  def apply(df: DataFrame, source: String, runId: String): DqOutcome = {
+  def apply(df: DataFrame, source: String, runId: String,
+            outputFile: String = dq.outputFile): DqOutcome = {
     val rowsIn = df.count()
 
     val removeR01 = dq.allTermsEqualOneEnabled && dq.allTermsEqualOneRemoves
@@ -179,7 +210,8 @@ class DataQualityMapper(dq: DqConfig)(implicit spark: SparkSession) {
       results = Seq(
         r01Result(keys, rowsRemoved = rowsIn - afterR01Rows, applied = removeR01),
         ruleNegative(df, valuesReplaced = replaced, marker = if (markNegatives) dq.negativeMarker else "")
-      )
+      ),
+      outputFile = outputFile
     )
 
     if (dq.excludeEadRaRateGe1)

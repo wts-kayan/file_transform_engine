@@ -130,6 +130,11 @@ final case class DqRuleResult(
  * @param rowsIn      rows examined, before any removal
  * @param rowsOut     rows written after removal (equals `rowsIn` for a report-only run)
  * @param results     one entry per rule, in [[DqRule.All]] order
+ * @param outputFile  the term-structure FILE these rules were run on — the file the main job writes,
+ *                    or the CSV a standalone run read. A report is read next to the data it judges,
+ *                    so it has to name that data unambiguously (several vintages of the same table
+ *                    live side by side in one output directory). Empty when unknown: the report then
+ *                    simply omits the line rather than showing a blank one.
  */
 final case class DqReport(
                            source: String,
@@ -137,8 +142,15 @@ final case class DqReport(
                            generatedAt: String,
                            rowsIn: Long,
                            rowsOut: Long,
-                           results: Seq[DqRuleResult]
+                           results: Seq[DqRuleResult],
+                           outputFile: String = ""
                          ) {
+
+  /** Last path segment of [[outputFile]] — the file NAME, for the header line. Empty when unknown. */
+  def outputFileName: String = {
+    val cut = outputFile.lastIndexOf('/') max outputFile.lastIndexOf('\\')
+    if (cut >= 0) outputFile.substring(cut + 1) else outputFile
+  }
 
   /** Total findings across every rule. */
   def totalFindings: Long = results.map(_.total).sum
@@ -152,8 +164,10 @@ final case class DqReport(
       .filter(r => r.rule == DqRule.AllTermsEqualOne && r.enabled)
       .flatMap(_.findings.map(f => (f.matrixId, f.scenarioId)))
 
-  /** One-line summary for the run log. */
-  def summaryLine: String =
-    s"DATA QUALITY - $verdict ($rowsIn row(s) in, $rowsOut out): " +
+  /** One-line summary for the run log — named by the file it judges, when that file is known. */
+  def summaryLine: String = {
+    val on = if (outputFileName.isEmpty) "" else s" on $outputFileName"
+    s"DATA QUALITY$on - $verdict ($rowsIn row(s) in, $rowsOut out): " +
       results.map(r => s"${r.rule.id} ${r.status}(${r.total})").mkString(", ")
+  }
 }

@@ -303,6 +303,13 @@ and names the offending keys. The **main job** performs the removal, once, on th
 write, and then writes the report. The report is a single self-contained HTML file (no external
 stylesheet, script or image), written through Hadoop's FileSystem, so `htmlPath` may be local or HDFS.
 
+It **names the output file it was run on** — the file name in the title and the browser tab, the full
+path in the header block — resolved from the `TS_EAD_FWD` block exactly as the writer resolves it
+(`.csv`, `.xlsx`, or the directory marked `(part-file directory)` when `singleFile = false`); a
+standalone run names the CSV it read. Reports for several vintages of the same table land in one
+directory, so a report that does not say which file it judged says very little. The same name opens the
+run log's `DATA QUALITY on <file> - <verdict> ...` line.
+
 Two consequences worth knowing:
 
 - **`exclude_ead_ra_rate_ge_1` moved.** `PrimaryMapper` now emits *every* computed term; the

@@ -2,7 +2,7 @@ package com.bnp.str.tseadfwd.job
 
 import com.bnp.str.tseadfwd.dataquality.{DataQualityMapper, DqConfig, DqWriter}
 import com.bnp.str.tseadfwd.sessionmanager.SparkSessionManager
-import com.bnp.str.tseadfwd.utility.PrimaryUtilities
+import com.bnp.str.tseadfwd.utility.{PrimaryConstants, PrimaryUtilities}
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
@@ -56,7 +56,11 @@ object DataQualityDriver {
       .option("delimiter", ";")
       .csv(dq.sourcePath)
 
-    val report = new DataQualityMapper(dq).reportOnly(df, source = dq.sourcePath, runId = "standalone")
+    // `source` names the dataset, `outputFile` the exact file read — the report has to say which
+    // file it judged, and `sourcePath` may well point at a vintage other than the latest output.
+    val report = new DataQualityMapper(dq)
+      .reportOnly(df, source = PrimaryConstants.OUTPUT_EAD_FWD, runId = "standalone",
+        outputFile = dq.sourcePath)
 
     logger.info(report.summaryLine)
     DqWriter.writeHtml(dq.htmlPath, report)

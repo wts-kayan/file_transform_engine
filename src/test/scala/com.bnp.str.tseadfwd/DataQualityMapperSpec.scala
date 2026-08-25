@@ -1,6 +1,7 @@
 package com.bnp.str.tseadfwd
 
 import com.bnp.str.tseadfwd.dataquality.{DataQualityMapper, DqConfig, DqRule}
+import com.typesafe.config.ConfigFactory
 import org.apache.spark.sql.DataFrame
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -299,5 +300,67 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     outcome.report.verdict shouldBe "PASS"
     outcome.report.totalFindings shouldBe 0L
     outcome.cleaned.count() shouldBe 2L
+  }
+
+  // ---- the output file the report names -------------------------------------
+
+  test("the report names the output file the rules were run on") {
+    val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
+
+    val report = new DataQualityMapper(baseConf)(spark)
+      .apply(df, source = "TS_EAD_FWD", runId = "test-run",
+        outputFile = "hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv").report
+
+    report.outputFile shouldBe "hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv"
+    report.outputFileName shouldBe "TS_EAD_FWD_25Q4_v1.csv"
+    report.summaryLine should include("on TS_EAD_FWD_25Q4_v1.csv")
+  }
+
+  test("a report-only run names the file it read, not the configured output") {
+    val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
+    val conf = baseConf.copy(sourcePath = "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv")
+
+    val report = new DataQualityMapper(conf)(spark).reportOnly(df, "TS_EAD_FWD", "standalone")
+
+    report.outputFile shouldBe "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv"
+    report.outputFileName shouldBe "A_PREVIOUS_VINTAGE.csv"
+  }
+
+  test("an unknown output file leaves the report — and the log line — without one") {
+    val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
+
+    val report = new DataQualityMapper(baseConf)(spark)
+      .apply(df, source = "TS_EAD_FWD", runId = "test-run", outputFile = "").report
+
+    report.outputFileName shouldBe ""
+    report.summaryLine should startWith("DATA QUALITY - PASS")
+  }
+
+  // ---- DqConfig: the output file is resolved as the writer resolves it -------
+
+  private def confWith(outputBlock: String): DqConfig =
+    DqConfig.from(ConfigFactory.parseString(
+      s"""tseadfwd_app {
+         |  TS_EAD_FWD { tmpPath = "localRun/tseadfwd/output", tableName = "TS_EAD_FWD_25Q4", $outputBlock }
+         |}""".stripMargin))
+
+  test("DqConfig resolves the collapsed single CSV file") {
+    confWith("""format = "csv", singleFile = true""").outputFile shouldBe
+      "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.csv"
+  }
+
+  test("DqConfig defaults to the collapsed CSV when neither key is set") {
+    confWith("""mode = "overwrite"""").outputFile shouldBe
+      "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.csv"
+  }
+
+  test("DqConfig says so when the output is left as a part-file directory") {
+    confWith("""format = "csv", singleFile = false""").outputFile should
+      include("TS_EAD_FWD_25Q4 (part-file directory)")
+  }
+
+  test("DqConfig resolves an Excel output to the workbook") {
+    confWith("""format = "com.crealytics.spark.excel"""").outputFile shouldBe
+      "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.xlsx"
   }
 }
