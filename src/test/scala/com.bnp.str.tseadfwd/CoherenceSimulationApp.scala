@@ -1,6 +1,6 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.dataquality.{DataQualityMapper, DqConfig, DqHtmlView, DqRule}
+import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckHtmlView, CheckRule, CoherenceCheckMapper}
 import com.bnp.str.tseadfwd.utility.PrimaryUtilities
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.sql.functions.{col, regexp_replace}
@@ -8,36 +8,36 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
 /**
- * Simulation of data-quality rule **R01** (all terms equal to 1, by EAD_MATRIX_ID and SCENARIO_ID)
+ * Simulation of coherence-check rule **CR01** (all terms equal to 1, by EAD_MATRIX_ID and SCENARIO_ID)
  * on the REAL engine output.
  *
  * The production inputs never produce a full-exposure curve, so the rule reports nothing on a normal
  * run and there is nothing to look at. This app takes the produced `TS_EAD_FWD` CSV, ADDS four
- * simulated curves to it, and runs the real [[DataQualityMapper]] over the result — same code path
+ * simulated curves to it, and runs the real [[CoherenceCheckMapper]] over the result — same code path
  * as `MainDriver`, removal included:
  *
- *   SIMU_ALLONES_TF_Q / C — every term = 1                  -> R01: flagged, removed
- *   SIMU_ALLONES_TF_Q / A — every term = 1 except the last  -> R01: NOT flagged (the boundary case)
- *   SIMU_ALLONES_TF_Y / C — every term = 1                  -> R01: flagged, removed as a SEPARATE
+ *   SIMU_ALLONES_TF_Q / C — every term = 1                  -> CR01: flagged, removed
+ *   SIMU_ALLONES_TF_Q / A — every term = 1 except the last  -> CR01: NOT flagged (the boundary case)
+ *   SIMU_ALLONES_TF_Y / C — every term = 1                  -> CR01: flagged, removed as a SEPARATE
  *                                                              group (the _Y curve of the matrix)
  *   SIMU_NEGATIVE_TF_Q / C — a normal curve with two sub-zero terms
- *                                                           -> R02: line kept, value written as
+ *                                                           -> CR02: line kept, value written as
  *                                                              computed (or as the configured
  *                                                              `replaceWith` marker)
  *
  * It writes three files next to the output (all under the gitignored `output/` directory):
  *   TS_EAD_FWD_SIMULATED.csv          the real output + the simulated lines (the "before")
  *   TS_EAD_FWD_SIMULATED_CLEANED.csv  what the main job would write (the "after")
- *   DQ_SIMULATION.html                the report naming what was removed
+ *   CR_SIMULATION.html                the report naming what was removed
  *
  * Nothing production is touched: the real `TS_EAD_FWD` CSV is read, never rewritten.
  *
  * Run:
  *   mvn -o dependency:build-classpath -Dmdep.outputFile=cp.txt -DincludeScope=test
  *   java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
- *        com.bnp.str.tseadfwd.DqSimulationApp [localRun/tseadfwd/application.conf]
+ *        com.bnp.str.tseadfwd.CoherenceSimulationApp [localRun/tseadfwd/application.conf]
  */
-object DqSimulationApp {
+object CoherenceSimulationApp {
 
   private val COLUMNS = Seq("EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "EAD_RA_RATE", "EAD_CCF_RATE")
 
@@ -45,17 +45,17 @@ object DqSimulationApp {
     val confPath = args.lift(0).getOrElse("localRun/tseadfwd/application.conf")
 
     implicit val spark: SparkSession = SparkSession.builder()
-      .appName("dq-simulation").master("local[2]").config("spark.ui.enabled", "false").getOrCreate()
+      .appName("coherence-simulation").master("local[2]").config("spark.ui.enabled", "false").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
     val config: Config = {
       val reader = PrimaryUtilities.getHdfsReader(confPath)(spark.sparkContext)
       try ConfigFactory.parseReader(reader) finally reader.close()
     }
-    val dq = DqConfig.from(config)
+    val checks = CheckConfig.from(config)
 
-    val real = spark.read.option("header", "true").option("delimiter", ";").csv(dq.sourcePath)
-    val outDir = dq.sourcePath.substring(0, dq.sourcePath.lastIndexOf('/'))
+    val real = spark.read.option("header", "true").option("delimiter", ";").csv(checks.sourcePath)
+    val outDir = checks.sourcePath.substring(0, checks.sourcePath.lastIndexOf('/'))
 
     // Reuse a real curve's term grid, so the simulated lines look exactly like engine output.
     val quarterlyTerms = termsOf(real, suffix = "_Q")
@@ -67,7 +67,7 @@ object DqSimulationApp {
         curve("SIMU_ALLONES_TF_Q", "A", quarterlyTerms,
           i => if (i == quarterlyTerms.size - 1) "0,98" else "1") ++
         curve("SIMU_ALLONES_TF_Y", "C", yearlyTerms, _ => "1") ++
-        // a plausible decaying curve that dips below zero twice: R02 territory
+        // a plausible decaying curve that dips below zero twice: CR02 territory
         curve("SIMU_NEGATIVE_TF_Q", "C", quarterlyTerms,
           i => if (i == 2) "-0,15" else if (i == 5) "-2,4" else f"0,${99 - math.min(i, 90)}%02d")
 
@@ -79,43 +79,43 @@ object DqSimulationApp {
 
     // The real thing: same mapper, same settings, removal included. `outputFile` names the CLEANED
     // simulation file, not the production output — the report must not claim to judge the real one.
-    val outcome = new DataQualityMapper(dq)(spark)
+    val outcome = new CoherenceCheckMapper(checks)(spark)
       .apply(before, source = s"$outDir/TS_EAD_FWD_SIMULATED.csv", runId = "simulation",
         outputFile = s"$outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv")
 
     writeCsv(s"$outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv", outcome.cleaned)
-    PrimaryUtilities.writeStringToHdfs(s"$outDir/DQ_SIMULATION.html",
-      DqHtmlView.render(outcome.report))(spark.sparkContext)
+    PrimaryUtilities.writeStringToHdfs(s"$outDir/CR_SIMULATION.html",
+      CheckHtmlView.render(outcome.report))(spark.sparkContext)
 
     // ---- what happened ----
-    val r01 = outcome.report.results.find(_.rule == DqRule.AllTermsEqualOne).get
-    val r02 = outcome.report.results.find(_.rule == DqRule.NegativeEadRaRate).get
+    val r01 = outcome.report.results.find(_.rule == CheckRule.AllTermsEqualOne).get
+    val r02 = outcome.report.results.find(_.rule == CheckRule.NegativeEadRaRate).get
     println(s"""
-       |=== R01 / R02 simulation ===================================================
-       |real output          : ${dq.sourcePath} (${real.count()} lines)
+       |=== CR01 / CR02 simulation ===================================================
+       |real output          : ${checks.sourcePath} (${real.count()} lines)
        |simulated lines added: ${simulated.size} over 4 curves
        |
-       |R01 status           : ${r01.status}, ${r01.total} group(s) flagged
+       |CR01 status           : ${r01.status}, ${r01.total} group(s) flagged
        |${r01.findings.map(f => f"  ${f.matrixId}%-22s ${f.scenarioId}  ${f.detail}").mkString("\n")}
-       |R01 action           : ${r01.action}
+       |CR01 action           : ${r01.action}
        |
-       |R02 status           : ${r02.status}, ${r02.total} value(s) flagged
+       |CR02 status           : ${r02.status}, ${r02.total} value(s) flagged
        |${r02.findings.map(f => f"  ${f.matrixId}%-22s ${f.scenarioId}  term ${f.term}%-6s = ${f.value}").mkString("\n")}
-       |R02 action           : ${r02.action}
+       |CR02 action           : ${r02.action}
        |
        |lines in             : ${outcome.report.rowsIn}
        |lines out            : ${outcome.report.rowsOut}
        |
-       |still present after cleaning (the boundary case, and the R02 curve):
+       |still present after cleaning (the boundary case, and the CR02 curve):
        |${survivors(outcome.cleaned).mkString("\n")}
        |
-       |R02 rows as written to the output CSV${if (dq.negativeMarker.isEmpty) " (value as computed)" else s" (marker '${dq.negativeMarker}')"}:
-       |${markedRows(outcome.cleaned, dq.negativeMarker).mkString("\n")}
+       |CR02 rows as written to the output CSV${if (checks.negativeMarker.isEmpty) " (value as computed)" else s" (marker '${checks.negativeMarker}')"}:
+       |${markedRows(outcome.cleaned, checks.negativeMarker).mkString("\n")}
        |
        |files written:
        |  $outDir/TS_EAD_FWD_SIMULATED.csv          (before)
        |  $outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv  (after)
-       |  $outDir/DQ_SIMULATION.html                (report)
+       |  $outDir/CR_SIMULATION.html                (report)
        |============================================================================
        |""".stripMargin)
 
@@ -136,7 +136,7 @@ object DqSimulationApp {
     terms.zipWithIndex.map { case (t, i) => Row(matrixId, scenario, t, rateAt(i), "") }
 
   /**
-   * The R02 rows exactly as they land in the CSV: the configured marker when one is set, otherwise
+   * The CR02 rows exactly as they land in the CSV: the configured marker when one is set, otherwise
    * the negative value as computed (the default).
    */
   private def markedRows(df: DataFrame, marker: String): Seq[String] = {

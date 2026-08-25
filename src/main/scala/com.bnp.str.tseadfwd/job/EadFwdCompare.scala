@@ -56,7 +56,7 @@ object EadFwdCompare {
     import spark.implicits._
 
     // decimal-comma string -> Double (null-safe; returns java.lang.Double so null is allowed).
-    // A non-numeric cell yields null rather than killing the job: the data-quality mapper may write
+    // A non-numeric cell yields null rather than killing the job: the coherence-check mapper may write
     // a marker such as `NV` in place of a non-physical value, and a comparison must report that key
     // as a difference, not fail on it.
     val toNum = udf((s: String) =>

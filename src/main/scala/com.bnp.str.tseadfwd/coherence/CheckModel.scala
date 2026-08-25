@@ -1,32 +1,32 @@
-package com.bnp.str.tseadfwd.dataquality
+package com.bnp.str.tseadfwd.coherence
 
 /**
- * Value model of the TS_EAD_FWD business data-quality report.
+ * Value model of the TS_EAD_FWD business coherence-check report.
  *
- * Pure data — no Spark, no IO — so the rules ([[DataQualityMapper]]) and the rendering
- * ([[DqHtmlView]]) can be unit-tested independently of each other.
+ * Pure data — no Spark, no IO — so the rules ([[CoherenceCheckMapper]]) and the rendering
+ * ([[CheckHtmlView]]) can be unit-tested independently of each other.
  */
 
 /**
  * A business rule requested by the business team.
  *
- * @param id      stable identifier used in the report and in logs (R01, R02, ...)
+ * @param id      stable identifier used in the report and in logs (CR01, CR02, ...)
  * @param title   short human label
  * @param detail  what the rule checks, in the business team's own terms
  * @param removes true when a hit REMOVES rows from the output — the Main job performs the removal;
- *                the data-quality side only names the rows. False = reporting only.
+ *                the coherence-check side only names the rows. False = reporting only.
  */
-final case class DqRule(id: String, title: String, detail: String, removes: Boolean)
+final case class CheckRule(id: String, title: String, detail: String, removes: Boolean)
 
-object DqRule {
+object CheckRule {
 
   /**
-   * R01 — for one (EAD_MATRIX_ID, SCENARIO_ID), when EVERY term carries `EAD_RA_RATE = 1` the whole
+   * CR01 — for one (EAD_MATRIX_ID, SCENARIO_ID), when EVERY term carries `EAD_RA_RATE = 1` the whole
    * curve is full exposure: no loss ever accrues, so the line says nothing. The business asked for
    * those lines to be removed from the output and listed in the report.
    */
-  val AllTermsEqualOne = DqRule(
-    id = "R01",
+  val AllTermsEqualOne = CheckRule(
+    id = "CR01",
     title = "All terms equal to 1, by EAD_MATRIX_ID and SCENARIO_ID",
     detail = "Lines are grouped by EAD_MATRIX_ID and SCENARIO_ID; one group is one curve. " +
       "The group is flagged when EVERY one of its terms carries EAD_RA_RATE = 1: the exposure is " +
@@ -36,11 +36,11 @@ object DqRule {
     removes = true)
 
   /**
-   * R02 — a negative `EAD_RA_RATE` is non-physical (an exposure factor lies in [0, 1]). Reported,
+   * CR02 — a negative `EAD_RA_RATE` is non-physical (an exposure factor lies in [0, 1]). Reported,
    * never removed: the business wants to see it, not to have it silently disappear.
    */
-  val NegativeEadRaRate = DqRule(
-    id = "R02",
+  val NegativeEadRaRate = CheckRule(
+    id = "CR02",
     title = "Negative EAD_RA_RATE",
     detail = "EAD_RA_RATE is strictly negative, which is not a possible exposure factor (it must " +
       "lie between 0 and 1). The line is KEPT and, by default, so is the value as computed: a " +
@@ -50,16 +50,16 @@ object DqRule {
     removes = false)
 
   /** Every rule, in report order. */
-  val All: Seq[DqRule] = Seq(AllTermsEqualOne, NegativeEadRaRate)
+  val All: Seq[CheckRule] = Seq(AllTermsEqualOne, NegativeEadRaRate)
 }
 
 /**
  * One offending item.
  *
- * For a group-level rule (R01) `term` is empty and `value` describes the group; for a row-level
- * rule (R02) both identify the exact output row.
+ * For a group-level rule (CR01) `term` is empty and `value` describes the group; for a row-level
+ * rule (CR02) both identify the exact output row.
  */
-final case class DqFinding(
+final case class CheckFinding(
                             matrixId: String,
                             scenarioId: String,
                             term: String,
@@ -81,11 +81,11 @@ final case class DqFinding(
  * @param valuesReplaced values rewritten to [[marker]] in the output (the line itself is kept)
  * @param marker    the token written in place of the offending value, empty when none is configured
  */
-final case class DqRuleResult(
-                               rule: DqRule,
+final case class CheckRuleResult(
+                               rule: CheckRule,
                                enabled: Boolean,
                                total: Long,
-                               findings: Seq[DqFinding],
+                               findings: Seq[CheckFinding],
                                rowsRemoved: Long,
                                applied: Boolean,
                                reportOnly: Boolean = false,
@@ -129,20 +129,20 @@ final case class DqRuleResult(
  * @param generatedAt render timestamp
  * @param rowsIn      rows examined, before any removal
  * @param rowsOut     rows written after removal (equals `rowsIn` for a report-only run)
- * @param results     one entry per rule, in [[DqRule.All]] order
+ * @param results     one entry per rule, in [[CheckRule.All]] order
  * @param outputFile  the term-structure FILE these rules were run on — the file the main job writes,
  *                    or the CSV a standalone run read. A report is read next to the data it judges,
  *                    so it has to name that data unambiguously (several vintages of the same table
  *                    live side by side in one output directory). Empty when unknown: the report then
  *                    simply omits the line rather than showing a blank one.
  */
-final case class DqReport(
+final case class CheckReport(
                            source: String,
                            runId: String,
                            generatedAt: String,
                            rowsIn: Long,
                            rowsOut: Long,
-                           results: Seq[DqRuleResult],
+                           results: Seq[CheckRuleResult],
                            outputFile: String = ""
                          ) {
 
@@ -158,16 +158,16 @@ final case class DqReport(
   /** Overall verdict shown in the report header. */
   def verdict: String = if (totalFindings == 0L) "PASS" else "FINDINGS"
 
-  /** The (matrix, scenario) keys R01 asks the Main job to remove; empty when the rule is off. */
+  /** The (matrix, scenario) keys CR01 asks the Main job to remove; empty when the rule is off. */
   def removalKeys: Seq[(String, String)] =
     results
-      .filter(r => r.rule == DqRule.AllTermsEqualOne && r.enabled)
+      .filter(r => r.rule == CheckRule.AllTermsEqualOne && r.enabled)
       .flatMap(_.findings.map(f => (f.matrixId, f.scenarioId)))
 
   /** One-line summary for the run log — named by the file it judges, when that file is known. */
   def summaryLine: String = {
     val on = if (outputFileName.isEmpty) "" else s" on $outputFileName"
-    s"DATA QUALITY$on - $verdict ($rowsIn row(s) in, $rowsOut out): " +
+    s"COHERENCE CHECK$on - $verdict ($rowsIn row(s) in, $rowsOut out): " +
       results.map(r => s"${r.rule.id} ${r.status}(${r.total})").mkString(", ")
   }
 }

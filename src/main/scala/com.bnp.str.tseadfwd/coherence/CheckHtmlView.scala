@@ -1,7 +1,7 @@
-package com.bnp.str.tseadfwd.dataquality
+package com.bnp.str.tseadfwd.coherence
 
 /**
- * Renders a [[DqReport]] as ONE self-contained HTML document.
+ * Renders a [[CheckReport]] as ONE self-contained HTML document.
  *
  * Self-contained on purpose: the file is handed to the business team by mail or dropped on a share,
  * where an external stylesheet or a CDN font would simply not resolve. Everything (layout, colours,
@@ -12,7 +12,7 @@ package com.bnp.str.tseadfwd.dataquality
  *
  * Pure `String` in, `String` out: no Spark, no IO, so it is unit-tested directly.
  */
-object DqHtmlView {
+object CheckHtmlView {
 
   /** HTML-escape a cell. Matrix ids and details are engine-generated, but never trust them blindly. */
   private def esc(s: String): String =
@@ -50,7 +50,7 @@ object DqHtmlView {
   }
 
   /** One rule section: what the rule states, what was done about it, then the findings. */
-  private def ruleSection(r: DqRuleResult): String = {
+  private def ruleSection(r: CheckRuleResult): String = {
     val header =
       s"""    <section class="rule ${statusClass(r.status)}">
          |      <h2><span class="rid">${esc(r.rule.id)}</span>${esc(r.rule.title)} ${badge(r.status)}</h2>
@@ -62,7 +62,7 @@ object DqHtmlView {
       if (!r.enabled) """      <p class="none">Rule disabled in the configuration, not evaluated.</p>"""
       else if (r.total == 0L) """      <p class="none">No line matched this rule.</p>"""
       else {
-        val groupLevel = r.rule == DqRule.AllTermsEqualOne
+        val groupLevel = r.rule == CheckRule.AllTermsEqualOne
         val headers =
           if (groupLevel) Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("EAD_RA_RATE", "num"), ("Detail", ""))
           else Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("TERM", "num"), ("EAD_RA_RATE", "num"), ("Detail", ""))
@@ -86,7 +86,7 @@ object DqHtmlView {
   }
 
   /** The full HTML document for one report. */
-  def render(report: DqReport): String = {
+  def render(report: CheckReport): String = {
     val summaryRows = report.results.map(r => Seq(
       Cell(r.rule.id, "mono"),
       Cell(r.rule.title),
@@ -108,10 +108,10 @@ object DqHtmlView {
       if (report.outputFile.isEmpty) ""
       else s"""      <dt>Output file</dt><dd class="mono">${esc(report.outputFile)}</dd>\n"""
     // Browser tab and print header: the file name distinguishes two reports open side by side,
-    // which "Data quality: TS_EAD_FWD" alone does not.
+    // which "Business coherence check: TS_EAD_FWD" alone does not.
     val docTitle =
-      if (report.outputFileName.isEmpty) "Data quality: TS_EAD_FWD"
-      else s"Data quality: ${report.outputFileName}"
+      if (report.outputFileName.isEmpty) "Business coherence check: TS_EAD_FWD"
+      else s"Business coherence check: ${report.outputFileName}"
 
     s"""<!DOCTYPE html>
        |<html lang="en">
@@ -162,7 +162,7 @@ object DqHtmlView {
        |</head>
        |<body>
        |  <main>
-       |    <h1>Data quality: TS_EAD_FWD ${badge(report.verdict)}</h1>
+       |    <h1>Business coherence check: TS_EAD_FWD ${badge(report.verdict)}</h1>
        |    <p class="sub">$fileTitle${report.totalFindings} finding(s) over ${report.rowsIn} output line(s).</p>
        |
        |    <ul class="stats">
@@ -182,7 +182,7 @@ object DqHtmlView {
        |    <h2>Summary</h2>
        |${renderTable(Seq(("Rule", "mono"), ("Title", ""), ("Status", ""), ("Findings", "num"), ("Action", "")), summaryRows)}
        |${report.results.map(ruleSection).mkString("\n")}
-       |    <p class="foot">IRIS / tseadfwd, business data quality on the TS_EAD_FWD term structure.</p>
+       |    <p class="foot">IRIS / tseadfwd, business coherence check on the TS_EAD_FWD term structure.</p>
        |  </main>
        |</body>
        |</html>

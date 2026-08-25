@@ -1,13 +1,13 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.dataquality.{DataQualityMapper, DqConfig, DqRule}
+import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckRule, CoherenceCheckMapper}
 import com.typesafe.config.ConfigFactory
 import org.apache.spark.sql.DataFrame
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /**
- * Unit tests for the business data-quality rules on the TS_EAD_FWD output.
+ * Unit tests for the business coherence-check rules on the TS_EAD_FWD output.
  *
  * Values are built exactly as the engine emits them — decimal-comma STRINGS, trailing zeros
  * stripped, so a full-exposure term is the literal "1" — because the rules have to parse them.
@@ -15,13 +15,13 @@ import org.scalatest.matchers.should.Matchers
  * Run (offline, via the ScalaTest runner on the test classpath):
  *   mvn -o dependency:build-classpath -Dmdep.outputFile=cp.txt -DincludeScope=test
  *   java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
- *        org.scalatest.tools.Runner -o -s com.bnp.str.tseadfwd.DataQualityMapperSpec
+ *        org.scalatest.tools.Runner -o -s com.bnp.str.tseadfwd.CoherenceCheckMapperSpec
  */
-class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSession {
+class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestSession {
 
-  private val baseConf = DqConfig(
+  private val baseConf = CheckConfig(
     enabled = true,
-    htmlPath = "target/test-dq.html",
+    htmlPath = "target/test-checks.html",
     sourcePath = "unused",
     allTermsEqualOneEnabled = true,
     allTermsEqualOneRemoves = true,
@@ -38,15 +38,15 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
       .toDF("EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "EAD_RA_RATE", "EAD_CCF_RATE")
   }
 
-  private def run(df: DataFrame, conf: DqConfig = baseConf) =
-    new DataQualityMapper(conf)(spark).apply(df, source = "TS_EAD_FWD", runId = "test-run")
+  private def run(df: DataFrame, conf: CheckConfig = baseConf) =
+    new CoherenceCheckMapper(conf)(spark).apply(df, source = "TS_EAD_FWD", runId = "test-run")
 
-  private def result(outcome: com.bnp.str.tseadfwd.dataquality.DqOutcome, rule: DqRule) =
+  private def result(outcome: com.bnp.str.tseadfwd.coherence.CheckOutcome, rule: CheckRule) =
     outcome.report.results.find(_.rule == rule).get
 
-  // ---- R01: all terms equal to 1 -------------------------------------------
+  // ---- CR01: all terms equal to 1 -------------------------------------------
 
-  test("R01 removes a (matrix, scenario) whose every term equals 1, and reports it") {
+  test("CR01 removes a (matrix, scenario) whose every term equals 1, and reports it") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "1"),
@@ -55,7 +55,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
       ("BCEF_CONSO_TF_Q", "A", "0,25", "0,98"))
 
     val outcome = run(df)
-    val r01 = result(outcome, DqRule.AllTermsEqualOne)
+    val r01 = result(outcome, CheckRule.AllTermsEqualOne)
 
     r01.total shouldBe 1L
     r01.findings.head.matrixId shouldBe "BCEF_CONSO_TF_Q"
@@ -71,54 +71,54 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     outcome.report.rowsOut shouldBe 2L
   }
 
-  test("R01 does not fire when a single term deviates from 1") {
+  test("CR01 does not fire when a single term deviates from 1") {
     val df = output(
       ("BGL_MORTGAGE_Y", "E", "0", "1"),
       ("BGL_MORTGAGE_Y", "E", "1", "1"),
       ("BGL_MORTGAGE_Y", "E", "2", "0,999999"))
 
     val outcome = run(df)
-    result(outcome, DqRule.AllTermsEqualOne).total shouldBe 0L
-    result(outcome, DqRule.AllTermsEqualOne).status shouldBe "PASS"
+    result(outcome, CheckRule.AllTermsEqualOne).total shouldBe 0L
+    result(outcome, CheckRule.AllTermsEqualOne).status shouldBe "PASS"
     // nothing found is not the same as removal switched off — the action must not blame the conf
-    result(outcome, DqRule.AllTermsEqualOne).action shouldBe "-"
+    result(outcome, CheckRule.AllTermsEqualOne).action shouldBe "-"
     outcome.cleaned.count() shouldBe 3L
   }
 
   test("a rule that passes with remove = true never reports the removal as disabled") {
     val clean = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
 
-    val passing = result(run(clean), DqRule.AllTermsEqualOne)
+    val passing = result(run(clean), CheckRule.AllTermsEqualOne)
     passing.status shouldBe "PASS"
     passing.action should not include "disabled"
 
     // the wording is reserved for the case it actually describes
     val hit = output(("BCEF_CONSO_TF_Q", "C", "0", "1"))
-    result(run(hit, baseConf.copy(allTermsEqualOneRemoves = false)), DqRule.AllTermsEqualOne)
+    result(run(hit, baseConf.copy(allTermsEqualOneRemoves = false)), CheckRule.AllTermsEqualOne)
       .action shouldBe "kept (removal disabled in the configuration)"
   }
 
-  test("R01 groups on the matrix id, so the quarterly and yearly curves are separate lines") {
+  test("CR01 groups on the matrix id, so the quarterly and yearly curves are separate lines") {
     val df = output(
       ("BNL_CONSO_TF_Q", "C", "0", "1"),
       ("BNL_CONSO_TF_Q", "C", "0,25", "1"),
       ("BNL_CONSO_TF_Y", "C", "0", "0,95"))
 
     val outcome = run(df)
-    val r01 = result(outcome, DqRule.AllTermsEqualOne)
+    val r01 = result(outcome, CheckRule.AllTermsEqualOne)
 
     r01.total shouldBe 1L
     r01.findings.head.matrixId shouldBe "BNL_CONSO_TF_Q"
     outcome.cleaned.count() shouldBe 1L
   }
 
-  test("R01 with remove = false reports the line but leaves it in the output") {
+  test("CR01 with remove = false reports the line but leaves it in the output") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "1"))
 
     val outcome = run(df, baseConf.copy(allTermsEqualOneRemoves = false))
-    val r01 = result(outcome, DqRule.AllTermsEqualOne)
+    val r01 = result(outcome, CheckRule.AllTermsEqualOne)
 
     r01.total shouldBe 1L
     r01.status shouldBe "REPORTED"
@@ -126,43 +126,43 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     outcome.cleaned.count() shouldBe 2L
   }
 
-  test("R01 tolerates a rounded 1 within the configured tolerance") {
+  test("CR01 tolerates a rounded 1 within the configured tolerance") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "1,0000000001"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "0,9999999999"))
 
-    result(run(df, baseConf.copy(tolerance = 1e-6)), DqRule.AllTermsEqualOne).total shouldBe 1L
-    result(run(df, baseConf.copy(tolerance = 1e-12)), DqRule.AllTermsEqualOne).total shouldBe 0L
+    result(run(df, baseConf.copy(tolerance = 1e-6)), CheckRule.AllTermsEqualOne).total shouldBe 1L
+    result(run(df, baseConf.copy(tolerance = 1e-12)), CheckRule.AllTermsEqualOne).total shouldBe 0L
   }
 
-  test("R01 treats a blank EAD_RA_RATE as not equal to 1, so the group is not flagged") {
+  test("CR01 treats a blank EAD_RA_RATE as not equal to 1, so the group is not flagged") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", ""))
 
-    result(run(df), DqRule.AllTermsEqualOne).total shouldBe 0L
+    result(run(df), CheckRule.AllTermsEqualOne).total shouldBe 0L
   }
 
-  test("R01 disabled: nothing evaluated, nothing removed") {
+  test("CR01 disabled: nothing evaluated, nothing removed") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "1"))
 
     val outcome = run(df, baseConf.copy(allTermsEqualOneEnabled = false))
-    result(outcome, DqRule.AllTermsEqualOne).status shouldBe "SKIPPED"
+    result(outcome, CheckRule.AllTermsEqualOne).status shouldBe "SKIPPED"
     outcome.cleaned.count() shouldBe 2L
   }
 
-  // ---- R02: negative EAD_RA_RATE -------------------------------------------
+  // ---- CR02: negative EAD_RA_RATE -------------------------------------------
 
-  test("R02 reports every negative EAD_RA_RATE and removes none of them") {
+  test("CR02 reports every negative EAD_RA_RATE and removes none of them") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "0,98"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "-0,15"),
       ("BCEF_CONSO_TF_Q", "A", "0,5", "-2,4"))
 
     val outcome = run(df, baseConf.copy(negativeMarker = ""))
-    val r02 = result(outcome, DqRule.NegativeEadRaRate)
+    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
 
     r02.total shouldBe 2L
     r02.status shouldBe "REPORTED"
@@ -171,7 +171,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     outcome.cleaned.count() shouldBe 3L // nothing removed
   }
 
-  test("R02 writes the marker in place of a negative value, keeping the line and the column order") {
+  test("CR02 writes the marker in place of a negative value, keeping the line and the column order") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "0,98"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "-0,15"))
@@ -183,7 +183,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     rows.length shouldBe 2                       // the line survives
     rows.map(_.getAs[String]("EAD_RA_RATE")) shouldBe Array("0,98", "NV")
 
-    val r02 = result(outcome, DqRule.NegativeEadRaRate)
+    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
     r02.valuesReplaced shouldBe 1L
     r02.marker shouldBe "NV"
     r02.action shouldBe "line(s) kept, 1 value(s) written as NV in the output"
@@ -191,7 +191,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     r02.findings.map(_.value) shouldBe Seq("-0,15")
   }
 
-  test("R02 marker is applied after the numeric filters, never before") {
+  test("CR02 marker is applied after the numeric filters, never before") {
     // 1 would be dropped by the >= 1 exclusion, -0,3 kept and marked; if the marker ran first the
     // exclusion would see a non-numeric cell and the row would survive unfiltered.
     val df = output(
@@ -205,12 +205,12 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     values shouldBe Array("NV", "0,9") // the "1" row is gone, the negative is marked
   }
 
-  test("R02 with replaceWith empty leaves the computed value in the output") {
+  test("CR02 with replaceWith empty leaves the computed value in the output") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "-0,15"))
 
     val outcome = run(df, baseConf.copy(negativeMarker = ""))
     outcome.cleaned.head().getAs[String]("EAD_RA_RATE") shouldBe "-0,15"
-    result(outcome, DqRule.NegativeEadRaRate).action shouldBe "kept (reporting only)"
+    result(outcome, CheckRule.NegativeEadRaRate).action shouldBe "kept (reporting only)"
   }
 
   test("by DEFAULT no marker is configured, so a negative value is written as computed") {
@@ -219,39 +219,39 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     val conf = com.typesafe.config.ConfigFactory.parseString(
       """tseadfwd_app {
         |  TS_EAD_FWD { tmpPath = "target", tableName = "T" }
-        |  DATA_QUALITY { enabled = true }
+        |  COHERENCE_CHECK { enabled = true }
         |}""".stripMargin)
 
-    val dq = DqConfig.from(conf)
-    dq.negativeMarker shouldBe ""
-    dq.negativeEnabled shouldBe true
-    dq.allTermsEqualOneRemoves shouldBe true
+    val checks = CheckConfig.from(conf)
+    checks.negativeMarker shouldBe ""
+    checks.negativeEnabled shouldBe true
+    checks.allTermsEqualOneRemoves shouldBe true
 
-    val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "-0,15")), dq)
+    val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "-0,15")), checks)
     outcome.cleaned.head().getAs[String]("EAD_RA_RATE") shouldBe "-0,15"
   }
 
-  test("R02 disabled: no marker is written even when a negative value is present") {
+  test("CR02 disabled: no marker is written even when a negative value is present") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "-0,15"))
 
     val outcome = run(df, baseConf.copy(negativeEnabled = false))
     outcome.cleaned.head().getAs[String]("EAD_RA_RATE") shouldBe "-0,15"
-    result(outcome, DqRule.NegativeEadRaRate).status shouldBe "SKIPPED"
+    result(outcome, CheckRule.NegativeEadRaRate).status shouldBe "SKIPPED"
   }
 
-  test("R02 caps the listed rows but keeps the full count") {
+  test("CR02 caps the listed rows but keeps the full count") {
     val rows = (1 to 10).map(i => ("BCEF_CONSO_TF_Q", "C", s"$i", s"-0,$i"))
     val outcome = run(output(rows: _*), baseConf.copy(maxRowsInReport = 3))
-    val r02 = result(outcome, DqRule.NegativeEadRaRate)
+    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
 
     r02.total shouldBe 10L
     r02.findings.size shouldBe 3
     r02.truncated shouldBe true
   }
 
-  test("R02 does not fire on zero — only strictly negative values") {
+  test("CR02 does not fire on zero — only strictly negative values") {
     val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "0")))
-    result(outcome, DqRule.NegativeEadRaRate).total shouldBe 0L
+    result(outcome, CheckRule.NegativeEadRaRate).total shouldBe 0L
   }
 
   // ---- the exclude_ead_ra_rate_ge_1 engine option, moved out of the mapper ---
@@ -265,10 +265,10 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
 
     val outcome = run(df, baseConf.copy(excludeEadRaRateGe1 = true))
 
-    // R01 still sees — and names — the Central curve, which the old in-mapper filter had already
+    // CR01 still sees — and names — the Central curve, which the old in-mapper filter had already
     // deleted before any rule could group it.
-    result(outcome, DqRule.AllTermsEqualOne).total shouldBe 1L
-    // Central removed by R01 (2 rows), Adverse term 0 dropped by the >= 1 exclusion (1 row).
+    result(outcome, CheckRule.AllTermsEqualOne).total shouldBe 1L
+    // Central removed by CR01 (2 rows), Adverse term 0 dropped by the >= 1 exclusion (1 row).
     outcome.cleaned.count() shouldBe 1L
     outcome.report.rowsOut shouldBe 1L
   }
@@ -280,11 +280,11 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "1"))
 
-    val report = new DataQualityMapper(baseConf)(spark).reportOnly(df, "some.csv", "standalone")
+    val report = new CoherenceCheckMapper(baseConf)(spark).reportOnly(df, "some.csv", "standalone")
 
-    report.results.find(_.rule == DqRule.AllTermsEqualOne).get.total shouldBe 1L
-    report.results.find(_.rule == DqRule.AllTermsEqualOne).get.status shouldBe "REPORTED"
-    report.results.find(_.rule == DqRule.AllTermsEqualOne).get.action should
+    report.results.find(_.rule == CheckRule.AllTermsEqualOne).get.total shouldBe 1L
+    report.results.find(_.rule == CheckRule.AllTermsEqualOne).get.status shouldBe "REPORTED"
+    report.results.find(_.rule == CheckRule.AllTermsEqualOne).get.action should
       include("the main job removes these lines")
     report.rowsIn shouldBe 2L
     report.rowsOut shouldBe 2L
@@ -307,7 +307,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
   test("the report names the output file the rules were run on") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
 
-    val report = new DataQualityMapper(baseConf)(spark)
+    val report = new CoherenceCheckMapper(baseConf)(spark)
       .apply(df, source = "TS_EAD_FWD", runId = "test-run",
         outputFile = "hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv").report
 
@@ -320,7 +320,7 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
     val conf = baseConf.copy(sourcePath = "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv")
 
-    val report = new DataQualityMapper(conf)(spark).reportOnly(df, "TS_EAD_FWD", "standalone")
+    val report = new CoherenceCheckMapper(conf)(spark).reportOnly(df, "TS_EAD_FWD", "standalone")
 
     report.outputFile shouldBe "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv"
     report.outputFileName shouldBe "A_PREVIOUS_VINTAGE.csv"
@@ -329,37 +329,37 @@ class DataQualityMapperSpec extends AnyFunSuite with Matchers with SparkTestSess
   test("an unknown output file leaves the report — and the log line — without one") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
 
-    val report = new DataQualityMapper(baseConf)(spark)
+    val report = new CoherenceCheckMapper(baseConf)(spark)
       .apply(df, source = "TS_EAD_FWD", runId = "test-run", outputFile = "").report
 
     report.outputFileName shouldBe ""
-    report.summaryLine should startWith("DATA QUALITY - PASS")
+    report.summaryLine should startWith("COHERENCE CHECK - PASS")
   }
 
-  // ---- DqConfig: the output file is resolved as the writer resolves it -------
+  // ---- CheckConfig: the output file is resolved as the writer resolves it -------
 
-  private def confWith(outputBlock: String): DqConfig =
-    DqConfig.from(ConfigFactory.parseString(
+  private def confWith(outputBlock: String): CheckConfig =
+    CheckConfig.from(ConfigFactory.parseString(
       s"""tseadfwd_app {
          |  TS_EAD_FWD { tmpPath = "localRun/tseadfwd/output", tableName = "TS_EAD_FWD_25Q4", $outputBlock }
          |}""".stripMargin))
 
-  test("DqConfig resolves the collapsed single CSV file") {
+  test("CheckConfig resolves the collapsed single CSV file") {
     confWith("""format = "csv", singleFile = true""").outputFile shouldBe
       "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.csv"
   }
 
-  test("DqConfig defaults to the collapsed CSV when neither key is set") {
+  test("CheckConfig defaults to the collapsed CSV when neither key is set") {
     confWith("""mode = "overwrite"""").outputFile shouldBe
       "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.csv"
   }
 
-  test("DqConfig says so when the output is left as a part-file directory") {
+  test("CheckConfig says so when the output is left as a part-file directory") {
     confWith("""format = "csv", singleFile = false""").outputFile should
       include("TS_EAD_FWD_25Q4 (part-file directory)")
   }
 
-  test("DqConfig resolves an Excel output to the workbook") {
+  test("CheckConfig resolves an Excel output to the workbook") {
     confWith("""format = "com.crealytics.spark.excel"""").outputFile shouldBe
       "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.xlsx"
   }

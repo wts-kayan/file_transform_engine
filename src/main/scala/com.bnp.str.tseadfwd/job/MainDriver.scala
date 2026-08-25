@@ -8,7 +8,7 @@ import com.bnp.str.tseadfwd.reader.PrimaryReader
 import com.bnp.str.tseadfwd.utility.{PrimaryConstants, PrimaryUtilities}
 import com.bnp.str.tseadfwd.writer.PrimaryWriter
 import com.bnp.str.tseadfwd.audit.TseadfwdAudit
-import com.bnp.str.tseadfwd.dataquality.{DataQualityMapper, DqConfig, DqWriter}
+import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckWriter, CoherenceCheckMapper}
 import org.slf4j.LoggerFactory
 
 object MainDriver {
@@ -54,23 +54,23 @@ object MainDriver {
         new PrimaryRunner(primaryReader, outputTableName)(sparkSession, config)
           .run_tseadfwd_runner()
 
-      // ---- business data quality ----
+      // ---- business coherence check ----
       // The mapper now emits EVERY computed term, so the rules see the complete curve. The rules
-      // themselves only ever REPORT (DataQualityMapper never writes); the removal below is the main
+      // themselves only ever REPORT (CoherenceCheckMapper never writes); the removal below is the main
       // job's, applied once, to the frame it is about to write. An HTML report naming what was taken
       // out is written alongside the output.
-      val dq = DqConfig.from(config)
+      val checks = CheckConfig.from(config)
       val toWrite =
-        if (!dq.enabled) {
-          logger.info("DATA_QUALITY.enabled = false -> rules not evaluated, every computed row written")
+        if (!checks.enabled) {
+          logger.info("COHERENCE_CHECK.enabled = false -> rules not evaluated, every computed row written")
           df
         } else {
           val outcome =
-            new DataQualityMapper(dq)(sparkSession)
+            new CoherenceCheckMapper(checks)(sparkSession)
               .apply(df, source = outputTableName, runId = audit.runId,
-                outputFile = dq.outputFile) // the file this very frame is about to be written to
+                outputFile = checks.outputFile) // the file this very frame is about to be written to
           logger.info(outcome.report.summaryLine)
-          DqWriter.writeHtml(dq.htmlPath, outcome.report)(sparkSession)
+          CheckWriter.writeHtml(checks.htmlPath, outcome.report)(sparkSession)
           outcome.cleaned
         }
 

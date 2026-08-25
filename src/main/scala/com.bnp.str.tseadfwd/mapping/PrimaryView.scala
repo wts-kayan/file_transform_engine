@@ -42,7 +42,7 @@ object PrimaryView {
    *
    * Every RA function takes the cap as a parameter defaulting to this value. Passing
    * [[NO_RUNOFF_CAP]] instead disables the freeze, which — together with `vectorFactored`'s
-   * `emitNegative` — is what lets a NEGATIVE `EAD_RA_RATE` reach the output for the data-quality
+   * `emitNegative` — is what lets a NEGATIVE `EAD_RA_RATE` reach the output for the coherence-check
    * rule to report. Driven by `parameters.allow_negative_ead_ra_rate` (default false).
    */
   val RUNOFF_RA_CAP = 1.0
@@ -244,7 +244,7 @@ object PrimaryView {
    *    is unreachable anyway: the RA series is truncated at the first RA >= 1, so every (1-RA)
    *    factor stays > 0 and the product never goes negative.
    *  - true — the true running product is emitted, so a negative `EAD_RA_RATE` reaches the output
-   *    and the data-quality rule `R02` can report it. Only meaningful together with
+   *    and the coherence-check rule `CR02` can report it. Only meaningful together with
    *    [[NO_RUNOFF_CAP]]; with the cap in place there is still nothing negative to emit.
    *
    * `acc` always keeps the true running product, so subsequent terms compound correctly either way.
