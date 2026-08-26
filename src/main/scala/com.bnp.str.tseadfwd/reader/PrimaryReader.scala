@@ -34,8 +34,11 @@ class PrimaryReader()(implicit sparkSession: SparkSession, conf: Config)
   private lazy val macro_variable: DataFrame =
     readScenarioFromExcelSheets(PrimaryConstants.MACRO_VARIABLE)(sparkSession, conf)
 
+  // inferTypes = false: PARAMETRAGE is a pure text table, and its SEGMENT column mixes labels
+  // with numeric codes (MORTGAGE, INVEST_PRO, 10276). Typed inference would read those codes as
+  // numbers and spell them back as "10276.0", which no longer matches the RA SEGMENT it keys on.
   private lazy val parametrage: DataFrame =
-    readDataFrameFromExcel(PrimaryConstants.PARAMETRAGE)(sparkSession, conf)
+    readDataFrameFromExcel(PrimaryConstants.PARAMETRAGE, inferTypes = false)(sparkSession, conf)
 
   def getMappingReader(input: String): DataFrame = {
     input.toUpperCase match {

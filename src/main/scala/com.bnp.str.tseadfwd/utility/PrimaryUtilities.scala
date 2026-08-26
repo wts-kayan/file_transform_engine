@@ -192,7 +192,7 @@ object PrimaryUtilities {
     df.format(date)
   }
 
-  def readDataFrameFromExcel(tableName: String)
+  def readDataFrameFromExcel(tableName: String, inferTypes: Boolean = true)
                             (implicit sparkSession: SparkSession,
                              config: Config): DataFrame = {
 
@@ -202,7 +202,7 @@ object PrimaryUtilities {
     val path = addonInputConfig.getString("path")
     val sheetName = addonInputConfig.getString("sheetNames")
 
-    readExcelSheet(path, sheetName, label = tableName)
+    readExcelSheet(path, sheetName, label = tableName, inferTypes = inferTypes)
   }
 
   /**
@@ -213,9 +213,13 @@ object PrimaryUtilities {
    * workbook itself, so there is no `tableName` to look up. Both paths share these options, so a
    * discovered sheet parses exactly like a configured one.
    *
-   * @param label what to call this read in the log (a conf key, or "discovered")
+   * @param label      what to call this read in the log (a conf key, or "discovered")
+   * @param inferTypes `true` (default) reads NUMERIC cells as numbers, which is what every sheet
+   *                   feeding the calculation wants — see the `inferSchema` note below. Pass
+   *                   `false` for a pure text table (PARAMETRAGE), where a column mixing labels
+   *                   with codes (`MORTGAGE`, `10276`) must stay a string in every row.
    */
-  def readExcelSheet(path: String, sheetName: String, label: String)
+  def readExcelSheet(path: String, sheetName: String, label: String, inferTypes: Boolean = true)
                     (implicit sparkSession: SparkSession): DataFrame = {
 
     log.info(
@@ -230,12 +234,22 @@ object PrimaryUtilities {
       .option("header", "true")
       .option("setErrorCellsToFallbackValues", "true")
       .option("treatEmptyValuesAsNulls", "true")
-      .option("inferSchema", "false")
-      // With inferSchema=false, POI's DataFormatter renders cells using the JVM default
-      // locale, so large numbers pick up locale-specific grouping (e.g. a French work PC
-      // emits a non-breaking space "-8 128" and a comma decimal). usePlainNumberFormat
-      // forces a canonical, locale-independent rendering: '.' decimal, NO grouping, no
-      // scientific notation — so the same Excel parses identically on en-US and fr-FR hosts.
+      // Read a NUMERIC cell as a number, not as the text Excel happens to DISPLAY.
+      //
+      // With inferSchema=false every cell arrives as POI's DataFormatter rendering: the cell's
+      // number FORMAT applied in the JVM default locale. The same stored value then reaches us
+      // as "-92925", "-92 925" or "-92,925" depending on how the workbook is formatted and on
+      // the host — and that text has to be un-formatted again by a parser that cannot always
+      // tell a grouping separator from a decimal one. A cell formatted `#,##0` renders
+      // "-92,925", which reads back as -92.925: a thousand times too small, and silently so.
+      // usePlainNumberFormat does NOT prevent this — spark-excel substitutes its plain renderer
+      // for the "General" and "@" formats only, so any explicit numeric format still groups.
+      //
+      // inferSchema=true skips the rendering entirely and hands over the cell's stored double,
+      // identical on every host and for every number format. Key columns stay strings, and a
+      // column that really is textual (or mixed) still arrives as a string, which the
+      // locale-tolerant `tryDouble` continues to cover.
+      .option("inferSchema", if (inferTypes) "true" else "false")
       .option("usePlainNumberFormat", "true")
       .option("addColorColumns", "false")
       .load()
@@ -274,7 +288,9 @@ object PrimaryUtilities {
         .option("header", "true")
         .option("setErrorCellsToFallbackValues", "true")
         .option("treatEmptyValuesAsNulls", "true")
-        .option("inferSchema", "false")
+        // Numeric cells as numbers — see the note in readExcelSheet. The Date column is
+        // text and stays text; only the macro-variable columns become doubles.
+        .option("inferSchema", "true")
         .option("usePlainNumberFormat", "true")
         .option("addColorColumns", "false")
         .load()
