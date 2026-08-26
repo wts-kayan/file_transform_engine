@@ -1,4 +1,4 @@
-# RA input comparison report — treatment design
+# Ticket 977 — RA input comparison report: treatment design
 
 > **Status: design + layout reference.** This branch delivers (a) the design of the treatment and
 > (b) the **workbook it must produce**, generated from the repo's own inputs:
@@ -84,7 +84,7 @@ Every `INPUTS_RA` sheet is a wide table — five key columns then one column per
 * **Key** = `PERIMETER × SEGMENT × RATE_TYPE × FWL_TYPE × METRIC` (48 rows per perimeter today:
   4 segments × 3 FWL types × 4 metrics).
 * **Sheet discovery** reuses the engine's existing two gates
-  ([`RaSheetDiscovery`](../../src/main/scala/com.bnp.str.tseadfwd/reader/RaSheetDiscovery.scala)):
+  ([`RaSheetDiscovery`](../../../src/main/scala/com.bnp.str.tseadfwd/reader/RaSheetDiscovery.scala)):
   the sheet NAME matches `^RA[_ ].*`, and its CONTENT carries the five key columns. A divider tab
   such as `Inputs RA ->` is skipped, with the reason reported — the comparison job must not invent
   its own rule here.
@@ -182,7 +182,7 @@ every 12 months), placed in a 4 × 4 grid under the `Evol` block.
 
 Same tables and the same curves as a **self-contained** page, following the pattern already used for
 the coherence checks
-([`coherence/CheckHtmlView`](../../src/main/scala/com.bnp.str.tseadfwd/coherence/CheckHtmlView.scala)):
+([`coherence/CheckHtmlView`](../../../src/main/scala/com.bnp.str.tseadfwd/coherence/CheckHtmlView.scala)):
 one HTML string, inline CSS, no external asset, written through Hadoop's `FileSystem` so the path may
 be local or HDFS. Curves as inline SVG polylines (361 points, two per chart) — no chart library.
 Whether TWIST needs it in addition to the workbook is [Q8](#q8).
@@ -217,7 +217,7 @@ com.bnp.str.tseadfwd
 └── utility/PrimaryConstants      + the new literals (block anchors, row order, segment labels)
 ```
 
-Follows the [module contract](../../README.md#module-contract): the computation core is a pure,
+Follows the [module contract](../../../README.md#module-contract): the computation core is a pure,
 unit-testable object; IO stays in reader/writer; every literal lands in `PrimaryConstants`.
 
 **Volume.** Two files × 6 perimeters × 48 rows × 361 months ≈ 200 k cells — small. The core runs
@@ -257,7 +257,7 @@ runnable specification of the geometry, so §6.1 cannot drift from what the busi
 python3 tools/ra_compare/build_ra_compare_workbook.py \
   --new localRun/tseadfwd/input/Inputs_RA_v2.xlsx \
   --old localRun/tseadfwd/input/Inputs_RA.xlsx \
-  --out docs/tseadfwd/Compare_RA_reference_model.xlsx \
+  --out docs/tseadfwd/977/Compare_RA_reference_model.xlsx \
   --new-start 2026-01 --old-start 2025-10
 ```
 
