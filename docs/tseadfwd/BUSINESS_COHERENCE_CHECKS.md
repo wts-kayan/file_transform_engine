@@ -22,7 +22,7 @@ can abort the run — nothing here ever aborts anything.
 | Rule | What it checks | What happens to the line |
 |---|---|---|
 | **CR01** — all terms equal to 1 | Lines are grouped **by `EAD_MATRIX_ID` *and* `SCENARIO_ID`** — one group is one curve. The group is flagged when **every** one of its terms carries `EAD_RA_RATE = 1` (within `tolerance`): exposure is full at every term, no loss ever accrues, so the line carries no information. A single term below 1 keeps the whole group. `EAD_MATRIX_ID` ends in `_Q` / `_Y`, so a matrix's quarterly and yearly curves are **two separate groups**. | **Removed** from the output and listed in the report. `remove = false` keeps the lines and only reports them. |
-| **CR02** — negative `EAD_RA_RATE` | The rate is strictly negative, which is not a possible exposure factor (it must lie in `[0, 1]`). Zero does not fire; a blank/unparseable cell is treated as *not* a number, never as 1. | **Line and value kept as computed**, and reported. A `replaceWith` token can mask the value for a consumer that cannot take a negative. |
+| **CR02** — negative or zero `EAD_RA_RATE` | The rate is strictly negative, which is not a possible exposure factor (it must lie in `[0, 1]`). With `includeZero = true` the rule **also** fires on exactly `0` — a term where the exposure has fully run off; with `includeZero` unset (the default) a zero does not fire. The two are named apart in the report (`negative exposure factor` vs `zero exposure factor (exposure fully run off)`). A blank/unparseable cell is treated as *not* a number, never as 1. | **Line and value kept as computed**, and reported — `includeZero` widens what is *reported*, it never removes a line. A `replaceWith` token can mask the value for a consumer that cannot take a negative; the mask follows the same scope, so a zero is masked too. |
 
 Rule identity, wording and the report's value model live in `coherence/CheckModel.scala`
 (`CheckRule`, `CheckFinding`, `CheckRuleResult`, `CheckReport`) — pure data, no Spark, no IO.
@@ -150,6 +150,8 @@ COHERENCE_CHECK {
     }
     negative_ead_ra_rate {
       enabled         = true
+      includeZero     = true # fire on <= 0, not just < 0. Default false = strictly negative only.
+                             # Reporting only either way: the line is never removed
       replaceWith     = ""  # empty: write the value AS COMPUTED. A token (e.g. "NV") only for a
                             # consumer that cannot take a negative — it makes the cell non-numeric
       maxRowsInReport = 500 # cap on rows LISTED; the count is always complete
@@ -194,7 +196,8 @@ as a **difference** instead of killing the job.
 - `CoherenceCheckMapperSpec` — 26 tests: CR01 grouping (including `_Q` vs `_Y` as separate groups), the
   single-deviating-term boundary, tolerance, blank values, `remove = false`, disabled rules; CR02
   reporting, the marker and its ordering after the numeric filters, the empty-`replaceWith` default,
-  zero not firing, the report cap; `exclude_ead_ra_rate_ge_1` running *after* the rules; `reportOnly`
+  zero not firing by default and firing under `includeZero` (including the two findings named apart,
+  the marker masking a zero, and the lines still not being removed), the report cap; `exclude_ead_ra_rate_ge_1` running *after* the rules; `reportOnly`
   removing nothing; a clean output producing `PASS`; and the output file the report names — carried
   through from the caller, defaulted to the file a standalone run read, and resolved from the conf for
   a collapsed CSV, a part-file directory and an Excel workbook.

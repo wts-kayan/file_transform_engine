@@ -27,6 +27,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
     allTermsEqualOneRemoves = true,
     tolerance = 1e-9,
     negativeEnabled = true,
+    negativeIncludesZero = false,
     maxRowsInReport = 500,
     negativeMarker = "NV",
     excludeEadRaRateGe1 = false)
@@ -249,9 +250,58 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
     r02.truncated shouldBe true
   }
 
-  test("CR02 does not fire on zero — only strictly negative values") {
+  test("CR02 does not fire on zero by default — only strictly negative values") {
     val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "0")))
     result(outcome, CheckRule.NegativeEadRaRate).total shouldBe 0L
+  }
+
+  test("CR02 fires on zero when includeZero is on") {
+    val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "0")),
+      baseConf.copy(negativeIncludesZero = true))
+    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
+
+    r02.total shouldBe 1L
+    r02.findings.head.detail shouldBe "zero exposure factor (exposure fully run off)"
+  }
+
+  test("CR02 with includeZero names a zero and a negative apart") {
+    val outcome = run(
+      output(
+        ("BCEF_CONSO_TF_Q", "C", "0", "0"),
+        ("BCEF_CONSO_TF_Q", "C", "1", "-0,25"),
+        ("BCEF_CONSO_TF_Q", "C", "2", "0,5")),
+      baseConf.copy(negativeIncludesZero = true, negativeMarker = ""))
+    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
+
+    r02.total shouldBe 2L
+    r02.findings.map(_.detail) should contain theSameElementsAs Seq(
+      "zero exposure factor (exposure fully run off)", "negative exposure factor")
+  }
+
+  test("CR02 with includeZero still REMOVES nothing — the lines stay in the output") {
+    val rows = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "0"),
+      ("BCEF_CONSO_TF_Q", "C", "1", "-0,25"),
+      ("BCEF_CONSO_TF_Q", "C", "2", "0,5"))
+    val outcome = run(rows, baseConf.copy(negativeIncludesZero = true, negativeMarker = ""))
+
+    outcome.cleaned.count() shouldBe 3L
+    outcome.report.rowsOut shouldBe 3L
+    result(outcome, CheckRule.NegativeEadRaRate).rowsRemoved shouldBe 0L
+  }
+
+  test("CR02 marker masks a zero too when includeZero is on") {
+    val outcome = run(
+      output(
+        ("BCEF_CONSO_TF_Q", "C", "0", "0"),
+        ("BCEF_CONSO_TF_Q", "C", "1", "0,5")),
+      baseConf.copy(negativeIncludesZero = true, negativeMarker = "NV"))
+
+    val byTerm = outcome.cleaned.collect()
+      .map(r => r.getAs[String]("TERM") -> r.getAs[String]("EAD_RA_RATE")).toMap
+    byTerm("0") shouldBe "NV"
+    byTerm("1") shouldBe "0,5"
+    result(outcome, CheckRule.NegativeEadRaRate).valuesReplaced shouldBe 1L
   }
 
   // ---- the exclude_ead_ra_rate_ge_1 engine option, moved out of the mapper ---
