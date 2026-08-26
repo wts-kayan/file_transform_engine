@@ -378,6 +378,26 @@ being silently defaulted.
 
 Unit tests: `CoherenceCheckMapperSpec` (rules, tolerance, removal), `CheckHtmlViewSpec` (rendering, escaping).
 
+### RA input comparison report (design)
+
+The Risk team compares two `INPUTS_RA` vintages by hand today (`Compare_RA_<PERIMETER>_…xlsx`): the
+`%change` of the four metrics (`CRD`, `RA STAT`, `RA FI`, `RE`) per perimeter × segment × `FWL_TYPE`
+over the 361 monthly columns, plus the two curves superimposed on a chart. **Designed, not yet
+implemented** — the treatment, the sheet geometry, the acceptance tests and the ten open questions
+are in [docs/tseadfwd/RA_COMPARISON_REPORT_DESIGN.md](docs/tseadfwd/RA_COMPARISON_REPORT_DESIGN.md).
+
+The workbook the future job must produce is committed as
+`docs/tseadfwd/Compare_RA_reference_model.xlsx` and is regenerated from any two RA files by the
+layout reference / acceptance fixture:
+
+```bash
+python3 tools/ra_compare/build_ra_compare_workbook.py \
+  --new localRun/tseadfwd/input/Inputs_RA_v2.xlsx \
+  --old localRun/tseadfwd/input/Inputs_RA.xlsx \
+  --out docs/tseadfwd/Compare_RA_reference_model.xlsx \
+  --new-start 2026-01 --old-start 2025-10
+```
+
 ### Validation
 
 `EadFwdValidationApp` runs the real reader → runner → mapper pipeline against the `localRun` sample and
