@@ -34,8 +34,11 @@ class PrimaryReader()(implicit sparkSession: SparkSession, conf: Config)
   private lazy val macro_variable: DataFrame =
     readScenarioFromExcelSheets(PrimaryConstants.MACRO_VARIABLE)(sparkSession, conf)
 
+  // inferTypes = false: PARAMETRAGE is a pure text table, and its SEGMENT column mixes labels
+  // with numeric codes (MORTGAGE, INVEST_PRO, 10276). Typed inference would read those codes as
+  // numbers and spell them back as "10276.0", which no longer matches the RA SEGMENT it keys on.
   private lazy val parametrage: DataFrame =
-    readDataFrameFromExcel(PrimaryConstants.PARAMETRAGE)(sparkSession, conf)
+    readDataFrameFromExcel(PrimaryConstants.PARAMETRAGE, inferTypes = false)(sparkSession, conf)
 
   def getMappingReader(input: String): DataFrame = {
     input.toUpperCase match {
@@ -54,13 +57,72 @@ class PrimaryReader()(implicit sparkSession: SparkSession, conf: Config)
   }
 
   /**
-   * All RA perimeter inputs unioned into one frame. Each entity is read independently and any
-   * whose sheet is **absent or unreadable is skipped with a warning** — the sample workbook only
-   * carries `RA_BCEF`, whereas a full workbook also has BGL/BNL/FORTIS/LS. The mapper keys every
-   * row by `PERIMETER`, so a `unionByName` is all that is needed to bring the extra entities into
-   * the computation (PARAMETRAGE then drives which of those perimeters actually produce matrices).
+   * All RA perimeter inputs unioned into one frame.
+   *
+   * Two ways to get there, decided by the configuration:
+   *  - `tseadfwd_app.RA` present -> [[raInputDiscovered]]: the sheets are found IN THE WORKBOOK, so
+   *    a new entity tab is picked up with no code and no conf change;
+   *  - block absent -> [[raInputConfigured]]: the historical per-entity blocks (`RA_BCEF`, …).
+   *
+   * Either way the mapper keys every row by `PERIMETER` — a column INSIDE the sheet, never the sheet
+   * name — so `unionByName` is all that is needed to bring an extra entity into the computation, and
+   * PARAMETRAGE drives which of those perimeters actually produce matrices.
    */
-  def raInput: DataFrame = {
+  def raInput: DataFrame =
+    RaSheetConfig.from(conf) match {
+      case Some(cfg) => raInputDiscovered(cfg)
+      case None      => raInputConfigured
+    }
+
+  /**
+   * Dynamic path: discover the RA sheets, read each one, union.
+   *
+   * A discovered sheet passes two gates — its NAME matched the pattern in [[RaSheetDiscovery]], and
+   * its CONTENT must carry the RA key columns, checked here now that the frame is readable. A sheet
+   * that fails the second gate is skipped with a warning rather than failing the run: a workbook the
+   * business edits will grow tabs that are not RA tables, and one of them must not stop tonight's
+   * production run.
+   */
+  private def raInputDiscovered(cfg: RaSheetConfig): DataFrame = {
+    val selection = RaSheetDiscovery.discover(cfg, sparkSession.sparkContext.hadoopConfiguration)
+    log.info(selection.summary)
+
+    val frames = selection.selected.flatMap { s =>
+      try {
+        val df = readExcelSheet(s.path, s.sheet, label = s"RA sheet '${s.sheet}'")(sparkSession)
+        val missing = RaSheetDiscovery.missingColumns(df.columns.toSeq, cfg.requireColumns)
+        if (missing.nonEmpty) {
+          log.warn(s"RA sheet '${s.sheet}' in ${s.path} skipped (not an RA table: missing " +
+            s"column(s) ${missing.mkString(", ")})")
+          None
+        } else {
+          log.info(s"RA sheet '${s.sheet}' loaded from ${s.path}")
+          Some(df)
+        }
+      } catch {
+        case ex: Throwable =>
+          log.warn(s"RA sheet '${s.sheet}' in ${s.path} skipped " +
+            s"(${rootCause(ex).getClass.getSimpleName}: ${rootCause(ex).getMessage})")
+          None
+      }
+    }
+
+    if (frames.isEmpty)
+      throw new IllegalStateException(
+        s"No RA sheet could be read. Workbook(s): ${cfg.paths.mkString(", ")}; sheets matching " +
+          s"'${cfg.sheetPattern}' and carrying ${cfg.requireColumns.mkString("/")}: none. " +
+          (if (selection.skipped.isEmpty) "The workbook(s) listed no sheet at all — check the path resolves on the default filesystem."
+           else "Sheets seen: " + selection.skipped.map(s => s"'${s.sheet}' (${s.reason})").mkString(", ")))
+
+    frames.reduce((a, b) => a.unionByName(b, allowMissingColumns = true))
+  }
+
+  /**
+   * Historical path: one conf block per entity. Each is read independently and any whose sheet is
+   * **absent or unreadable is skipped with a warning** — the sample workbook only carries `RA_BCEF`,
+   * whereas a full workbook also has BGL/BNL/FORTIS/LS.
+   */
+  private def raInputConfigured: DataFrame = {
     val sources: Seq[(String, () => DataFrame)] = Seq(
       PrimaryConstants.RA_BCEF   -> (() => ra_bcef),
       PrimaryConstants.RA_BGL    -> (() => ra_bgl),

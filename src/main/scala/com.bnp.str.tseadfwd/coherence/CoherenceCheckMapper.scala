@@ -33,6 +33,7 @@ final case class CheckConfig(
                            allTermsEqualOneRemoves: Boolean,
                            tolerance: Double,
                            negativeEnabled: Boolean,
+                           negativeIncludesZero: Boolean,
                            maxRowsInReport: Int,
                            negativeMarker: String,
                            excludeEadRaRateGe1: Boolean,
@@ -108,6 +109,11 @@ object CheckConfig {
       allTermsEqualOneRemoves = bool(one, "remove", default = true),
       tolerance               = dbl(one, "tolerance", default = 1e-9),
       negativeEnabled         = bool(neg, "enabled", default = true),
+      // Widen CR02 from "strictly negative" to "non-positive". A zero rate is not impossible the
+      // way a negative one is — it is the exposure fully extinguished — but the business asked to
+      // see those terms named too. Default false keeps the historical < 0 scope for a conf that
+      // does not mention the key.
+      negativeIncludesZero    = bool(neg, "includeZero", default = false),
       maxRowsInReport         = int(neg, "maxRowsInReport", default = 500),
       // Empty by default: a negative value only exists once `allow_negative_ead_ra_rate` has been
       // opted into, and whoever opted in asked to SEE it. Masking it behind a token would hide the
@@ -135,7 +141,7 @@ final case class CheckOutcome(cleaned: DataFrame, report: CheckReport)
  *
  * Rules (see [[CheckRule]]):
  *  - CR01 all terms = 1 for one (EAD_MATRIX_ID, SCENARIO_ID) -> the group's rows are removed
- *  - CR02 negative EAD_RA_RATE -> reported, never removed
+ *  - CR02 negative (and, with `includeZero`, zero) EAD_RA_RATE -> reported, never removed
  *
  * `EAD_RA_RATE` and `TERM` reach here as decimal-comma STRINGS (`PrimaryMapper.fmtNumber`), so every
  * comparison goes through [[numeric]] rather than a raw string test.
@@ -146,12 +152,30 @@ class CoherenceCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
 
   private val TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
+  /**
+   * Temp column carrying the PARSED rate into the CR02 finding builder, so "was this hit a zero or
+   * a negative?" is answered from the number rather than by re-parsing the decimal-comma string.
+   * Underscore-prefixed: the output schema is fixed and must not gain a column by accident.
+   */
+  private val CR02_RATE = "__cr02_rate"
+
   /** Decimal-comma string -> Double; blank/absent -> null (a null is never "equal to 1"). */
   private def numeric(c: Column): Column =
     when(c.isNull || trim(c) === lit(""), lit(null).cast(DoubleType))
       .otherwise(regexp_replace(trim(c), ",", ".").cast(DoubleType))
 
   private def rate: Column = numeric(col(OUT_EAD_RA_RATE))
+
+  /**
+   * The CR02 predicate: strictly negative, or non-positive when `includeZero` is on.
+   *
+   * Defined once and used by all three CR02 code paths — the report, the marker replacement and
+   * the replaced-value count — so widening the rule can never widen one of them and not the others.
+   * A null rate makes the comparison null, i.e. not a hit: an unparseable cell is a finding for
+   * CR01's own null handling, never a silent zero.
+   */
+  private def cr02Hit: Column =
+    if (cfg.negativeIncludesZero) rate <= lit(0.0) else rate < lit(0.0)
 
   /**
    * Evaluate every rule WITHOUT touching the data. `rowsOut` equals `rowsIn`, and each result is
@@ -204,11 +228,12 @@ class CoherenceCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
     // CR02's marker goes on LAST: it turns the cell into a non-numeric token, so every numeric
     // predicate above has to have run already. The line itself stays — only its value is replaced.
     val markNegatives = cfg.negativeEnabled && cfg.negativeMarker.nonEmpty
-    val replaced = if (markNegatives) filtered.where(rate < lit(0.0)).count() else 0L
+    val replaced = if (markNegatives) filtered.where(cr02Hit).count() else 0L
     val cleaned = if (markNegatives && replaced > 0L) markNegativeValues(filtered) else filtered
 
     if (replaced > 0L)
-      log.info(s"CR02: $replaced negative EAD_RA_RATE value(s) written as '${cfg.negativeMarker}'")
+      log.info(s"CR02: $replaced ${if (cfg.negativeIncludesZero) "non-positive" else "negative"} " +
+        s"EAD_RA_RATE value(s) written as '${cfg.negativeMarker}'")
 
     val report = CheckReport(
       source = source,
@@ -275,25 +300,34 @@ class CoherenceCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
   // ---- CR02: negative EAD_RA_RATE -------------------------------------------
 
   /**
-   * Every output row whose `EAD_RA_RATE` is strictly negative. Reporting only — these rows stay in
-   * the output. The listing is capped at [[CheckConfig.maxRowsInReport]]; the total count is not.
+   * Every output row whose `EAD_RA_RATE` is strictly negative — or non-positive, when
+   * `includeZero` is on. Reporting only: these rows stay in the output, because the term exists
+   * and dropping it would leave a hole in the curve. The listing is capped at
+   * [[CheckConfig.maxRowsInReport]]; the total count is not.
    *
-   * With the engine's default settings this rule finds nothing by construction: the run-off freeze
-   * truncates the RA series before the cumulative product can go negative, and a sub-zero product
-   * would be reported as 1 anyway. Set `parameters.allow_negative_ead_ra_rate = true` to let those
-   * values through — see [[com.bnp.str.tseadfwd.mapping.PrimaryView.vectorFactored]].
+   * The two hits mean different things and are named apart in the report: a NEGATIVE rate is
+   * non-physical, whereas a ZERO rate is a real state — the exposure fully run off — that the
+   * business wants listed rather than treated as an error.
+   *
+   * On the negative side this rule finds nothing under the engine's default settings, by
+   * construction: the run-off freeze truncates the RA series before the cumulative product can go
+   * negative, and a sub-zero product would be reported as 1 anyway. Set
+   * `parameters.allow_negative_ead_ra_rate = true` to let those values through — see
+   * [[com.bnp.str.tseadfwd.mapping.PrimaryView.vectorFactored]]. Zeros need no such switch: a
+   * cumulative product can reach 0 (or round to it at the emitted scale) on its own.
    */
   private def ruleNegative(df: DataFrame, valuesReplaced: Long = 0L, marker: String = ""): CheckRuleResult = {
     if (!cfg.negativeEnabled)
       return CheckRuleResult(CheckRule.NegativeEadRaRate, enabled = false, 0L, Seq.empty, 0L, applied = false)
 
-    val negatives = df.where(rate.isNotNull && rate < lit(0.0))
+    val negatives = df.where(rate.isNotNull && cr02Hit)
     val total = negatives.count()
 
     val listed =
       if (total == 0L) Seq.empty[CheckFinding]
       else negatives
         .orderBy(col(OUT_MATRIX_ID), col(OUT_SCENARIO_ID), numeric(col(OUT_TERM)))
+        .withColumn(CR02_RATE, rate)
         .limit(cfg.maxRowsInReport)
         .collect()
         .map { r =>
@@ -302,7 +336,9 @@ class CoherenceCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
             scenarioId = r.getAs[String](OUT_SCENARIO_ID),
             term = r.getAs[String](OUT_TERM),
             value = r.getAs[String](OUT_EAD_RA_RATE),
-            detail = "negative exposure factor")
+            detail =
+              if (r.getAs[Double](CR02_RATE) == 0.0) "zero exposure factor (exposure fully run off)"
+              else "negative exposure factor")
         }
         .toSeq
 
@@ -313,13 +349,16 @@ class CoherenceCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
   // ---- removal --------------------------------------------------------------
 
   /**
-   * Replace a negative `EAD_RA_RATE` with the configured marker (e.g. `NV`), in place, keeping the
+   * Replace a rate the rule fired on with the configured marker (e.g. `NV`), in place, keeping the
    * column where it is. The row survives: the term exists, and dropping it would leave a hole in the
    * curve — what must not survive is a number a consumer could mistake for a real exposure factor.
+   *
+   * Scope follows [[cr02Hit]], so with `includeZero` a masked zero is masked too: the marker means
+   * "this rule fired here", and a reader must not have to know which half of the rule it was.
    */
   private def markNegativeValues(df: DataFrame): DataFrame =
     df.withColumn(OUT_EAD_RA_RATE,
-      when(rate < lit(0.0), lit(cfg.negativeMarker)).otherwise(col(OUT_EAD_RA_RATE)))
+      when(cr02Hit, lit(cfg.negativeMarker)).otherwise(col(OUT_EAD_RA_RATE)))
 
   /** Anti-join the flagged (matrix, scenario) keys out of the output. */
   private def dropGroups(df: DataFrame, keys: Seq[(String, String)]): DataFrame = {

@@ -36,17 +36,24 @@ object CheckRule {
     removes = true)
 
   /**
-   * CR02 — a negative `EAD_RA_RATE` is non-physical (an exposure factor lies in [0, 1]). Reported,
-   * never removed: the business wants to see it, not to have it silently disappear.
+   * CR02 — a negative `EAD_RA_RATE` is non-physical (an exposure factor lies in [0, 1]); a zero one
+   * is possible but means the exposure has fully run off. Reported, never removed: the business
+   * wants to see both, not to have them silently disappear.
+   *
+   * The text has to describe the rule in BOTH scopes, because `includeZero` decides which one runs
+   * and this value is a stable constant — results are matched on it by identity.
    */
   val NegativeEadRaRate = CheckRule(
     id = "CR02",
-    title = "Negative EAD_RA_RATE",
+    title = "Negative or zero EAD_RA_RATE",
     detail = "EAD_RA_RATE is strictly negative, which is not a possible exposure factor (it must " +
-      "lie between 0 and 1). The line is KEPT and, by default, so is the value as computed: a " +
-      "negative rate can only appear once allow_negative_ead_ra_rate has been switched on, and the " +
-      "point of switching it on is to see the real number. Configure a marker (replaceWith) to have " +
-      "the value written as a token instead, for a consumer that cannot take a negative.",
+      "lie between 0 and 1). With rules.negative_ead_ra_rate.includeZero = true the rule ALSO " +
+      "fires on exactly 0: a term where the exposure has fully run off. With includeZero unset " +
+      "(the default) a zero does not fire and only strictly negative values are listed. Either " +
+      "way the line is KEPT and, by default, so is the value as computed: a negative rate can only " +
+      "appear once allow_negative_ead_ra_rate has been switched on, and the point of switching it " +
+      "on is to see the real number. Configure a marker (replaceWith) to have the value written as " +
+      "a token instead, for a consumer that cannot take a negative.",
     removes = false)
 
   /** Every rule, in report order. */

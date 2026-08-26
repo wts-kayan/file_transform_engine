@@ -537,6 +537,22 @@ class PrimaryMapper(
   }
 
   /**
+   * RA key tuples that occur more than once, most frequent first, as `PERIMETER|SEGMENT|…` strings.
+   *
+   * Keys are [[canon]]ed exactly as [[collectRa]] canons them, so this counts the collisions that
+   * would actually happen in the map — not cosmetic label differences that canon() already absorbs.
+   */
+  private def duplicateRaKeys(df: DataFrame): Seq[(String, Int)] = {
+    val cols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
+    df.select(cols.head, cols.tail: _*).collect()
+      .map(r => cols.indices.map(i => canon(str(r, i))).mkString("|"))
+      .groupBy(identity)
+      .collect { case (key, occurrences) if occurrences.length > 1 => key -> occurrences.length }
+      .toSeq
+      .sortBy { case (key, n) => (-n, key) }
+  }
+
+  /**
    * Technical control run on the parsed inputs BEFORE the calculation. Builds a list of
    * PASS/WARN/FAIL checks (label vocabulary, French-number integrity, stress legs, scenario
    * coverage, cross-consistency), logs a consolidated report, writes an auditable CSV next to
@@ -600,6 +616,39 @@ class PrimaryMapper(
 
     if (ra.isEmpty) add("RA.rows", Severity.Fail, "RA input parsed to zero series")
     else add("RA.rows", Severity.Pass, s"${ra.size} RA series parsed")
+
+    // --- duplicate series: the ONE failure the parsing cannot survive silently ---
+    // `collectRa` builds a Map, so two rows with the same key leave one series and drop the other
+    // WITHOUT a trace — and the surviving one is whichever came last. That is exactly what a
+    // double-loaded sheet produces (the same entity read from two workbooks), so with the RA sheets
+    // discovered rather than named one by one, this has to be a hard failure.
+    if (missingCols.isEmpty) {
+      val dups = duplicateRaKeys(raInput)
+      if (dups.isEmpty) add("RA.duplicateKeys", Severity.Pass, "no RA series appears twice")
+      else add("RA.duplicateKeys", Severity.Fail,
+        s"${dups.size} RA series key(s) appear more than once, e.g. " +
+          dups.take(5).map { case (k, n) => s"$k x$n" }.mkString("; ") +
+          " -> one of each pair would be SILENTLY dropped (same entity loaded twice?)")
+    }
+
+    // --- an entity is present in RA but nothing in PARAMETRAGE asks for it ---
+    // It produces no output and, before this check, said nothing about it. That is the likely shape
+    // of "the business added a sheet and the run ignored it": the sheet loaded fine, the matrices
+    // just never existed. A WARN, not a FAIL — a perimeter carried in the workbook but not yet
+    // configured is a normal intermediate state, not a broken run.
+    if (missingCols.isEmpty) {
+      val paramPerims =
+        parametrage.select(COL_PERIMETER).distinct().collect().map(r => canon(str(r, 0))).toSet
+      val orphanPerims = raInput.select(COL_PERIMETER).distinct().collect()
+        .map(r => str(r, 0)).filter(_.nonEmpty)
+        .filterNot(p => paramPerims.contains(canon(p)))
+        .distinct.sorted
+      if (orphanPerims.isEmpty) add("RA.perimeters", Severity.Pass,
+        s"every RA perimeter is referenced by PARAMETRAGE")
+      else add("RA.perimeters", Severity.Warn,
+        s"perimeter(s) loaded from RA but absent from PARAMETRAGE, so they produce NO output: " +
+          orphanPerims.mkString(", "))
+    }
 
     // --- label vocabulary (canonicalized) ---
     val fwlPresent = ra.keySet.map(_._4)
