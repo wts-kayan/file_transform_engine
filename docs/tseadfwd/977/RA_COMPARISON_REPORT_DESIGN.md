@@ -217,18 +217,28 @@ already writes for the output side.
 ## 7. Where it lives in the code
 
 A **new job in the `tseadfwd` module**, not a new module: it reads the same `INPUTS_RA` workbook with
-the same discovery rules, ships in the same jar and records the same run audit. It touches nothing in
-the production pipeline — `MainDriver` is unchanged.
+the same discovery rules and ships in the same jar. It touches nothing in the production pipeline —
+`MainDriver` is unchanged, and the job only ever READS the input workbooks.
+
+**Built 2026-08-27:**
 
 ```
 com.bnp.str.tseadfwd
-├── job/RaCompareDriver           entry point (one arg: application.conf), reads COMPARE_RA
-├── reader/RaCompareReader        loads the TWO workbooks via RaSheetDiscovery, returns two frames
-├── mapping/RaCompareView         PURE core: intersection, %change, RA, %RA, dropped-key report
-├── writer/RaCompareExcelWriter   POI (XSSFWorkbook + XDDF charts) — §6.1 geometry
-├── writer/RaCompareHtmlView      self-contained HTML — §6.2
-└── utility/PrimaryConstants      + the new literals (block anchors, row order, segment labels)
+├── job/CompareAndReportDriver     entry point (one arg: application.conf), reads COMPARE_AND_REPORT
+│                                  + CompareAndReportConfig, and the §6.3 flat CSV
+├── reader/RaCompareReader         loads ONE workbook via RaSheetDiscovery into the series map
+├── mapping/RaCompareView          PURE core: keys, intersection, %change, layout rules
+└── writer/RaCompareExcelWriter    POI (XSSFWorkbook + XDDF charts) — the §6.1 geometry
 ```
+
+`writer/RaCompareHtmlView` (§6.2) is **not built** — Excel is the deliverable and the HTML page is
+deferred ([Q8](#q8)).
+
+The driver is named for the config block the business asked for (`COMPARE_AND_REPORT`), not
+`RaCompareDriver` as this section first sketched. `RaCompareView` holds the layout rules — metric
+rows, sheet naming, segment ordering — next to the arithmetic, so the writer reads them rather than
+redeclaring them; nothing new was needed in `PrimaryConstants`, since the RA column and label names
+were already there.
 
 Follows the [module contract](../../../README.md#module-contract): the computation core is a pure,
 unit-testable object; IO stays in reader/writer; every literal lands in `PrimaryConstants`.
@@ -254,10 +264,13 @@ COMPARE_AND_REPORT {
   segmentOrder = ["MORTGAGE", "INVEST_PRO", "INVEST_CORP", "CONSO"]   # Q14; unlisted follow, A-Z
   xlsxPath  = "localRun/tseadfwd/output/Compare_RA.xlsx"
   csvPath   = "localRun/tseadfwd/output/Compare_RA.csv"     # §6.3, optional
-  chartStep = 12               # x-axis label every N months
   safeDiv   = true             # false reproduces the manual file's #DIV/0! (Q5)
 }
 ```
+
+No `chartStep` either: `XDDFCategoryAxis` exposes no tick-label skip and the `CTSkip` type needed to
+reach the underlying axis is absent from `poi-ooxml-lite`, so the Python reference's `tickLblSkip` has
+no POI equivalent worth a new schema dependency — Excel thins a 361-point axis by itself.
 
 No `newStart` / `oldStart`: the report carries no dates ([Q4](#q4)). No `htmlPath` for now — Excel
 is the deliverable and the HTML page is deferred ([Q8](#q8)).
@@ -432,6 +445,20 @@ Nothing is waiting on the business. Two items are deferred rather than decided:
 | Acceptance test **T6** | deferred by [Q7](#q7) — needs the manual workbook and the two inputs it came from |
 | The **HTML report** (§6.2) | deferred by [Q8](#q8) — designed, not built, pending what the TWIST tab serves |
 
-The remaining work is the Scala job of §7. `RaCompareView` — the pure core — is fully specified by
-§4 and §5 and can be built and unit-tested (T1–T4) without POI; the writer follows §6.1, whose
-geometry is pinned by the regenerated reference model.
+The Scala job of §7 is **built and passing**: T1, T2 and T4 as 20 unit tests in
+`RaCompareViewSpec`, and T5 verified by diffing the job's own workbook against the regenerated
+reference model — same sheets, same anchors, same column-B layout, same `Evol` formulas, same 48
+chart titles. T7 checked structurally (zip integrity, 61 XML parts parse, 48 charts).
+
+What is left, in the order it makes sense to do it:
+
+| | |
+|---|---|
+| **T5 as a repeatable test** | the golden comparison ran as a script; it belongs in the suite, which means committing a small fixture pair and a reader for it |
+| **T6** | deferred by [Q7](#q7) — needs the manual workbook |
+| **HTML report** | deferred by [Q8](#q8) |
+| **TWIST wiring** | out of this repo's scope; the job writes a file, TWIST serves it |
+
+One caveat worth carrying forward: the reference model and the Scala job agree because both were
+written from this document, so T5 proves they have not *drifted* — it does not independently prove
+either matches what the Risk team produces by hand. That is exactly what T6 is for.
