@@ -19,6 +19,15 @@ object PrimaryConstants {
   val VARIABLE_CCF = "CCF"
   val ACTIVE_IND_ON = "1"
 
+  // key columns of the output: a row carrying no information in any of them is dropped before the
+  // write (the built-in query exposes app.ACTION_ID under its ADDON_ID alias, a custom `queryName`
+  // may keep the original name, so both spellings are candidates)
+  val COL_PERIMETER_ID = "PERIMETER_ID"
+  val COL_ACTION_ID = "ACTION_ID"
+  val COL_ADDON_ID = "ADDON_ID"
+  val COL_OPERAND = "OPERAND"
+  val OUTPUT_KEY_COLUMNS = Seq(COL_PERIMETER_ID, COL_ACTION_ID, COL_ADDON_ID, COL_OPERAND)
+
   val MODE_APPEND = "Append"
   val APP_CONF = "addons_app"
 
