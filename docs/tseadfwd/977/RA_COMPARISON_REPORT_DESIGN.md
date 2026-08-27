@@ -157,7 +157,7 @@ One workbook per run, named `Compare_RA_<PERIMETERS>_<reference>.xlsx`. Sheets:
 
 | Sheet | Content |
 |---|---|
-| `COMPARE INFO` | the two source paths, the RA sheets read on each side, months compared, keys compared, keys dropped on each side, the `%change` / `RA` / `%RA` definitions |
+| `COMPARE INFO` | the two source paths, months compared, keys compared, keys dropped on each side, the `%change` definition, what the metrics/months/values conventions are, and the engine (`IRIS`) |
 | `<PERIMETER> BASELINE` | the three blocks + charts, `FWL_TYPE = BASELINE` |
 | `<PERIMETER> -100` | idem, `FWL_TYPE = STRESS (-)` |
 | `<PERIMETER> +100` | idem, `FWL_TYPE = STRESS (+)` |
@@ -189,10 +189,18 @@ file's own shape re-anchored to the new geometry), so a reviewer can audit any c
 
 **Presentation.** Distinct from the geometry above, and deliberately not pinned by T5:
 
+* Block titles are coloured by side: **`Updated` blue** (`BDD7EE`), **`Previous` orange**
+  (`F8CBAD`), `Evol` keeping the manual workbook's yellow. Three stacked blocks of identical tables
+  are easy to lose your place in, and the colour says which side you are reading before the word
+  does. Light tints, since they sit behind black text.
 * Sheet tabs are coloured by stress leg — slate for `BASELINE`, orange for `STRESS (-)`, blue for
   `STRESS (+)`. One workbook holds three sheets per perimeter ([Q9](#q9)), which is eighteen
   near-identically named tabs at six perimeters. Blue and orange rather than red and green, since
-  this is the only thing in the workbook carrying meaning in colour alone.
+  colour is doing real work here.
+
+  > Note the two schemes reuse the same pair: on a **tab**, blue/orange means the stress leg; on a
+  > **block title**, it means which of the two files. They are read in different places and never
+  > side by side, but it is worth knowing they are not the same axis.
 * `COMPARE INFO` row heights follow their content. The cells wrap, but a wrapped cell at the default
   height shows one line, and the dropped-key list runs to several hundred characters — so the report
   was naming excluded keys (§4) and then hiding them.
