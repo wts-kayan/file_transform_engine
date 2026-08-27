@@ -63,6 +63,10 @@ rows 78-108 … same geometry, 37 rows lower again;  every cell is  =(C5-C42)/C4
 rows 112+   charts: one per (metric × segment), two curves — Updated vs Previous
 ```
 
+That is the manual file. What the engine produces is §6.1: the derived rows are gone, the month
+index row and the second label column went with the business review of 2026-08-27 (§6.1.1), and the
+anchors are 1 / 29 / 57 with the data starting at column `B`.
+
 Three things the US text does not say but the manual file does, and the engine must reproduce:
 
 1. ~~**Two derived rows** sit next to the four metrics in every table~~ — **not reproduced.** The
@@ -167,23 +171,46 @@ macro keep working):
 
 | Constant | Value |
 |---|---|
-| Title rows (`Updated` / `Previous` / `Evol`) | 1 / 30 / 59 |
-| Month index row of each block | title row + 2 |
-| First segment table header | 4 / 33 / 62 |
+| Title rows (`Updated` / `Previous` / `Evol`) | 1 / 29 / 57 |
+| First segment table header | 3 / 31 / 59 — title row + 2 |
 | Table pitch | 6 rows (header + 4 metric rows + 1 blank) |
-| First data column | `C` |
+| First data column | `B` |
+| Row label column | `A` — the metric name, and nothing else |
 | Metric row order | `CRD`, `RA STAT`, `RA FI`, `RE` |
 | Segment order | configuration; default `MORTGAGE`, `INVEST_PRO`, `INVEST_CORP`, `CONSO`, then anything else alphabetically |
 | Segment labels | the input's own `SEGMENT` — header reads `<SEGMENT> a <RATE_TYPE>` |
-| Column headers | `M1 … M361` on every block; **no calendar dates anywhere** |
+| Column headers | `M1 … M361` on every table header row; **no calendar dates anywhere** |
+| `CRD` sign | `−1 ×` the input, so an outstanding reads **positive** |
 
 > The manual file's anchors were 1 / 38 / 75 at a pitch of 8. Dropping the two derived rows
 > ([Q6](#q6), [Q11](#q11)) takes a table to 6 rows, so each block is 4 × 6 = 24 rows of tables
-> instead of 32 and the two lower blocks move up by 8 and 16. The generator **derives** these
-> anchors from the row list rather than hard-coding them, so they stay correct if the list changes
-> again.
+> instead of 32. The **business review of 2026-08-27** (§6.1.1) then took one more row off the top
+> of every block, bringing the anchors to 1 / 29 / 57. The generator **derives** these anchors from
+> the row list rather than hard-coding them, so they stay correct if the list changes again.
 
-The whole `Evol` block is written as **live Excel formulas** (`=IFERROR((C5-C34)/C34,"")`, the manual
+#### 6.1.1 Business review of 2026-08-27
+
+Three changes to the first release, asked for on the produced workbook and applied to both the job
+and the reference model:
+
+1. **The duplicated label bands are gone.** Each block carried a standalone month index row above
+   its first table, repeating the `M1 … M361` the table headers already carry; and column A carried
+   the manual file's business wording for each metric (`Outstanding`, `Amount PPstat`,
+   `Amount PPfin`, `Amount RE`) next to column B's `CRD`, `RA STAT`, `RA FI`, `RE`. Both said the
+   same thing twice. The metric name moves into column A, the data starts at **B**, and the charts
+   take their categories from **the table header row of the table they chart** — the same labels,
+   on the row the chart is about.
+2. **`CRD` is written as `−1 ×` the input**, so an outstanding reads positive. The input carries it
+   negative (it is an exposure), which put every curve below the axis and made the `%change` read
+   against a negative base. The flip is **presentation only and changes no arithmetic**:
+   `(−n − −o) / −o` is exactly `(n − o) / o`, so every percentage in the report is the number it
+   was. A zero is normalised to `+0`, since negating one gives IEEE `−0.0` and Excel renders that
+   as `-0`. `COMPARE INFO` states the convention, and the same convention is applied to the §6.3
+   CSV so a reconciliation row matches the cell it describes.
+3. **No freeze pane.** It froze column A/B and the rows above the first table — which pinned a
+   header belonging to the `Updated` block over the `Previous` and `Evol` blocks further down.
+
+The whole `Evol` block is written as **live Excel formulas** (`=IFERROR((B4-B32)/B32,"")`, the manual
 file's own shape re-anchored to the new geometry), so a reviewer can audit any cell by clicking it.
 `--raw-div` reproduces the bare formula and its `#DIV/0!` instead of the `IFERROR` blank.
 
@@ -209,8 +236,8 @@ file's own shape re-anchored to the new geometry), so a reviewer can audit any c
   TWIST serves the workbook for viewing ([Q8](#q8)), so this was left out rather than guessed at.
 
 **Charts.** One line chart per *(metric × segment)* — 16 per sheet — titled `<METRIC> - <SEGMENT>`,
-two series named `Updated` and `Previous`, categories = the month index row (text labels, one tick
-every 12 months), placed in a 4 × 4 grid under the `Evol` block.
+two series named `Updated` and `Previous`, categories = the charted table's own header row (text
+labels, one tick every 12 months), placed in a 4 × 4 grid under the `Evol` block.
 
 ### 6.2 HTML report (secondary)
 
@@ -458,9 +485,10 @@ The intersection rule of §4 stands unchanged.
 <a id="q16"></a>**Q16 — Always in millions of euros?**
 > *"Like in input RA file like we did for RA calcultation"*
 
-Values are used exactly as they appear in `INPUTS_RA`, with no rescaling — the convention the RA
+Values are used at the scale they appear in `INPUTS_RA`, with no rescaling — the convention the RA
 calculation already follows. The `En M EUR` block header is an assertion about the input, not a
-conversion.
+conversion. Only `CRD`'s **sign** is changed, on the business review of 2026-08-27 (§6.1.1), and
+`COMPARE INFO` says so on the face of the report.
 
 ---
 
@@ -471,13 +499,13 @@ suite:
 
 | Test | Where |
 |---|---|
-| T1, T2, T4 | `RaCompareViewSpec` — 20 unit tests on the pure core, no Spark and no workbook |
-| **T5** | `RaCompareGoldenSpec` — 8 assertions running the real pipeline over the two inputs the reference model was generated from, diffing sheets, the whole column-B layout, the table headers, **every** `Evol` formula, the values and the chart titles |
+| T1, T2, T4 | `RaCompareViewSpec` — 25 unit tests on the pure core, no Spark and no workbook, including the `CRD` display sign and its invariance on the `%change` |
+| **T5** | `RaCompareGoldenSpec` — 10 assertions running the real pipeline over the two inputs the reference model was generated from, diffing sheets, the whole column-A layout, the table header row, **every** `Evol` formula, the values and the chart titles, plus two that pin the 2026-08-27 review: the dropped label bands stay dropped and `CRD` is written positive on both sides |
 | T7 | checked structurally — zip integrity, every XML part parses, 48 charts |
 
 T5 is a *golden* test, so it is worth exactly what it catches. It was checked against a deliberate
 one-row anchor change (`BlockGap` 2 → 3): three of its assertions failed and named the drift
-precisely — `row 62 → 64`, `C34 → C35` — while the sheet, header and chart assertions correctly
+precisely — a shifted block row and a re-anchored formula — while the sheet, header and chart assertions correctly
 stayed green. It reads the two real workbooks rather than a miniature fixture, and costs about 25
 seconds; the whole tseadfwd suite is 126 tests in about 45 seconds.
 
