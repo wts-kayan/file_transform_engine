@@ -100,9 +100,11 @@ object RaCompareView {
   /**
    * `(new - old) / old`, or `None` when the report must leave the cell blank.
    *
-   * Deliberately NOT guarded with `abs()`: `CRD` is negative (it is an exposure), and the ratio of
-   * two negatives is the correct relative change. Taking absolute values would silently flip the
-   * sign of every CRD move in the report.
+   * Deliberately NOT guarded with `abs()`: the ratio of two same-signed values is the correct
+   * relative change whatever that sign is, and taking absolute values would silently flip the sign
+   * of every move on a negative metric. The `CRD` reaching this function is already positive — the
+   * report negates it for display ([[displayValueAt]]) — but the guarantee has to hold on the raw
+   * value too, since the flip is presentation and this is the arithmetic.
    */
   def pctChange(newValue: Option[Double], oldValue: Option[Double]): (Option[Double], CellStatus) =
     (newValue, oldValue) match {
@@ -154,8 +156,9 @@ object RaCompareView {
       key <- result.compared
       i <- 0 until result.months
     } yield {
-      val n = valueAt(newSeries, key, i)
-      val o = valueAt(oldSeries, key, i)
+      // The displayed values, so a CSV row reconciles against the cell it describes.
+      val n = displayValueAt(newSeries, key, i)
+      val o = displayValueAt(oldSeries, key, i)
       val (pct, status) = pctChange(n, o)
       ComparedCell(key, i + 1, n, o, pct, status)
     }
@@ -163,6 +166,34 @@ object RaCompareView {
   /** Value of one series at a 0-based month, or `None` when the series is short or absent. */
   def valueAt(series: Series, key: RaKey, i: Int): Option[Double] =
     series.get(key).flatMap(a => if (i >= 0 && i < a.length) Some(a(i)) else None)
+
+  // ---- display sign ---------------------------------------------------------
+
+  /**
+   * Metrics the report shows with their sign reversed.
+   *
+   * `CRD` is an outstanding and `INPUTS_RA` carries it as a negative number (it is an exposure).
+   * The business asked on 2026-08-27 for it to READ positive — literally `-1 x` the input value —
+   * so the curves point the way a reader expects and the `%change` is read against a positive base.
+   *
+   * This is presentation only, and it changes no arithmetic: `(-n - -o) / -o == (n - o) / o`
+   * exactly, so every percentage in the report is the number it was before the flip. It is applied
+   * in ONE place — [[displayValueAt]] — so the workbook and the reconciliation CSV can never
+   * disagree about the sign of a cell.
+   */
+  val NegatedMetrics: Set[String] = Set(METRIC_CRD)
+
+  /** `-1` for a metric the report negates, `1` otherwise. */
+  def displaySign(metric: String): Double = if (NegatedMetrics.contains(metric)) -1.0 else 1.0
+
+  /** [[valueAt]] with the report's sign convention applied — what a cell actually shows. */
+  def displayValueAt(series: Series, key: RaKey, i: Int): Option[Double] =
+    valueAt(series, key, i).map { v =>
+      val flipped = v * displaySign(key.metric)
+      // Negating a zero gives IEEE -0.0, which Excel and the CSV both render as "-0". It is the
+      // same number, and reading it as a signed one in a report is a distraction.
+      if (flipped == 0.0) 0.0 else flipped
+    }
 
   // ---- table layout ---------------------------------------------------------
 

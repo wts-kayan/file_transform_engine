@@ -34,21 +34,37 @@ from openpyxl.utils import get_column_letter
 KEY_COLUMNS = ["PERIMETER", "SEGMENT", "RATE_TYPE", "FWL_TYPE", "METRIC"]
 SHEET_PATTERN = re.compile(r"^RA[_ ].*", re.IGNORECASE)
 
-# Metric rows of one segment table.
-# (row label in column A, row label in column B, kind)
+# Metric rows of one segment table, in order - the row label is the metric name itself.
 #
 # The four metrics of the INPUTS_RA file, and nothing else. The manual Risk workbook also
 # carries two DERIVED rows - RA = RA STAT + RA FI + RE, and %RA = RA x 12 / -CRD - which the
 # business dropped on 2026-08-27 (OPEN_QUESTIONS_977 Q6/Q11/Q12): the report works only from
 # the metrics present in the input. That decision is what makes a table 6 rows rather than 8.
-BLOCK_ROWS = [
-    ("Outstanding", "CRD", "metric"),      # CRD, as loaded (negative = exposure)
-    ("Amount PPstat", "RA STAT", "metric"),
-    ("Amount PPfin", "RA FI", "metric"),
-    ("Amount RE", "RE", "metric"),
-]
+#
+# The manual file's second label column (Outstanding / Amount PPstat / Amount PPfin / Amount RE,
+# next to CRD / RA STAT / RA FI / RE) went with the business review of 2026-08-27: it said the
+# same thing twice and cost a column on a 361-column sheet.
+BLOCK_ROWS = ["CRD", "RA STAT", "RA FI", "RE"]
 METRICS = ["CRD", "RA STAT", "RA FI", "RE"]          # the four metrics of the ticket
 CHART_METRICS = ["CRD", "RA STAT", "RA FI", "RE"]
+
+# Metrics the report shows with their sign reversed. CRD is an outstanding and INPUTS_RA carries
+# it negative (it is an exposure); the business asked on 2026-08-27 for it to READ positive -
+# literally -1 x the input. Presentation only: (-n - -o) / -o == (n - o) / o exactly, so every
+# Evol percentage is the number it was before the flip.
+NEGATED_METRICS = {"CRD"}
+
+
+def display_value(metric, value):
+    """The value as the report shows it: CRD negated, everything else untouched."""
+    if value is None:
+        return None
+    if metric not in NEGATED_METRICS:
+        return value
+    # Negating a zero gives -0.0, which Excel renders as "-0": the same number, read as a signed
+    # one. Not worth the distraction in a business report.
+    return 0.0 if value == 0 else -value
+
 
 # Segment tables are headed with the segment name AS IT APPEARS IN THE INPUT. The manual Risk
 # workbook uses French business wording (Immos / Invest pro / Invest corp / Conso); the business
@@ -65,11 +81,12 @@ FWL_ORDER = ["BASELINE", "STRESS (-)", "STRESS (+)"]
 # ------------------------------------------------------------ sheet geometry
 # The manual workbook's anchors were 1 / 38 / 75 with a pitch of 8 (header + 6 metric rows +
 # blank). Dropping the two derived rows (Q6/Q11) makes a table 6 rows - header + 4 metrics +
-# blank - so each block is 4 x 6 = 24 rows of tables instead of 32, and the blocks below move
-# up by 8 and 16 respectively. Derived here rather than hard-coded, so the anchors stay correct
-# if the row list changes again.
+# blank - so each block is 4 x 6 = 24 rows of tables instead of 32; dropping the standalone
+# month index row (business review 2026-08-27, it repeated the table header's own M1..Mn) takes
+# one more row off the top of every block. Derived here rather than hard-coded, so the anchors
+# stay correct if the row list changes again.
 BLOCK_PITCH = len(BLOCK_ROWS) + 2          # table header + metric rows + one blank
-TITLE_TO_FIRST_HEADER = 3                  # title, "En M EUR", month index row, then the table
+TITLE_TO_FIRST_HEADER = 2                  # title, "En M EUR", then the table header
 BLOCK_GAP = 2                              # blank rows between one block and the next title
 
 _BLOCK_HEIGHT = TITLE_TO_FIRST_HEADER + 4 * BLOCK_PITCH + BLOCK_GAP
@@ -79,7 +96,7 @@ EVOL_TITLE_ROW = PREVIOUS_TITLE_ROW + _BLOCK_HEIGHT
 UPDATED_FIRST_HEADER = UPDATED_TITLE_ROW + TITLE_TO_FIRST_HEADER
 PREVIOUS_FIRST_HEADER = PREVIOUS_TITLE_ROW + TITLE_TO_FIRST_HEADER
 EVOL_FIRST_HEADER = EVOL_TITLE_ROW + TITLE_TO_FIRST_HEADER
-FIRST_DATA_COL = 3  # column C
+FIRST_DATA_COL = 2  # column B - column A carries the metric name
 
 YELLOW = PatternFill("solid", fgColor="FFFF00")
 THIN = Side(style="thin", color="808080")
@@ -143,19 +160,13 @@ def perimeter_segments(series, perimeter, segment_order):
 def write_block(ws, first_header_row, title_row, title, series, perimeter, fwl,
                 segments, months, n_months):
     """One `Updated` / `Previous` block: the title, the month index row, four segment tables."""
-    ws.cell(title_row, 2, title).fill = YELLOW
-    ws.cell(title_row, 2).font = Font(bold=True)
-    ws.cell(title_row + 1, 2, "En M EUR").font = Font(italic=True)
-
-    index_row = first_header_row - 1
-    for i, label in enumerate(months[:n_months]):
-        c = ws.cell(index_row, FIRST_DATA_COL + i, label)
-        c.font = Font(size=8, color="808080")
-        c.alignment = Alignment(horizontal="center")
+    ws.cell(title_row, 1, title).fill = YELLOW
+    ws.cell(title_row, 1).font = Font(bold=True)
+    ws.cell(title_row + 1, 1, "En M EUR").font = Font(italic=True)
 
     for b, (segment, rate_type) in enumerate(segments):
         header = first_header_row + b * BLOCK_PITCH
-        h = ws.cell(header, 2, "%s a %s" % (segment, rate_type))
+        h = ws.cell(header, 1, "%s a %s" % (segment, rate_type))
         h.font, h.border = Font(bold=True), BOX
         # Month labels, not calendar dates: an INPUTS_RA sheet carries no as-of date and the
         # business dropped the dates rather than supply one per side (Q3/Q4).
@@ -163,49 +174,41 @@ def write_block(ws, first_header_row, title_row, title, series, perimeter, fwl,
             c = ws.cell(header, FIRST_DATA_COL + i, label)
             c.font, c.border, c.alignment = Font(bold=True, size=9), BOX, Alignment(horizontal="center")
 
-        for j, (label_a, label_b, kind) in enumerate(BLOCK_ROWS):
+        for j, metric in enumerate(BLOCK_ROWS):
             row = header + 1 + j
-            if label_a:
-                ws.cell(row, 1, label_a).font = Font(italic=True, size=9)
-            ws.cell(row, 2, label_b).font = Font(size=9)
-            ws.cell(row, 2).border = BOX
+            ws.cell(row, 1, metric).font = Font(size=9)
+            ws.cell(row, 1).border = BOX
             for i in range(n_months):
                 cell = ws.cell(row, FIRST_DATA_COL + i)
-                values = series.get((perimeter, segment, rate_type, fwl, label_b))
-                cell.value = values[i] if values else None
-                cell.number_format = FMT_CRD if label_b == "CRD" else FMT_AMOUNT
+                values = series.get((perimeter, segment, rate_type, fwl, metric))
+                # CRD is written as -1 x the input, so an outstanding reads positive; both blocks
+                # are flipped, so the Evol percentages below are unchanged.
+                cell.value = display_value(metric, values[i]) if values else None
+                cell.number_format = FMT_CRD if metric == "CRD" else FMT_AMOUNT
                 cell.font = Font(size=9)
 
 
 def write_evol_block(ws, segments, n_months, safe_div):
     """The `Evol` block: (Updated - Previous) / Previous, cell by cell, as live formulas."""
-    ws.cell(EVOL_TITLE_ROW, 2, "Evol").fill = YELLOW
-    ws.cell(EVOL_TITLE_ROW, 2).font = Font(bold=True)
-    ws.cell(EVOL_TITLE_ROW + 1, 2, "En M EUR").font = Font(italic=True)
-
-    for i in range(n_months):
-        src = ws.cell(UPDATED_FIRST_HEADER - 1, FIRST_DATA_COL + i).value
-        c = ws.cell(EVOL_FIRST_HEADER - 1, FIRST_DATA_COL + i, src)
-        c.font = Font(size=8, color="808080")
-        c.alignment = Alignment(horizontal="center")
+    ws.cell(EVOL_TITLE_ROW, 1, "Evol").fill = YELLOW
+    ws.cell(EVOL_TITLE_ROW, 1).font = Font(bold=True)
+    ws.cell(EVOL_TITLE_ROW + 1, 1, "En M EUR").font = Font(italic=True)
 
     for b, (segment, rate_type) in enumerate(segments):
         header = EVOL_FIRST_HEADER + b * BLOCK_PITCH
         up_header = UPDATED_FIRST_HEADER + b * BLOCK_PITCH
         prev_header = PREVIOUS_FIRST_HEADER + b * BLOCK_PITCH
-        h = ws.cell(header, 2, "%s a %s" % (segment, rate_type))
+        h = ws.cell(header, 1, "%s a %s" % (segment, rate_type))
         h.font, h.border = Font(bold=True), BOX
         for i in range(n_months):
             c = ws.cell(header, FIRST_DATA_COL + i,
                         ws.cell(up_header, FIRST_DATA_COL + i).value)
             c.font, c.border, c.alignment = Font(bold=True, size=9), BOX, Alignment(horizontal="center")
 
-        for j, (label_a, label_b, _) in enumerate(BLOCK_ROWS):
+        for j, metric in enumerate(BLOCK_ROWS):
             row = header + 1 + j
-            if label_a:
-                ws.cell(row, 1, label_a).font = Font(italic=True, size=9)
-            ws.cell(row, 2, label_b).font = Font(size=9)
-            ws.cell(row, 2).border = BOX
+            ws.cell(row, 1, metric).font = Font(size=9)
+            ws.cell(row, 1).border = BOX
             for i in range(n_months):
                 col = FIRST_DATA_COL + i
                 letter = get_column_letter(col)
@@ -223,9 +226,8 @@ def add_charts(ws, segments, n_months, chart_step):
     """One line chart per (metric x segment): the Updated and the Previous curve, superimposed."""
     first_chart_row = EVOL_FIRST_HEADER + len(segments) * BLOCK_PITCH + 3
     max_col = FIRST_DATA_COL + n_months - 1
-    index_row = UPDATED_FIRST_HEADER - 1
     for m, metric in enumerate(CHART_METRICS):
-        offset = [r[1] for r in BLOCK_ROWS].index(metric)
+        offset = BLOCK_ROWS.index(metric)
         for b, (segment, rate_type) in enumerate(segments):
             chart = LineChart()
             chart.title = "%s - %s" % (metric, segment)
@@ -241,15 +243,18 @@ def add_charts(ws, segments, n_months, chart_step):
                 series = chart.series[-1]
                 series.tx = SeriesLabel(v=name)
                 series.smooth = False
-            # month labels are TEXT (M1, M2, …): a strRef keeps Excel from numbering the axis 1..n
+            # month labels are TEXT (M1, M2, …): a strRef keeps Excel from numbering the axis 1..n.
+            # They come from this table's own header row - the standalone month index row that used
+            # to feed them was dropped as a duplicate (business review 2026-08-27).
+            cat_row = UPDATED_FIRST_HEADER + b * BLOCK_PITCH
             categories = AxDataSource(strRef=StrRef("'%s'!$%s$%d:$%s$%d" % (
-                ws.title, get_column_letter(FIRST_DATA_COL), index_row,
-                get_column_letter(max_col), index_row)))
+                ws.title, get_column_letter(FIRST_DATA_COL), cat_row,
+                get_column_letter(max_col), cat_row)))
             for series in chart.series:
                 series.cat = categories
             chart.x_axis.tickLblSkip = chart_step
             chart.x_axis.tickMarkSkip = chart_step
-            anchor = "%s%d" % (get_column_letter(2 + b * 9), first_chart_row + m * 16)
+            anchor = "%s%d" % (get_column_letter(1 + b * 9), first_chart_row + m * 16)
             ws.add_chart(chart, anchor)
 
 
@@ -275,7 +280,10 @@ def write_info_sheet(wb, args, new_meta, old_meta, common, only_new, only_old, n
         ("Metrics", "CRD, RA STAT, RA FI, RE - as they appear in the input. The manual "
                     "workbook's derived RA and %RA rows are not reproduced (Q6/Q11)."),
         ("Months", "identified as M1..M361; the report carries no calendar dates (Q3/Q4)."),
-        ("Values", "used exactly as they appear in INPUTS_RA, with no rescaling (Q16)."),
+        ("Values", "used at the scale they appear in INPUTS_RA, with no rescaling (Q16)."),
+        ("CRD sign", "shown as -1 x the input value, so an outstanding reads POSITIVE (business "
+                     "review 2026-08-27). Both sides are flipped, so every %change is the number "
+                     "it would be on the raw values."),
         ("", ""),
         ("Generated by", "tools/ra_compare/build_ra_compare_workbook.py"),
         ("Design", "docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md"),
@@ -329,9 +337,9 @@ def main():
                 continue
             ws = wb.create_sheet("%s %s" % (perimeter, FWL_SHEET_SUFFIX.get(fwl, fwl)))
             ws.sheet_view.showGridLines = False
-            ws.freeze_panes = "C4"
-            ws.column_dimensions["A"].width = 16
-            ws.column_dimensions["B"].width = 14
+            # No freeze pane: the business asked for it off (2026-08-27). It pinned the Updated
+            # block's header over the Previous and Evol blocks once you scrolled down.
+            ws.column_dimensions["A"].width = 14
             for i in range(n_months):
                 ws.column_dimensions[get_column_letter(FIRST_DATA_COL + i)].width = 11
 

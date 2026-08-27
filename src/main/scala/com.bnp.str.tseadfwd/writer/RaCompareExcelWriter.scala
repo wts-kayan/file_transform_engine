@@ -23,17 +23,22 @@ import org.slf4j.LoggerFactory
  * Sheet layout, per (perimeter x stress leg):
  * {{{
  *   row  1   Updated                       <- the new INPUTS_RA file
- *   row  3   M1 M2 M3 …                    <- month index row (the chart categories)
- *   row  4   MORTGAGE a TF                 <- segment table header, then M1..Mn labels
- *   rows 5-8    CRD · RA STAT · RA FI · RE
- *   rows 10-14  INVEST_PRO a TF …          <- next table, 6 rows lower
- *   row  30  Previous                      <- same geometry, 29 rows lower
- *   row  59  Evol                          <- every cell =IFERROR((C5-C34)/C34,"")
- *   rows 84+ charts: one per (metric x segment), Updated vs Previous
+ *   row  3   MORTGAGE a TF                 <- segment table header, then M1..Mn labels
+ *   rows 4-7    CRD · RA STAT · RA FI · RE
+ *   rows 9-13   INVEST_PRO a TF …          <- next table, 6 rows lower
+ *   row  29  Previous                      <- same geometry, 28 rows lower
+ *   row  57  Evol                          <- every cell =IFERROR((B4-B32)/B32,"")
+ *   rows 81+ charts: one per (metric x segment), Updated vs Previous
  * }}}
  *
  * The anchors are DERIVED from the row list rather than written down, so dropping or adding a
  * metric row moves every block correctly instead of silently overlapping the next one.
+ *
+ * Two label bands the first release carried are gone, on the business's review of 2026-08-27: the
+ * standalone month index row above each block (it repeated the table header's own M1..Mn) and
+ * column A's business wording for the metrics (`Outstanding`, `Amount PPstat`, …, next to the
+ * input's `CRD`, `RA STAT`, …). Both were duplicates, and on a 361-column sheet a duplicate costs
+ * a screen. The charts take their categories from the table header row that remains.
  */
 object RaCompareExcelWriter {
 
@@ -41,11 +46,11 @@ object RaCompareExcelWriter {
 
   /** Table header + one row per metric + one blank. */
   val BlockPitch: Int = RaCompareView.MetricRows.size + 2
-  /** Title, the "En M EUR" note, the month index row, then the first table header. */
-  val TitleToFirstHeader = 3
+  /** Title, the "En M EUR" note, then the first table header. */
+  val TitleToFirstHeader = 2
   val BlockGap = 2
-  /** Column C — A holds the business row label, B the metric name. */
-  val FirstDataCol = 2 // 0-based
+  /** Column B — A holds the metric name. */
+  val FirstDataCol = 1 // 0-based
 
   private def blockHeight(tables: Int): Int = TitleToFirstHeader + tables * BlockPitch + BlockGap
 
@@ -55,7 +60,6 @@ object RaCompareExcelWriter {
    */
   private final case class Block(label: String, titleRow: Int) {
     def firstHeader: Int = titleRow + TitleToFirstHeader
-    def monthIndexRow: Int = titleRow + 2
     def headerOf(table: Int): Int = firstHeader + table * BlockPitch
     /** 1-based Excel row of one metric inside one table — what a formula has to reference. */
     def excelMetricRow(table: Int, metric: Int): Int = headerOf(table) + 1 + metric + 1
@@ -76,13 +80,6 @@ object RaCompareExcelWriter {
 
   private def rgb(r: Int, g: Int, b: Int): Array[Byte] =
     Array(r.toByte, g.toByte, b.toByte)
-
-  /** Row labels of column A, as the manual workbook words them. */
-  private val RowLabelA: Map[String, String] = Map(
-    METRIC_CRD -> "Outstanding",
-    METRIC_RA_STAT -> "Amount PPstat",
-    METRIC_RA_FI -> "Amount PPfin",
-    METRIC_RE -> "Amount RE")
 
   final case class WriteOptions(newLabel: String = "Updated",
                                 oldLabel: String = "Previous",
@@ -137,9 +134,10 @@ object RaCompareExcelWriter {
     val evol = Block("Evol", 2 * h)
 
     sheet.setDisplayGridlines(false)
-    sheet.createFreezePane(FirstDataCol, updated.firstHeader)
-    sheet.setColumnWidth(0, 16 * 256)
-    sheet.setColumnWidth(1, 14 * 256)
+    // No freeze pane: the business asked for it off (2026-08-27). It froze the label column and
+    // the rows above the first table, which pinned a header belonging to the Updated block over
+    // the Previous and Evol blocks further down — actively misleading once you scroll.
+    sheet.setColumnWidth(0, 14 * 256)
 
     // The two sides are told apart by the colour of their title, not only by the word on it:
     // three stacked blocks of identical tables are easy to lose your place in when scrolling.
@@ -149,16 +147,11 @@ object RaCompareExcelWriter {
     addCharts(sheet, evol, updated, previous, tables, months, opts)
   }
 
-  /** An `Updated` or `Previous` block: title, month index row, one table per segment. */
+  /** An `Updated` or `Previous` block: title, then one table per segment. */
   private def writeValueBlock(sheet: XSSFSheet, st: Styles, block: Block, perimeter: String,
                               fwl: String, tables: Seq[(String, String)], months: Int,
                               series: Series, titleStyle: CellStyle): Unit = {
     title(sheet, st, block, titleStyle)
-
-    val idx = row(sheet, block.monthIndexRow)
-    RaCompareView.monthLabels(months).zipWithIndex.foreach { case (label, i) =>
-      val c = idx.createCell(FirstDataCol + i); c.setCellValue(label); c.setCellStyle(st.monthIndex)
-    }
 
     tables.zipWithIndex.foreach { case ((segment, rateType), t) =>
       val header = block.headerOf(t)
@@ -166,14 +159,15 @@ object RaCompareExcelWriter {
 
       RaCompareView.MetricRows.zipWithIndex.foreach { case (metric, m) =>
         val r = row(sheet, header + 1 + m)
-        val a = r.createCell(0); a.setCellValue(RowLabelA.getOrElse(metric, "")); a.setCellStyle(st.rowLabelA)
-        val b = r.createCell(1); b.setCellValue(metric); b.setCellStyle(st.rowLabelB)
+        val a = r.createCell(0); a.setCellValue(metric); a.setCellStyle(st.rowLabel)
 
         val key = RaKey(perimeter, segment, rateType, fwl, metric)
         val style = if (metric == METRIC_CRD) st.crd else st.amount
         for (i <- 0 until months) {
           val cell = r.createCell(FirstDataCol + i)
-          RaCompareView.valueAt(series, key, i) match {
+          // displayValueAt, not valueAt: CRD is written as -1 x the input, so an outstanding reads
+          // positive (2026-08-27). Both blocks are flipped, so every Evol percentage is unchanged.
+          RaCompareView.displayValueAt(series, key, i) match {
             case Some(v) => cell.setCellValue(v)
             case None    => // left blank: the series has no value here, and 0 would be a lie
           }
@@ -189,18 +183,12 @@ object RaCompareExcelWriter {
                              safeDiv: Boolean): Unit = {
     title(sheet, st, block, st.title)   // Evol keeps the manual workbook's yellow
 
-    val idx = row(sheet, block.monthIndexRow)
-    RaCompareView.monthLabels(months).zipWithIndex.foreach { case (label, i) =>
-      val c = idx.createCell(FirstDataCol + i); c.setCellValue(label); c.setCellStyle(st.monthIndex)
-    }
-
     tables.zipWithIndex.foreach { case ((segment, rateType), t) =>
       tableHeader(sheet, st, block.headerOf(t), segment, rateType, months)
 
       RaCompareView.MetricRows.zipWithIndex.foreach { case (metric, m) =>
         val r = row(sheet, block.headerOf(t) + 1 + m)
-        val a = r.createCell(0); a.setCellValue(RowLabelA.getOrElse(metric, "")); a.setCellStyle(st.rowLabelA)
-        val b = r.createCell(1); b.setCellValue(metric); b.setCellStyle(st.rowLabelB)
+        val a = r.createCell(0); a.setCellValue(metric); a.setCellStyle(st.rowLabel)
 
         val upRow = updated.excelMetricRow(t, m)
         val prevRow = previous.excelMetricRow(t, m)
@@ -218,18 +206,18 @@ object RaCompareExcelWriter {
   }
 
   private def title(sheet: XSSFSheet, st: Styles, block: Block, style: CellStyle): Unit = {
-    val t = row(sheet, block.titleRow).createCell(1)
+    val t = row(sheet, block.titleRow).createCell(0)
     t.setCellValue(block.label); t.setCellStyle(style)
-    // An assertion about the input, not a conversion: values are written exactly as the workbook
-    // holds them (Q16).
-    val u = row(sheet, block.titleRow + 1).createCell(1)
+    // An assertion about the input, not a conversion: values are written at the scale the workbook
+    // holds them (Q16). Only CRD's SIGN is changed, and that is stated on COMPARE INFO.
+    val u = row(sheet, block.titleRow + 1).createCell(0)
     u.setCellValue("En M EUR"); u.setCellStyle(st.unit)
   }
 
   private def tableHeader(sheet: XSSFSheet, st: Styles, rowIdx: Int, segment: String,
                           rateType: String, months: Int): Unit = {
     val r = row(sheet, rowIdx)
-    val h = r.createCell(1)
+    val h = r.createCell(0)
     // The input's own segment name, not the manual file's French label (Q14).
     h.setCellValue(s"$segment a $rateType"); h.setCellStyle(st.tableHeader)
     // Month labels, not calendar dates: an INPUTS_RA sheet carries no as-of date (Q3/Q4).
@@ -263,9 +251,12 @@ object RaCompareExcelWriter {
         chart.setTitleOverlay(false)
         chart.getOrAddLegend.setPosition(LegendPosition.BOTTOM)
 
+        // Categories come from this table's own header row — the standalone month index row that
+        // used to feed them was a duplicate and was dropped (2026-08-27). Same M1..Mn labels, and
+        // they sit on the row the chart is about.
+        val catRow = updated.headerOf(t)
         val cats = XDDFDataSourcesFactory.fromStringCellRange(sheet,
-          new CellRangeAddress(updated.monthIndexRow, updated.monthIndexRow,
-            FirstDataCol, FirstDataCol + months - 1))
+          new CellRangeAddress(catRow, catRow, FirstDataCol, FirstDataCol + months - 1))
         def rowSource(block: Block) = {
           val r = block.excelMetricRow(t, m) - 1 // back to 0-based for CellRangeAddress
           XDDFDataSourcesFactory.fromNumericCellRange(sheet,
@@ -320,7 +311,10 @@ object RaCompareExcelWriter {
       "Metrics" -> ("CRD, RA STAT, RA FI, RE - as they appear in the input. The manual workbook's " +
         "derived RA and %RA rows are not reproduced (977 Q6/Q11)."),
       "Months" -> "identified as M1..Mn; the report carries no calendar dates (977 Q3/Q4).",
-      "Values" -> "used exactly as they appear in INPUTS_RA, with no rescaling (977 Q16).",
+      "Values" -> "used at the scale they appear in INPUTS_RA, with no rescaling (977 Q16).",
+      "CRD sign" -> ("shown as -1 x the input value, so an outstanding reads POSITIVE " +
+        "(business review 2026-08-27). Both sides are flipped, so every %change is the number " +
+        "it would be on the raw values."),
       "" -> "",
       "Engine" -> "IRIS",
       "Generated by" -> "com.bnp.str.tseadfwd.job.CompareAndReportDriver",
@@ -329,7 +323,7 @@ object RaCompareExcelWriter {
     rows.zipWithIndex.foreach { case ((k, v), i) =>
       val r = sheet.createRow(i)
       val a = r.createCell(0); a.setCellValue(k)
-      a.setCellStyle(if (i == 0) st.title else st.rowLabelB)
+      a.setCellStyle(if (i == 0) st.title else st.rowLabel)
       val b = r.createCell(1); b.setCellValue(v); b.setCellStyle(st.info)
       r.setHeightInPoints(infoRowHeight(v))
     }
@@ -412,20 +406,11 @@ object RaCompareExcelWriter {
       s.setAlignment(org.apache.poi.ss.usermodel.HorizontalAlignment.CENTER)
       s
     }
-    val monthIndex: CellStyle = {
-      val s = wb.createCellStyle()
-      val f = wb.createFont(); f.setFontHeightInPoints(8.toShort); s.setFont(f)
-      s.setAlignment(org.apache.poi.ss.usermodel.HorizontalAlignment.CENTER)
-      s
-    }
     private def small = {
       val f = wb.createFont(); f.setFontHeightInPoints(9.toShort); f
     }
-    val rowLabelA: CellStyle = {
-      val s = wb.createCellStyle()
-      val f = wb.createFont(); f.setItalic(true); f.setFontHeightInPoints(9.toShort); s.setFont(f); s
-    }
-    val rowLabelB: CellStyle = { val s = wb.createCellStyle(); s.setFont(small); s }
+    /** Column A: the metric name, now the only row label the tables carry. */
+    val rowLabel: CellStyle = { val s = wb.createCellStyle(); s.setFont(small); s }
     val crd: CellStyle = { val s = wb.createCellStyle(); s.setFont(small); s.setDataFormat(fmt("#,##0")); s }
     val amount: CellStyle = { val s = wb.createCellStyle(); s.setFont(small); s.setDataFormat(fmt("#,##0.00")); s }
     val pct: CellStyle = { val s = wb.createCellStyle(); s.setFont(small); s.setDataFormat(fmt("0.00%")); s }

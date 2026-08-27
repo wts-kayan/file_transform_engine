@@ -382,20 +382,25 @@ Unit tests: `CoherenceCheckMapperSpec` (rules, tolerance, removal), `CheckHtmlVi
 
 The Risk team compares two `INPUTS_RA` vintages by hand today (`Compare_RA_<PERIMETER>_…xlsx`): the
 `%change` of the four metrics (`CRD`, `RA STAT`, `RA FI`, `RE`) per perimeter × segment × `FWL_TYPE`
-over the 361 monthly columns, plus the two curves superimposed on a chart. **Designed, not yet
-implemented** — the treatment, the sheet geometry, the acceptance tests and the ten open questions
-are in [docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md](docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md).
+over the 361 monthly columns, plus the two curves superimposed on a chart. `CompareAndReportDriver`
+produces it instead — the treatment, the sheet geometry, the acceptance tests and the business
+answers are in
+[docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md](docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md).
 
-The workbook the future job must produce is committed as
+Each sheet is three stacked blocks (`Updated` / `Previous` / `Evol`) of one table per segment, then
+a chart per (metric × segment). Column A carries the metric name, the data starts at `B`, and `CRD`
+is written as `−1 ×` the input so an outstanding reads positive — a presentation flip that leaves
+every `%change` exactly as it was (design §6.1.1).
+
+The workbook the job must produce is committed as
 `docs/tseadfwd/977/Compare_RA_reference_model.xlsx` and is regenerated from any two RA files by the
-layout reference / acceptance fixture:
+layout reference / acceptance fixture (`RaCompareGoldenSpec` diffs the job's output against it):
 
 ```bash
 python3 tools/ra_compare/build_ra_compare_workbook.py \
   --new localRun/tseadfwd/input/Inputs_RA_v2.xlsx \
   --old localRun/tseadfwd/input/Inputs_RA.xlsx \
-  --out docs/tseadfwd/977/Compare_RA_reference_model.xlsx \
-  --new-start 2026-01 --old-start 2025-10
+  --out docs/tseadfwd/977/Compare_RA_reference_model.xlsx
 ```
 
 ### Validation

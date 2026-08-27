@@ -135,6 +135,44 @@ class RaCompareViewSpec extends AnyFunSuite with Matchers {
     r.perimeters shouldBe empty
   }
 
+  // ---- display sign ---------------------------------------------------------
+
+  test("CRD is displayed as -1 x the input, every other metric untouched") {
+    // The business reads an outstanding as a positive number (2026-08-27).
+    val s = series(
+      key("MORTGAGE", METRIC_CRD) -> Seq(-92925.0),
+      key("MORTGAGE", METRIC_RA_STAT) -> Seq(380.2))
+
+    displayValueAt(s, key("MORTGAGE", METRIC_CRD), 0) shouldBe Some(92925.0)
+    displayValueAt(s, key("MORTGAGE", METRIC_RA_STAT), 0) shouldBe Some(380.2)
+    // The raw accessor is unchanged: the flip is presentation, not a reinterpretation of the input.
+    valueAt(s, key("MORTGAGE", METRIC_CRD), 0) shouldBe Some(-92925.0)
+  }
+
+  test("a missing value stays missing under the sign flip") {
+    displayValueAt(series(), key("MORTGAGE", METRIC_CRD), 0) shouldBe None
+  }
+
+  test("a zero CRD is displayed as zero, not as -0") {
+    // Real case: CONSO's CRD reaches 0 partway down the horizon. Negating it gives IEEE -0.0,
+    // which Excel and the CSV both render as "-0".
+    val s = series(key("CONSO", METRIC_CRD) -> Seq(0.0))
+    val shown = displayValueAt(s, key("CONSO", METRIC_CRD), 0).get
+    (1.0 / shown) shouldBe Double.PositiveInfinity   // +0.0, not -0.0 (they compare equal)
+  }
+
+  test("the sign flip leaves every %change exactly as it was") {
+    // This is what makes the flip safe: it moves the numbers a reader sees, not the arithmetic.
+    val n = series(key("MORTGAGE", METRIC_CRD) -> Seq(-92368.0))
+    val o = series(key("MORTGAGE", METRIC_CRD) -> Seq(-92925.0))
+    val k = key("MORTGAGE", METRIC_CRD)
+
+    val raw = pctChange(valueAt(n, k, 0), valueAt(o, k, 0))
+    val shown = pctChange(displayValueAt(n, k, 0), displayValueAt(o, k, 0))
+    shown._2 shouldBe raw._2
+    shown._1.get shouldBe (raw._1.get +- 1e-15)
+  }
+
   // ---- cells ----------------------------------------------------------------
 
   test("cells covers every compared key and month, and only compared keys") {
@@ -152,6 +190,16 @@ class RaCompareViewSpec extends AnyFunSuite with Matchers {
     cs.head.pctChange.get shouldBe (0.1 +- 1e-12)
     cs(1).pctChange shouldBe None                     // 0 against 0
     cs(1).status shouldBe CellStatus.Ok
+  }
+
+  test("cells carries the DISPLAYED values, so the CSV reconciles against the workbook") {
+    val n = series(key("MORTGAGE", METRIC_CRD) -> Seq(-92368.0))
+    val o = series(key("MORTGAGE", METRIC_CRD) -> Seq(-92925.0))
+    val c = cells(compare(n, o, 1, 1), n, o).head
+
+    c.newValue shouldBe Some(92368.0)
+    c.oldValue shouldBe Some(92925.0)
+    c.pctChange.get shouldBe ((92368.0 - 92925.0) / 92925.0 +- 1e-12)
   }
 
   // ---- layout ---------------------------------------------------------------

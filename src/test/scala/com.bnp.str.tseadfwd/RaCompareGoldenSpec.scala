@@ -43,6 +43,19 @@ class RaCompareGoldenSpec extends AnyFunSuite with Matchers with SparkTestSessio
   private val OutDir = "target/test-ra-compare"
   private val Produced = s"$OutDir/Compare_RA_produced.xlsx"
 
+  /** 0-based data columns: B is `M1` now that the metric name has moved into A. */
+  private val FirstCol = RaCompareExcelWriter.FirstDataCol
+  private val LastCol = FirstCol + 361 - 1
+  /** Rows from one block title to the next - what separates Updated from Previous. */
+  private val BlockHeight =
+    RaCompareExcelWriter.TitleToFirstHeader + 4 * RaCompareExcelWriter.BlockPitch +
+      RaCompareExcelWriter.BlockGap
+
+  /** The discovery defaults, shared by the produced workbook and the raw-value cross-check. */
+  private val readerConfig = RaSheetConfig(paths = Vector.empty,
+    sheetPattern = RaSheetConfig.DEFAULT_PATTERN, requireColumns = RaSheetConfig.DEFAULT_REQUIRED,
+    include = Vector.empty, exclude = Vector.empty)
+
   /** Every fixture this suite needs, so a missing one is named rather than surfacing as a NPE. */
   private val fixtures = Seq(ReferenceModel, NewInput, OldInput)
 
@@ -53,11 +66,8 @@ class RaCompareGoldenSpec extends AnyFunSuite with Matchers with SparkTestSessio
    */
   private lazy val produced: XSSFWorkbook = {
     Files.createDirectories(Paths.get(OutDir))
-    val cfg = RaSheetConfig(paths = Vector.empty, sheetPattern = RaSheetConfig.DEFAULT_PATTERN,
-      requireColumns = RaSheetConfig.DEFAULT_REQUIRED, include = Vector.empty, exclude = Vector.empty)
-
-    val loadedNew = RaCompareReader.load(NewInput, cfg)
-    val loadedOld = RaCompareReader.load(OldInput, cfg)
+    val loadedNew = RaCompareReader.load(NewInput, readerConfig)
+    val loadedOld = RaCompareReader.load(OldInput, readerConfig)
     val result = RaCompareView.compare(loadedNew.series, loadedOld.series,
       loadedNew.monthCount, loadedOld.monthCount)
 
@@ -126,32 +136,66 @@ class RaCompareGoldenSpec extends AnyFunSuite with Matchers with SparkTestSessio
     produced.getSheetIndex("COMPARE INFO") should be >= 0
   }
 
-  test("T5 the same column-B layout: block titles, table headers, metric rows") {
-    // Column B carries the whole vertical geometry - if an anchor moved or a row was renamed,
+  test("T5 the same column-A layout: block titles, table headers, metric rows") {
+    // Column A carries the whole vertical geometry - if an anchor moved or a row was renamed,
     // this is where it shows, with the row number that drifted.
     dataSheets(reference).foreach { name =>
       val ref = reference.getSheet(name)
       val got = produced.getSheet(name)
       def labels(s: XSSFSheet) =
-        (0 to lastRow(ref, got)).map(r => r -> text(s, r, 1)).filter(_._2.nonEmpty)
+        (0 to lastRow(ref, got)).map(r => r -> text(s, r, 0)).filter(_._2.nonEmpty)
 
-      withClue(s"sheet '$name' column B ") { labels(got) shouldBe labels(ref) }
+      withClue(s"sheet '$name' column A ") { labels(got) shouldBe labels(ref) }
     }
   }
 
-  test("T5 the same month index row and table headers") {
+  test("T5 the same table header row, M1 to the last month") {
     dataSheets(reference).foreach { name =>
       val ref = reference.getSheet(name)
       val got = produced.getSheet(name)
-      // Row 2 is the month index; row 3 the first table header. Both must read M1..Mn, and the
-      // last column pins the horizon.
-      Seq(2, 3).foreach { r =>
-        withClue(s"sheet '$name' row $r ") {
-          text(got, r, 2) shouldBe text(ref, r, 2)
-          text(got, r, 362) shouldBe text(ref, r, 362)
-        }
+      // Row 2 is the first table header - the row that carries the month labels now that the
+      // standalone month index row is gone. It must read M1..Mn, and the last column pins the
+      // horizon.
+      withClue(s"sheet '$name' first table header ") {
+        text(got, 2, FirstCol) shouldBe text(ref, 2, FirstCol)
+        text(got, 2, LastCol) shouldBe text(ref, 2, LastCol)
       }
     }
+  }
+
+  test("the label bands the business dropped are not written back") {
+    // The month index row above each block and column A's business wording for the metrics were
+    // both duplicates; the business asked for them out on 2026-08-27. This fails the moment
+    // either comes back, which a pure reference-model diff would not catch on its own.
+    dataSheets(produced).foreach { name =>
+      val got = produced.getSheet(name)
+      withClue(s"sheet '$name' row 1 is the unit note, not a second month row ") {
+        text(got, 1, 0) shouldBe "En M EUR"
+        text(got, 1, FirstCol) shouldBe ""
+      }
+      val columnA = (0 to got.getLastRowNum).map(r => text(got, r, 0))
+      columnA should not contain "Outstanding"
+      columnA should not contain "Amount PPstat"
+      withClue(s"sheet '$name' freeze pane ") { Option(got.getPaneInformation) shouldBe None }
+    }
+  }
+
+  test("CRD is written positive on both sides, and the %change is unchanged by the flip") {
+    // The business reads an outstanding as a positive number (2026-08-27), so the writer stores
+    // -1 x the input. Both blocks are flipped, so the Evol formula still yields the raw ratio.
+    val got = produced.getSheet(dataSheets(produced).head)
+    val updatedCrd = numeric(got, 3, FirstCol)          // first table, CRD row, M1
+    val previousCrd = numeric(got, 3 + BlockHeight, FirstCol)
+
+    withClue("Updated CRD at M1 ") { updatedCrd.get should be > 0.0 }
+    withClue("Previous CRD at M1 ") { previousCrd.get should be > 0.0 }
+
+    // The same cells in the input, as the reader loaded them: negative, and the same magnitude.
+    val raw = RaCompareReader.load(NewInput, readerConfig).series
+    val crdKey = raw.keys.find(k => k.metric == "CRD" && k.perimeter == "BCEF" &&
+      k.segment == "MORTGAGE" && k.fwlType == "BASELINE").get
+    raw(crdKey).head should be < 0.0
+    updatedCrd.get shouldBe (-raw(crdKey).head +- 1e-9)
   }
 
   test("T5 every Evol formula points at the same two blocks") {
@@ -163,7 +207,7 @@ class RaCompareGoldenSpec extends AnyFunSuite with Matchers with SparkTestSessio
       def formulas(s: XSSFSheet) =
         for {
           r <- 0 to lastRow(ref, got)
-          c <- 2 to 362
+          c <- FirstCol to LastCol
           f <- formula(s, r, c)
         } yield (r, c, f)
 
@@ -182,7 +226,7 @@ class RaCompareGoldenSpec extends AnyFunSuite with Matchers with SparkTestSessio
       val diffs =
         for {
           r <- 0 to lastRow(ref, got)
-          c <- 2 to 362
+          c <- FirstCol to LastCol
           a = numeric(ref, r, c)
           b = numeric(got, r, c)
           if !sameNumber(a, b)
