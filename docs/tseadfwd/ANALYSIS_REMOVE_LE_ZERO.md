@@ -78,14 +78,61 @@ carrying an implausible number that the report names.
 
 Mostly not, by construction — which is worth knowing before anyone writes a filter for it.
 
-**Negative: impossible with the default settings**, for two independent reasons:
+### Negative — three conditions, all of which must hold
 
-* `PrimaryView.computeRa` stops the series at the first period where `RA >= RUNOFF_RA_CAP` (1.0), so
-  every `(1 - RA)` factor stays positive and the cumulative product never turns negative;
-* `vectorFactored` has a backstop anyway — `if (acc < 0.0 && !emitNegative) 1.0`.
+`EAD_RA_RATE` is a cumulative product of `(1 - RA_i)`. A factor turns negative only when
+`RA_i > 1`, and one such factor flips the running product's sign for the rest of the curve. So a
+negative in the output needs **all three** of:
 
-Both are lifted only by `parameters.allow_negative_ead_ra_rate = true`, which exists precisely so a
-negative can be *seen*. Turning it on to then delete the rows would defeat the switch.
+**(a) A period whose loss exceeds the whole outstanding.** With `RA = -(RA_STAT + RA_FI + RE) / CRD`
+and `CRD` negative, `RA > 1` means `(RA_STAT + RA_FI + RE) > |CRD|`. This is the *run-off cliff*: in
+the deep tail the book amortises toward zero, so `|CRD|` collapses, and if the numerator does not
+shrink with it the ratio explodes. [`OPEN_QUESTIONS`](OPEN_QUESTIONS.md) Q26 records exactly this
+with constant `RA_FI`/`RE` in the v2 vintage, and Q30 the resulting blow-up — `INVEST -389` — which
+is why the freeze guard exists at all. Q7 notes a second contributor: the CRD window
+(`M[3q-2..3q]`) and the RA window (`M[3q-4..3q-1]`) are offset by about a month, so at a
+discontinuity they straddle it differently and can push the ratio over on their own.
+
+**(b) `parameters.allow_negative_ead_ra_rate = true`.** Two independent guards otherwise stop it
+reaching the output, and the flag lifts both together — deliberately, since relaxing either alone
+changes nothing:
+
+* `PrimaryView.computeRa` truncates the series at the first `RA >= RUNOFF_RA_CAP` (1.0), so no
+  factor is ever `<= 0` and the product cannot turn negative;
+* `vectorFactored` backstops it anyway — `if (acc < 0.0 && !emitNegative) 1.0`.
+
+**(c) The offending period must be inside the computed horizon.** `computeRa` stops at
+`COMPUTED_HORIZON_Y` (30y) *or* when a window falls off the end of the data, whichever comes first.
+
+### Tested: the current inputs cannot produce one
+
+Running `MainDriver` with `allow_negative_ead_ra_rate = true`:
+
+| Input | Rows | `< 0` |
+|---|---|---|
+| `Inputs_RA_v4.xlsx` (current) | 12 240 | **0** |
+| `Inputs_RA_v2.xlsx` (the vintage Q26/Q30 describe) | 3 060 | **0** |
+
+Condition (a) is nowhere near met. Recovering each period's `RA` from consecutive output terms
+(`1 - EAD[t]/EAD[t-1]`), the **highest `RA` anywhere is 0.097** — a tenfold margin below the cliff
+at 1.0.
+
+Condition (c) also blocks it independently: with 361 monthly columns the last fully-windowed
+quarterly term is **29.75**, and the curve is held flat from term 30 onward —
+
+```
+term 29.50  0.402790243
+term 29.75  0.400841258   <- last computed
+term 30.00  0.400841258   <- held flat from here
+term 50.25  0.400841258
+```
+
+— so the computation stops one quarter short of term 30, which is where the historical blow-up sat.
+The data runs out before the cliff.
+
+**In short:** a negative needs a genuinely pathological input (a book amortising to nothing while its
+FI/RE accruals stay flat), the flag switched on to see it, and enough months for the computation to
+reach that far. Today none of the three holds, and the first is not close.
 
 **Zero: possible in principle, through two paths that have nothing to do with the business meaning.**
 
