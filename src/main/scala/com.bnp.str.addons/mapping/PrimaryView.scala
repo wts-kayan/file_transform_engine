@@ -20,6 +20,16 @@ object PrimaryView {
   }
   // Get the primary view query
 
+  /**
+   * Join query behind `crr_param_add_on_ste`.
+   *
+   * Ordering note: the sheets are read with `inferSchema=false`, so IMPACT_RANK arrives as TEXT and
+   * a bare `ORDER BY` on it would sort lexicographically (1, 14, 15, 2, 20...). It is therefore cast
+   * to INT for the sort; ranks that are blank or non-numeric cast to NULL and are pushed to the end
+   * (NULLS LAST) instead of leading the file. ACTION_ID / PERIMETER_ID / PD_MODEL_NAME stay as
+   * tie-breakers within a rank. The projected RANK column itself keeps its original text value.
+   */
+
   val get_on_application_active_ind: String =
     s"""
        |SELECT
@@ -51,6 +61,7 @@ object PrimaryView {
        |LEFT JOIN ${PrimaryConstants.VIEW_ADD_ON_PERIMETER} perimeter
        |ON app.PERIMETER_ID = perimeter.PERIMETER_ID
        |ORDER BY
+       |  CAST(app.IMPACT_RANK AS INT) ASC NULLS LAST,
        |  app.ACTION_ID,
        |  app.PERIMETER_ID,
        |  perimeter.PD_MODEL_NAME

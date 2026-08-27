@@ -2,7 +2,7 @@ package com.bnp.str.addons.utility
 
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.functions.{col, regexp_replace}
+import org.apache.spark.sql.functions.{coalesce, col, length, lit, regexp_replace, trim}
 import org.apache.spark.sql.{DataFrame, DataFrameReader, SparkSession}
 import org.slf4j.LoggerFactory
 import com.typesafe.config.Config
@@ -61,6 +61,37 @@ object PrimaryUtilities {
       else Seq.empty[String]
 
     if (columnsToFix.nonEmpty) replaceCommaInColunms(df, columnsToFix) else df
+  }
+
+  /**
+   * Drop the rows that carry no information at all in the output key columns
+   * ([[PrimaryConstants.OUTPUT_KEY_COLUMNS]]: PERIMETER_ID, ACTION_ID/ADDON_ID, OPERAND) — i.e.
+   * every one of them is null, empty or whitespace-only. Such rows come from trailing/blank lines
+   * in the input workbooks and are pure noise in the generated file; a row keeping a value in at
+   * least one key column is preserved untouched.
+   *
+   * Only the key columns actually present in the schema are considered, so a custom `queryName`
+   * projecting a different set of columns is handled without failing. When none of them is present
+   * the DataFrame is returned unchanged.
+   */
+  def dropRowsWithoutKeyInformation(df: DataFrame,
+                                    keyColumns: Seq[String] = PrimaryConstants.OUTPUT_KEY_COLUMNS): DataFrame = {
+
+    val present = keyColumns.filter(df.columns.contains)
+
+    if (present.isEmpty) {
+      log.warn(s"None of the key columns ${keyColumns.mkString(", ")} is present in the output " +
+        s"(columns: ${df.columns.mkString(", ")}); no empty-key row removal applied")
+      df
+    } else {
+      log.info(s"Dropping rows with no information in any of: ${present.mkString(", ")}")
+      // a column "has information" when, cast to string and trimmed, it is non-null and non-empty
+      val hasInformation = present
+        .map(c => length(trim(coalesce(col(c).cast("string"), lit("")))) > 0)
+        .reduce(_ || _)
+
+      df.where(hasInformation)
+    }
   }
 
   def getHdfsReader(filePath: String)(sc: SparkContext): Reader = {

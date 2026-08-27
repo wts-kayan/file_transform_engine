@@ -2,7 +2,7 @@ package com.bnp.str.addons.mapping
 
 import com.bnp.str.addons.common.MapperProvider
 import com.bnp.str.addons.mapping.PrimaryView.{get_on_application_active_ind, loadQuery}
-import com.bnp.str.addons.utility.PrimaryConstants
+import com.bnp.str.addons.utility.{PrimaryConstants, PrimaryUtilities}
 import com.typesafe.config.Config
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -11,6 +11,10 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
  * Builds the `crr_param_add_on_ste` output: registers the (filtered) input sheets as temp views
  * and runs the join query — either the built-in [[PrimaryView.get_on_application_active_ind]] or,
  * when `queryName` is set in the output config, a query loaded from the SQL queries file.
+ *
+ * The joined result is then cleaned: rows holding no information at all in the key columns
+ * (PERIMETER_ID, ACTION_ID/ADDON_ID, OPERAND) are dropped so they never reach the generated
+ * file.
  */
 class PrimaryMapper(add_on_application: DataFrame,
                     add_on_action: DataFrame,
@@ -35,6 +39,7 @@ class PrimaryMapper(add_on_application: DataFrame,
       if (queryName.nonEmpty) loadQuery(queryName)(sparkSession, config)
       else get_on_application_active_ind
 
-    sparkSession.sql(sql)
+    // last step before the write: strip the rows that are empty on every key column
+    PrimaryUtilities.dropRowsWithoutKeyInformation(sparkSession.sql(sql))
   }
 }
