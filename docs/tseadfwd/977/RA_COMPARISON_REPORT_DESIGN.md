@@ -187,6 +187,19 @@ The whole `Evol` block is written as **live Excel formulas** (`=IFERROR((C5-C34)
 file's own shape re-anchored to the new geometry), so a reviewer can audit any cell by clicking it.
 `--raw-div` reproduces the bare formula and its `#DIV/0!` instead of the `IFERROR` blank.
 
+**Presentation.** Distinct from the geometry above, and deliberately not pinned by T5:
+
+* Sheet tabs are coloured by stress leg — slate for `BASELINE`, orange for `STRESS (-)`, blue for
+  `STRESS (+)`. One workbook holds three sheets per perimeter ([Q9](#q9)), which is eighteen
+  near-identically named tabs at six perimeters. Blue and orange rather than red and green, since
+  this is the only thing in the workbook carrying meaning in colour alone.
+* `COMPARE INFO` row heights follow their content. The cells wrap, but a wrapped cell at the default
+  height shows one line, and the dropped-key list runs to several hundred characters — so the report
+  was naming excluded keys (§4) and then hiding them.
+* No conditional formatting: the business declined highlighting ([Q10](#q10)).
+* No print setup. Printing 363 columns needs landscape, fit-to-width and repeated label columns;
+  TWIST serves the workbook for viewing ([Q8](#q8)), so this was left out rather than guessed at.
+
 **Charts.** One line chart per *(metric × segment)* — 16 per sheet — titled `<METRIC> - <SEGMENT>`,
 two series named `Updated` and `Previous`, categories = the month index row (text labels, one tick
 every 12 months), placed in a 4 × 4 grid under the `Evol` block.
@@ -303,6 +316,13 @@ where the 240 dropped keys of §4 appear on `COMPARE INFO` — use `Inputs_RA_v4
 
 Note the workbook is **not byte-reproducible**: `docProps/core.xml` carries a creation timestamp, so
 a regenerated file always shows a binary diff even when every cell is identical.
+
+**The model pins the layout, not the styling.** Since 2026-08-27 the Scala writer carries
+presentation the generator does not — coloured tabs, content-driven `COMPARE INFO` row heights — so
+the two workbooks no longer look identical, by choice. Everything T5 compares (sheets, anchors, row
+labels, formulas, values, chart titles) still matches exactly; what has diverged is only what a
+reader sees, not what the report says. Read the model as the specification of *where things go*, and
+the job's own output as the specification of *how it looks*.
 
 ---
 

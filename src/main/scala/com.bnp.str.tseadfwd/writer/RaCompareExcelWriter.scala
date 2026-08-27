@@ -7,7 +7,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.poi.ss.usermodel.{CellStyle, IndexedColors, Workbook}
 import org.apache.poi.ss.util.{CellRangeAddress, CellReference}
 import org.apache.poi.xddf.usermodel.chart._
-import org.apache.poi.xssf.usermodel.{XSSFSheet, XSSFWorkbook}
+import org.apache.poi.xssf.usermodel.{XSSFColor, XSSFSheet, XSSFWorkbook}
 import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
 
@@ -61,6 +61,22 @@ object RaCompareExcelWriter {
     def excelMetricRow(table: Int, metric: Int): Int = headerOf(table) + 1 + metric + 1
   }
 
+  /**
+   * Tab colour per stress leg, so a leg is findable among the tabs.
+   *
+   * One workbook holds three sheets per perimeter (Q9), which is eighteen near-identically named
+   * tabs at six perimeters. Blue and orange rather than red and green: the pair stays distinguishable
+   * for the commonest forms of colour blindness, and this is the only thing on the sheet carrying
+   * meaning in colour alone.
+   */
+  private val TabColour: Map[String, Array[Byte]] = Map(
+    FWL_BASELINE -> rgb(0x5B, 0x64, 0x70),        // slate — the unshocked reference
+    FWL_STRESS_MINUS -> rgb(0xC2, 0x70, 0x3D),    // orange
+    FWL_STRESS_PLUS -> rgb(0x3D, 0x7E, 0xA6))     // blue
+
+  private def rgb(r: Int, g: Int, b: Int): Array[Byte] =
+    Array(r.toByte, g.toByte, b.toByte)
+
   /** Row labels of column A, as the manual workbook words them. */
   private val RowLabelA: Map[String, String] = Map(
     METRIC_CRD -> "Outstanding",
@@ -96,6 +112,7 @@ object RaCompareExcelWriter {
         if (present) {
           val name = RaCompareView.sheetName(perimeter, fwl)
           val sheet = wb.createSheet(name)
+          TabColour.get(fwl).foreach(c => sheet.setTabColor(new XSSFColor(c, null)))
           writeSheet(sheet, styles, perimeter, fwl, tables, result, newSeries, oldSeries, opts)
           written += name
         }
@@ -311,15 +328,32 @@ object RaCompareExcelWriter {
       val a = r.createCell(0); a.setCellValue(k)
       a.setCellStyle(if (i == 0) st.title else st.rowLabelB)
       val b = r.createCell(1); b.setCellValue(v); b.setCellStyle(st.info)
+      r.setHeightInPoints(infoRowHeight(v))
     }
 
     if (result.newTruncated || result.oldTruncated) {
+      val note =
+        s"the two files carry a different number of month columns; the comparison was truncated " +
+          s"to the shorter horizon (${result.months} months)"
       val r = sheet.createRow(rows.size + 1)
       r.createCell(0).setCellValue("NOTE")
-      r.createCell(1).setCellValue(
-        s"the two files carry a different number of month columns; the comparison was truncated " +
-          s"to the shorter horizon (${result.months} months)")
+      val c = r.createCell(1); c.setCellValue(note); c.setCellStyle(st.info)
+      r.setHeightInPoints(infoRowHeight(note))
     }
+  }
+
+  /**
+   * Height of one COMPARE INFO row, from the length of its text.
+   *
+   * The cells wrap, but a wrapped cell at the default height shows ONE line — so the dropped-key
+   * list, which can run to several hundred characters, was being written and then hidden. The
+   * report's whole promise is that an excluded key is named rather than silently dropped, so the
+   * height has to follow the content.
+   */
+  private def infoRowHeight(text: String): Float = {
+    val charsPerLine = 98              // column B is 100 characters wide
+    val lines = math.max(1, math.ceil(text.length.toDouble / charsPerLine).toInt)
+    math.min(lines * 14.0f, 409.0f)    // 409pt is Excel's per-row maximum
   }
 
   // ---- plumbing -------------------------------------------------------------
