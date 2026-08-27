@@ -1,10 +1,16 @@
 # Ticket 977 — RA input comparison report: treatment design
 
-> **Status: design + layout reference.** This branch delivers (a) the design of the treatment and
-> (b) the **workbook it must produce**, generated from the repo's own inputs:
-> [`Compare_RA_reference_model.xlsx`](Compare_RA_reference_model.xlsx), built by
+> **Status: design + layout reference, business-answered 2026-08-27.** This branch delivers (a) the
+> design of the treatment and (b) the **workbook it must produce**, generated from the repo's own
+> inputs: [`Compare_RA_reference_model.xlsx`](Compare_RA_reference_model.xlsx), built by
 > `tools/ra_compare/build_ra_compare_workbook.py`. No engine code is written yet — §7 says where it
-> goes and §10 what has to be confirmed first.
+> goes.
+>
+> **All sixteen open questions are now answered** ([`OPEN_QUESTIONS_977.csv`](OPEN_QUESTIONS_977.csv),
+> also as a workbook). Three answers change this document materially and are folded into it below:
+> the two **derived rows are dropped** (§2, §5, §6.1), the report carries **no calendar dates**
+> (§6.1), and segment tables are headed with the **input's own segment names** (§6.1). §10 records
+> every answer verbatim.
 
 The US asks for a **downloadable comparison report** (Excel / HTML) between **two selected inputs**,
 carrying the `%change` of the four metrics for every perimeter and segment the two inputs share,
@@ -59,17 +65,20 @@ rows 112+   charts: one per (metric × segment), two curves — Updated vs Previ
 
 Three things the US text does not say but the manual file does, and the engine must reproduce:
 
-1. **Two derived rows** sit next to the four metrics in every table:
-   `RA = RA STAT + RA FI + RE` and `%RA = RA × 12 / −CRD` (the annualised RA rate over the
-   outstanding). Checked against the file: Immos M0 `RA STAT 373 + RA FI 10 + RE 6 = 389`,
-   `389 × 12 / 93 172 = 5.01 %` against the `5.02 %` displayed. The `Evol` block carries the
-   `%change` of those two rows too (`RA/RE` and `%RA`).
+1. ~~**Two derived rows** sit next to the four metrics in every table~~ — **not reproduced.** The
+   manual file adds `RA = RA STAT + RA FI + RE` and `%RA = RA × 12 / −CRD` (the annualised RA rate
+   over the outstanding). Neither is a column of `INPUTS_RA` and neither appears in the US wording;
+   the `%RA` factor of 12 was an inference, and recomputing the manual file gave `5.01 %` against
+   the `5.02 %` displayed. The business dropped **both** on 2026-08-27 ([Q6](#q6), [Q11](#q11)): the
+   report works only from the metrics present in the input. This is the decision that makes a
+   segment table four rows instead of six.
 2. **The two files are aligned by month INDEX, not by date.** In the manual file *Updated* starts at
    `01/04/2026` and *Previous* at `01/01/2026` — a quarter apart — and the Evol formula still reads
-   `=(C5-C42)/C42`, i.e. column C against column C. Dates are **labels**, not join keys
-   ([Q3](#q3)).
+   `=(C5-C42)/C42`, i.e. column C against column C. Confirmed ([Q3](#q3)) — and the dates are gone
+   from the report altogether ([Q4](#q4)), so the question can no longer arise: every column is
+   `M1…M361` on all three blocks.
 3. **The first column is labelled `M0`** in the manual file while the `INPUTS_RA` sheets call it
-   `M1`. Same month, two names ([Q2](#q2)); the reference model keeps the input's own `M1…M361`.
+   `M1`. Same month, two names; the business chose the input's own `M1…M361` ([Q2](#q2)).
 
 ---
 
@@ -119,12 +128,9 @@ For every compared key and every month `i` of the common horizon:
 pctChange(metric, i) = (new(metric, i) − old(metric, i)) / old(metric, i)
 ```
 
-and, per segment table, the two derived rows:
-
-```
-RA(i)   = RA STAT(i) + RA FI(i) + RE(i)
-%RA(i)  = RA(i) × 12 / −CRD(i)            (annualised rate on the outstanding)
-```
+for each of the four metrics `CRD`, `RA STAT`, `RA FI`, `RE` — and nothing else. The manual file's
+derived `RA` and `%RA` rows are **not computed** ([Q6](#q6), [Q11](#q11)), so no `Evol` cell is ever
+applied to a rate and the percentage-point ambiguity of [Q12](#q12) does not arise.
 
 **Degenerate cases** — the manual file leaves `#DIV/0!` in the cells; the engine must decide
 explicitly ([Q5](#q5)). Proposed defaults:
@@ -161,20 +167,27 @@ macro keep working):
 
 | Constant | Value |
 |---|---|
-| Title rows (`Updated` / `Previous` / `Evol`) | 1 / 38 / 75 |
+| Title rows (`Updated` / `Previous` / `Evol`) | 1 / 30 / 59 |
 | Month index row of each block | title row + 2 |
-| First segment table header | 4 / 41 / 78 |
-| Table pitch | 8 rows (header + 6 metric rows + 1 blank) |
+| First segment table header | 4 / 33 / 62 |
+| Table pitch | 6 rows (header + 4 metric rows + 1 blank) |
 | First data column | `C` |
-| Metric row order | `CRD`, `RA`, `RA STAT`, `RA FI`, `RE`, `%RA` |
-| Segment order | `MORTGAGE`, `INVEST_PRO`, `INVEST_CORP`, `CONSO`, then anything else, alphabetically |
-| Segment labels | `Immos`, `Invest pro`, `Invest corp`, `Conso` — header reads `<label> à <RATE_TYPE>` |
+| Metric row order | `CRD`, `RA STAT`, `RA FI`, `RE` |
+| Segment order | configuration; default `MORTGAGE`, `INVEST_PRO`, `INVEST_CORP`, `CONSO`, then anything else alphabetically |
+| Segment labels | the input's own `SEGMENT` — header reads `<SEGMENT> a <RATE_TYPE>` |
+| Column headers | `M1 … M361` on every block; **no calendar dates anywhere** |
 
-`RA`, `%RA` and the whole `Evol` block are written as **live Excel formulas** (`=(C5-C42)/C42`, as in
-the manual file), so a reviewer can audit any cell by clicking it. Wrapped in `IFERROR(…,"")` by
-default; `--raw-div` reproduces the bare formula and its `#DIV/0!`.
+> The manual file's anchors were 1 / 38 / 75 at a pitch of 8. Dropping the two derived rows
+> ([Q6](#q6), [Q11](#q11)) takes a table to 6 rows, so each block is 4 × 6 = 24 rows of tables
+> instead of 32 and the two lower blocks move up by 8 and 16. The generator **derives** these
+> anchors from the row list rather than hard-coding them, so they stay correct if the list changes
+> again.
 
-**Charts.** One line chart per *(metric × segment)* — 16 per sheet — titled `<METRIC> - <segment>`,
+The whole `Evol` block is written as **live Excel formulas** (`=IFERROR((C5-C34)/C34,"")`, the manual
+file's own shape re-anchored to the new geometry), so a reviewer can audit any cell by clicking it.
+`--raw-div` reproduces the bare formula and its `#DIV/0!` instead of the `IFERROR` blank.
+
+**Charts.** One line chart per *(metric × segment)* — 16 per sheet — titled `<METRIC> - <SEGMENT>`,
 two series named `Updated` and `Previous`, categories = the month index row (text labels, one tick
 every 12 months), placed in a 4 × 4 grid under the `Evol` block.
 
@@ -227,23 +240,27 @@ unit-testable object; IO stays in reader/writer; every literal lands in `Primary
 
 ### Configuration sketch (`tseadfwd_app.COMPARE_RA`)
 
+Named `COMPARE_AND_REPORT` per [Q1](#q1) — the answer wrote `compare_and_report`, spelled here in
+the `UPPER_SNAKE` every other block of `application.conf` uses, since HOCON is case-sensitive.
+
 ```hocon
-COMPARE_RA {
+COMPARE_AND_REPORT {
   enabled   = true
-  newPath   = "localRun/tseadfwd/input/Inputs_RA_v2.xlsx"   # "Updated"
-  oldPath   = "localRun/tseadfwd/input/Inputs_RA.xlsx"      # "Previous"
+  newPath   = "localRun/tseadfwd/input/Inputs_RA_v4.xlsx"   # "Updated"
+  oldPath   = "localRun/tseadfwd/input/Inputs_RA_v3.xlsx"   # "Previous"
   newLabel  = "Updated"
   oldLabel  = "Previous"
-  newStart  = "2026-01"        # first projection month — column DATE labels only, never a join key
-  oldStart  = "2025-10"
-  perimeters = []              # empty = every perimeter common to both files
+  perimeters   = []            # empty = every perimeter common to both files (Q15)
+  segmentOrder = ["MORTGAGE", "INVEST_PRO", "INVEST_CORP", "CONSO"]   # Q14; unlisted follow, A-Z
   xlsxPath  = "localRun/tseadfwd/output/Compare_RA.xlsx"
-  htmlPath  = "localRun/tseadfwd/output/Compare_RA.html"
   csvPath   = "localRun/tseadfwd/output/Compare_RA.csv"     # §6.3, optional
   chartStep = 12               # x-axis label every N months
-  safeDiv   = true             # false reproduces the manual file's #DIV/0!
+  safeDiv   = true             # false reproduces the manual file's #DIV/0! (Q5)
 }
 ```
+
+No `newStart` / `oldStart`: the report carries no dates ([Q4](#q4)). No `htmlPath` for now — Excel
+is the deliverable and the HTML page is deferred ([Q8](#q8)).
 
 ---
 
@@ -254,22 +271,25 @@ COMPARE_RA {
 runnable specification of the geometry, so §6.1 cannot drift from what the business validates.
 
 ```bash
-python3 tools/ra_compare/build_ra_compare_workbook.py \
+python tools/ra_compare/build_ra_compare_workbook.py \
   --new localRun/tseadfwd/input/Inputs_RA_v2.xlsx \
   --old localRun/tseadfwd/input/Inputs_RA.xlsx \
-  --out docs/tseadfwd/977/Compare_RA_reference_model.xlsx \
-  --new-start 2026-01 --old-start 2025-10
+  --out docs/tseadfwd/977/Compare_RA_reference_model.xlsx
 ```
 
 The committed [`Compare_RA_reference_model.xlsx`](Compare_RA_reference_model.xlsx) is that command's
-output: 4 sheets, 361 months, 48 compared keys, 48 charts. It was opened and **recalculated in
-LibreOffice Calc** — every formula resolves, `IFERROR` blanks the `CONSO` `RA FI`/`RE` rows that are
-zero on both sides, and the 4 × 4 chart grid renders with both curves.
+output: 4 sheets, 361 months, 48 compared keys, 48 charts. **Regenerated on 2026-08-27** against
+the answers of §10 — four metric rows per table, blocks on 1 / 30 / 59, `M1…M361` column headers and
+the input's own segment names.
 
 Two caveats on this particular pair of files, so nobody reads a business signal into it: they are the
 **same vintage at different rounding** (`Inputs_RA.xlsx` is rounded to the unit, `_v2` is not), so
-the `Evol` block is rounding noise (~`1e-5`), and both start dates were **supplied on the command
-line** — an `INPUTS_RA` sheet carries no as-of date ([Q4](#q4)).
+the `Evol` block is rounding noise (~`1e-5`). For a run where the comparison does real work — and
+where the 240 dropped keys of §4 appear on `COMPARE INFO` — use `Inputs_RA_v4.xlsx` against
+`Inputs_RA_v3.xlsx`.
+
+Note the workbook is **not byte-reproducible**: `docProps/core.xml` carries a creation timestamp, so
+a regenerated file always shows a binary diff even when every cell is identical.
 
 ---
 
@@ -281,56 +301,137 @@ Mapping the US's *"test the generated reports against the manual calculations"* 
 |---|---|---|
 | T1 | `%change` formula | unit test on `RaCompareView`: `(new−old)/old` per metric/month, including negative `CRD` |
 | T2 | Degenerate cases | unit test: `old = 0`, both `0`, missing key, missing month → §5 table |
-| T3 | Derived rows | unit test: `RA = STAT+FI+RE`, `%RA = RA×12/−CRD` |
+| T3 | ~~Derived rows~~ | **dropped** with the rows themselves ([Q6](#q6), [Q11](#q11)) — nothing is derived any more |
 | T4 | Scope | unit test: only common keys compared; every dropped key reported (v4-vs-v1 case of §4) |
 | T5 | Geometry | golden test: the job's workbook vs `Compare_RA_reference_model.xlsx` — same sheets, same anchors, same row labels, same chart titles/series/ranges |
-| T6 | Numbers | the §6.3 CSV against the manual `Compare_RA_BCEF_KO_Prod 26Q2.xlsx`, per perimeter × segment × metric × month, **tolerance `1e-4` relative** (the manual file's cells are display-rounded — see §5) |
+| T6 | Numbers *(deferred)* | the §6.3 CSV against the manual `Compare_RA_BCEF_KO_Prod 26Q2.xlsx`, per perimeter × segment × metric × month, **tolerance `1e-4` relative** (the manual file's cells are display-rounded — see §5). Deferred by [Q7](#q7) |
 | T7 | Opens clean | the produced workbook loads in Excel with no repair prompt and all formulas resolve (the reference model is checked this way in §8) |
 
-T6 needs the manual workbook **and the two `INPUTS_RA` files it was built from** — see [Q7](#q7).
+T6 needs the manual workbook **and the two `INPUTS_RA` files it was built from**, which the business
+deferred ([Q7](#q7)) — so the suite to build now is T1, T2, T4, T5, T7.
 
 ---
 
-## 10. Open questions
+## 10. Questions and answers
 
-Each has a **default** chosen so the build can start; every one of them changes the output if the
-business answers otherwise.
+Answered by the business on **2026-08-27**. Their wording is quoted verbatim; the full record, with
+what the engine did before each answer, is [`OPEN_QUESTIONS_977.csv`](OPEN_QUESTIONS_977.csv) (and
+the same as a workbook). Six of these were not in the original list of ten — they came out of
+reading the reference model against the manual file, and four of them concern the derived rows.
 
-<a id="q1"></a>**Q1 — Which two inputs?** Default: two `INPUTS_RA` workbooks (what the manual file
-compares). Could also mean two engine *outputs* (`TS_EAD_FWD` term structures), which is a different
-report — `EadFwdCompare` already covers that side.
+**The three that changed this document:** Q6 and Q11 drop both derived rows, Q3/Q4 drop the dates,
+Q14 replaces the French labels with the input's own segment names.
 
-<a id="q2"></a>**Q2 — `M0` or `M1` for the first column?** The `INPUTS_RA` sheets say `M1`, the manual
-report says `M0`, the US says *"M1 to M361"*. Default: keep the input's `M1…M361` labels.
+<a id="q1"></a>**Q1 — Which two inputs?**
+> *"two INPUTS_RA workbooks as input, should be given in configuration file in new block, name it
+> compare_and_report"*
 
-<a id="q3"></a>**Q3 — Alignment when the two files have different as-of dates.** Default: **by month
-index** (the manual file's `=(C5-C42)/C42` across a one-quarter gap). The alternative — align by
-calendar month, comparing overlapping dates only — is a different report and would drop the first
-quarter of one file.
+Two `INPUTS_RA` workbooks, named in a new block. Spelled `COMPARE_AND_REPORT` in §7 to match the
+`UPPER_SNAKE` of every other block in `application.conf`; HOCON is case-sensitive, and this would
+otherwise be the only lowercase block in the file.
 
-<a id="q4"></a>**Q4 — Where do the column dates come from?** An `INPUTS_RA` sheet carries no as-of
-date. Default: a config parameter per side (`newStart` / `oldStart`). Alternative: reuse
-`parameters.as_of_date_quarter` for the new file and require the old one explicitly.
+<a id="q2"></a>**Q2 — `M0` or `M1`?**
+> *"M1 as we have in the input_ra file"*
 
-<a id="q5"></a>**Q5 — `old = 0`.** Default: empty cell + a *not computable* list. The manual file
-shows `#DIV/0!`; `safeDiv = false` reproduces that if the business prefers it.
+`M1…M361`. The manual file's `M0` is not reproduced.
 
-<a id="q6"></a>**Q6 — Is `%RA` annualised by 12?** `RA × 12 / −CRD` reproduces the manual file's
-percentages to the displayed decimal. Confirm the factor is 12 (monthly RA → annual rate) and not a
-period convention that changes on the yearly grid.
+<a id="q3"></a>**Q3 — Alignment when the as-of dates differ?**
+> *"don't care about date replace them by M1,M2,M3 …."*
 
-<a id="q7"></a>**Q7 — T6 fixtures.** To reconcile against the manual calculations we need
-`Compare_RA_BCEF_KO_Prod 26Q2.xlsx` **and** the two `INPUTS_RA` files it was produced from. Without
-them, T6 can only run on the pair in this repo, whose `Evol` is rounding noise (§8).
+By month index — and since the dates leave the report entirely (Q4), the question of a differing
+as-of date no longer arises.
 
-<a id="q8"></a>**Q8 — Excel, HTML, or both from TWIST?** The US says *"excel/HTML etc."*. Default:
-Excel is the deliverable, HTML is the in-browser preview. Confirm what the new TWIST tab serves.
+<a id="q4"></a>**Q4 — Where do the column dates come from?**
+> *"skip the date replace them by M1,M2,M3 …."*
 
-<a id="q9"></a>**Q9 — One workbook for every perimeter, or one file per perimeter?** Default: one
-workbook, three sheets per perimeter (the manual file is per perimeter because it is written by
-hand). With 6 perimeters that is 18 sheets and ~288 charts — acceptable, but say so if TWIST
-prefers one file per perimeter.
+They do not. Every block's table header carries `M1…M361`, so no `newStart` / `oldStart` setting is
+needed and an `INPUTS_RA` file never has to be told its own as-of date.
 
-<a id="q10"></a>**Q10 — Should a material `%change` be highlighted?** Nothing in the US asks for it.
-A conditional format above a configurable threshold (e.g. `|%change| > 5 %`) would turn the `Evol`
-block into something a reviewer can scan. Off by default.
+<a id="q5"></a>**Q5 — `old = 0`.**
+> *"Proposed defaults: old 0 and new 0 -> blank; old 0 and new non-zero -> blank plus listed; old
+> present and new missing -> blank plus listed."*
+
+The §5 defaults stand. The manual file's visible `#DIV/0!` is not reproduced; `safeDiv = false`
+still gets it back.
+
+<a id="q6"></a>**Q6 — Where does `%RA` come from, and is the ×12 right?**
+> *"work only using CRD,RA STAT,RA FI,RE in the RA input file, the input will be for example
+> Inputs_RA_v4.xlsx"*
+
+`%RA` is **dropped**. The report works only from the four metrics present in the input, so the
+inferred ×12 annualisation and its denominator both fall away with it.
+
+<a id="q7"></a>**Q7 — T6 fixtures.**
+> *"no need for now, will be tested later"*
+
+Acceptance test T6 (reconciliation against the manual workbook) is **deferred**; T1–T5 and T7 stand.
+
+<a id="q8"></a>**Q8 — Excel, HTML, or both?**
+> *"go first for excel file as devivrable, will see if html is needed"*
+
+Excel is the deliverable. §6.2's HTML page is **not built for now**.
+
+<a id="q9"></a>**Q9 — One workbook or one per perimeter?**
+> *"one workbook."*
+
+One workbook for every perimeter.
+
+<a id="q10"></a>**Q10 — Highlight a material `%change`?**
+> *"Off"*
+
+No highlighting.
+
+<a id="q11"></a>**Q11 — Is `RA = STAT+FI+RE`, and why is the Evol row `RA/RE`?**
+> *"no need %RA"*
+
+The answer named only `%RA`, while the question covered both derived rows; confirmed on 2026-08-27
+that the `RA` subtotal goes too, consistent with Q6's *"work only using CRD, RA STAT, RA FI, RE"*.
+A segment table is therefore **four rows**, and the `RA/RE` labelling problem disappears with the
+row that carried it.
+
+<a id="q12"></a>**Q12 — `%RA` in `Evol`: relative change or percentage points?**
+> *"skip %RA"*
+
+Moot, and usefully so: with `%RA` gone, every `Evol` cell is `(new − old) / old` over an **amount**,
+which is the unambiguous case. Had `%RA` stayed, a move from 5.00 % to 4.00 % would have been
+reported as −20 % where a risk reader expects −1.00 point.
+
+<a id="q13"></a>**Q13 — Which CRD does the `%RA` denominator use?**
+> *"yes Same-month CRD assumed"*
+
+Moot — the denominator only existed for `%RA`. Recorded here should `%RA` ever be reinstated.
+
+<a id="q14"></a>**Q14 — Are the French segment labels canonical?**
+> *"Labels reproduced from the input RA file, put the order in configuration file"*
+
+Use the input's own `SEGMENT` values (`MORTGAGE`, `INVEST_PRO`, `INVEST_CORP`, `CONSO`), **not** the
+manual file's `Immos` / `Invest pro` / `Invest corp` / `Conso`. The display **order** is
+configuration (`segmentOrder`); a segment the order does not name still appears, after the named
+ones and alphabetically, so a new segment in `INPUTS_RA` is never silently dropped.
+
+<a id="q15"></a>**Q15 — Which perimeters and rate types?**
+> *"every perimeter common to both files."*
+
+The intersection rule of §4 stands unchanged.
+
+<a id="q16"></a>**Q16 — Always in millions of euros?**
+> *"Like in input RA file like we did for RA calcultation"*
+
+Values are used exactly as they appear in `INPUTS_RA`, with no rescaling — the convention the RA
+calculation already follows. The `En M EUR` block header is an assertion about the input, not a
+conversion.
+
+---
+
+## 11. What is still open
+
+Nothing is waiting on the business. Two items are deferred rather than decided:
+
+| Item | State |
+|---|---|
+| Acceptance test **T6** | deferred by [Q7](#q7) — needs the manual workbook and the two inputs it came from |
+| The **HTML report** (§6.2) | deferred by [Q8](#q8) — designed, not built, pending what the TWIST tab serves |
+
+The remaining work is the Scala job of §7. `RaCompareView` — the pure core — is fully specified by
+§4 and §5 and can be built and unit-tested (T1–T4) without POI; the writer follows §6.1, whose
+geometry is pinned by the regenerated reference model.

@@ -21,7 +21,6 @@ One sheet per (PERIMETER x FWL_TYPE) common to both files, each holding three st
 
 import argparse
 import re
-from datetime import date
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import LineChart, Reference
@@ -35,38 +34,51 @@ from openpyxl.utils import get_column_letter
 KEY_COLUMNS = ["PERIMETER", "SEGMENT", "RATE_TYPE", "FWL_TYPE", "METRIC"]
 SHEET_PATTERN = re.compile(r"^RA[_ ].*", re.IGNORECASE)
 
-# Metric rows of one segment table, in the order the manual file lists them.
+# Metric rows of one segment table.
 # (row label in column A, row label in column B, kind)
+#
+# The four metrics of the INPUTS_RA file, and nothing else. The manual Risk workbook also
+# carries two DERIVED rows - RA = RA STAT + RA FI + RE, and %RA = RA x 12 / -CRD - which the
+# business dropped on 2026-08-27 (OPEN_QUESTIONS_977 Q6/Q11/Q12): the report works only from
+# the metrics present in the input. That decision is what makes a table 6 rows rather than 8.
 BLOCK_ROWS = [
     ("Outstanding", "CRD", "metric"),      # CRD, as loaded (negative = exposure)
-    ("", "RA", "ra_total"),                # RA STAT + RA FI + RE
     ("Amount PPstat", "RA STAT", "metric"),
     ("Amount PPfin", "RA FI", "metric"),
     ("Amount RE", "RE", "metric"),
-    ("", "%RA", "ra_pct"),                 # annualised RA rate: RA * 12 / -CRD
 ]
 METRICS = ["CRD", "RA STAT", "RA FI", "RE"]          # the four metrics of the ticket
 CHART_METRICS = ["CRD", "RA STAT", "RA FI", "RE"]
 
-# The manual file names its segment tables in French business wording.
-SEGMENT_LABELS = {
-    "MORTGAGE": "Immos",
-    "INVEST_PRO": "Invest pro",
-    "INVEST_CORP": "Invest corp",
-    "CONSO": "Conso",
-}
-SEGMENT_ORDER = ["MORTGAGE", "INVEST_PRO", "INVEST_CORP", "CONSO"]
+# Segment tables are headed with the segment name AS IT APPEARS IN THE INPUT. The manual Risk
+# workbook uses French business wording (Immos / Invest pro / Invest corp / Conso); the business
+# chose the input's own names on 2026-08-27 (Q14), so a segment added to INPUTS_RA needs no
+# mapping here to appear correctly.
+# The display ORDER is configuration (--segment-order); anything not named falls after it,
+# alphabetically.
+DEFAULT_SEGMENT_ORDER = ["MORTGAGE", "INVEST_PRO", "INVEST_CORP", "CONSO"]
 
 # The manual file names its sheets after the stress leg (+/- 100 bp).
 FWL_SHEET_SUFFIX = {"BASELINE": "BASELINE", "STRESS (-)": "-100", "STRESS (+)": "+100"}
 FWL_ORDER = ["BASELINE", "STRESS (-)", "STRESS (+)"]
 
 # ------------------------------------------------------------ sheet geometry
-# Same anchors as the manual workbook: titles on 1 / 38 / 75, first table header on
-# 4 / 41 / 78, four tables of 8 rows each (header + 6 metric rows + 1 blank).
-BLOCK_PITCH = 8
-UPDATED_TITLE_ROW, PREVIOUS_TITLE_ROW, EVOL_TITLE_ROW = 1, 38, 75
-UPDATED_FIRST_HEADER, PREVIOUS_FIRST_HEADER, EVOL_FIRST_HEADER = 4, 41, 78
+# The manual workbook's anchors were 1 / 38 / 75 with a pitch of 8 (header + 6 metric rows +
+# blank). Dropping the two derived rows (Q6/Q11) makes a table 6 rows - header + 4 metrics +
+# blank - so each block is 4 x 6 = 24 rows of tables instead of 32, and the blocks below move
+# up by 8 and 16 respectively. Derived here rather than hard-coded, so the anchors stay correct
+# if the row list changes again.
+BLOCK_PITCH = len(BLOCK_ROWS) + 2          # table header + metric rows + one blank
+TITLE_TO_FIRST_HEADER = 3                  # title, "En M EUR", month index row, then the table
+BLOCK_GAP = 2                              # blank rows between one block and the next title
+
+_BLOCK_HEIGHT = TITLE_TO_FIRST_HEADER + 4 * BLOCK_PITCH + BLOCK_GAP
+UPDATED_TITLE_ROW = 1
+PREVIOUS_TITLE_ROW = UPDATED_TITLE_ROW + _BLOCK_HEIGHT
+EVOL_TITLE_ROW = PREVIOUS_TITLE_ROW + _BLOCK_HEIGHT
+UPDATED_FIRST_HEADER = UPDATED_TITLE_ROW + TITLE_TO_FIRST_HEADER
+PREVIOUS_FIRST_HEADER = PREVIOUS_TITLE_ROW + TITLE_TO_FIRST_HEADER
+EVOL_FIRST_HEADER = EVOL_TITLE_ROW + TITLE_TO_FIRST_HEADER
 FIRST_DATA_COL = 3  # column C
 
 YELLOW = PatternFill("solid", fgColor="FFFF00")
@@ -117,32 +129,23 @@ def read_ra_file(path):
     return series, months, sheets, skipped
 
 
-def month_dates(start, count):
-    """`count` month starts from `start` (a date), as dates — the column headers of a block."""
-    out = []
-    y, m = start.year, start.month
-    for _ in range(count):
-        out.append(date(y, m, 1))
-        m += 1
-        if m == 13:
-            y, m = y + 1, 1
-    return out
+def perimeter_segments(series, perimeter, segment_order):
+    """(SEGMENT, RATE_TYPE) pairs of a perimeter, in the configured display order.
 
-
-def perimeter_segments(series, perimeter):
-    """(SEGMENT, RATE_TYPE) pairs of a perimeter, in the manual file's order."""
+    A segment the order does not name still appears - after the named ones, alphabetically -
+    so a new segment in INPUTS_RA is never silently dropped from the report."""
     pairs = {(k[1], k[2]) for k in series if k[0] == perimeter}
-    known = [(s, r) for s in SEGMENT_ORDER for (sg, r) in sorted(pairs) if sg == s]
-    rest = sorted(p for p in pairs if p[0] not in SEGMENT_ORDER)
+    known = [(s, r) for s in segment_order for (sg, r) in sorted(pairs) if sg == s]
+    rest = sorted(p for p in pairs if p[0] not in segment_order)
     return known + rest
 
 
 def write_block(ws, first_header_row, title_row, title, series, perimeter, fwl,
-                segments, months, start_date, n_months):
+                segments, months, n_months):
     """One `Updated` / `Previous` block: the title, the month index row, four segment tables."""
     ws.cell(title_row, 2, title).fill = YELLOW
     ws.cell(title_row, 2).font = Font(bold=True)
-    ws.cell(title_row + 1, 2, "En M€").font = Font(italic=True)
+    ws.cell(title_row + 1, 2, "En M EUR").font = Font(italic=True)
 
     index_row = first_header_row - 1
     for i, label in enumerate(months[:n_months]):
@@ -150,15 +153,14 @@ def write_block(ws, first_header_row, title_row, title, series, perimeter, fwl,
         c.font = Font(size=8, color="808080")
         c.alignment = Alignment(horizontal="center")
 
-    dates = month_dates(start_date, n_months)
     for b, (segment, rate_type) in enumerate(segments):
         header = first_header_row + b * BLOCK_PITCH
-        label = SEGMENT_LABELS.get(segment, segment)
-        h = ws.cell(header, 2, "%s à %s" % (label, rate_type))
+        h = ws.cell(header, 2, "%s a %s" % (segment, rate_type))
         h.font, h.border = Font(bold=True), BOX
-        for i, d in enumerate(dates):
-            c = ws.cell(header, FIRST_DATA_COL + i, d)
-            c.number_format = "DD/MM/YYYY"
+        # Month labels, not calendar dates: an INPUTS_RA sheet carries no as-of date and the
+        # business dropped the dates rather than supply one per side (Q3/Q4).
+        for i, label in enumerate(months[:n_months]):
+            c = ws.cell(header, FIRST_DATA_COL + i, label)
             c.font, c.border, c.alignment = Font(bold=True, size=9), BOX, Alignment(horizontal="center")
 
         for j, (label_a, label_b, kind) in enumerate(BLOCK_ROWS):
@@ -168,22 +170,10 @@ def write_block(ws, first_header_row, title_row, title, series, perimeter, fwl,
             ws.cell(row, 2, label_b).font = Font(size=9)
             ws.cell(row, 2).border = BOX
             for i in range(n_months):
-                col = FIRST_DATA_COL + i
-                cell = ws.cell(row, col)
-                letter = get_column_letter(col)
-                if kind == "metric":
-                    values = series.get((perimeter, segment, rate_type, fwl, label_b))
-                    cell.value = values[i] if values else None
-                    cell.number_format = FMT_CRD if label_b == "CRD" else FMT_AMOUNT
-                elif kind == "ra_total":
-                    # RA = RA STAT + RA FI + RE, kept as a formula so the reader can audit it
-                    stat, fi, re_ = (header + 3, header + 4, header + 5)
-                    cell.value = "=%s%d+%s%d+%s%d" % (letter, stat, letter, fi, letter, re_)
-                    cell.number_format = FMT_AMOUNT
-                else:  # ra_pct — annualised RA rate over the outstanding
-                    ra, crd = header + 2, header + 1
-                    cell.value = "=IFERROR(%s%d*12/-%s%d,\"\")" % (letter, ra, letter, crd)
-                    cell.number_format = FMT_PCT
+                cell = ws.cell(row, FIRST_DATA_COL + i)
+                values = series.get((perimeter, segment, rate_type, fwl, label_b))
+                cell.value = values[i] if values else None
+                cell.number_format = FMT_CRD if label_b == "CRD" else FMT_AMOUNT
                 cell.font = Font(size=9)
 
 
@@ -191,7 +181,7 @@ def write_evol_block(ws, segments, n_months, safe_div):
     """The `Evol` block: (Updated - Previous) / Previous, cell by cell, as live formulas."""
     ws.cell(EVOL_TITLE_ROW, 2, "Evol").fill = YELLOW
     ws.cell(EVOL_TITLE_ROW, 2).font = Font(bold=True)
-    ws.cell(EVOL_TITLE_ROW + 1, 2, "En M€").font = Font(italic=True)
+    ws.cell(EVOL_TITLE_ROW + 1, 2, "En M EUR").font = Font(italic=True)
 
     for i in range(n_months):
         src = ws.cell(UPDATED_FIRST_HEADER - 1, FIRST_DATA_COL + i).value
@@ -203,20 +193,18 @@ def write_evol_block(ws, segments, n_months, safe_div):
         header = EVOL_FIRST_HEADER + b * BLOCK_PITCH
         up_header = UPDATED_FIRST_HEADER + b * BLOCK_PITCH
         prev_header = PREVIOUS_FIRST_HEADER + b * BLOCK_PITCH
-        label = SEGMENT_LABELS.get(segment, segment)
-        h = ws.cell(header, 2, "%s à %s" % (label, rate_type))
+        h = ws.cell(header, 2, "%s a %s" % (segment, rate_type))
         h.font, h.border = Font(bold=True), BOX
         for i in range(n_months):
             c = ws.cell(header, FIRST_DATA_COL + i,
                         ws.cell(up_header, FIRST_DATA_COL + i).value)
-            c.number_format = "DD/MM/YYYY"
             c.font, c.border, c.alignment = Font(bold=True, size=9), BOX, Alignment(horizontal="center")
 
         for j, (label_a, label_b, _) in enumerate(BLOCK_ROWS):
             row = header + 1 + j
             if label_a:
                 ws.cell(row, 1, label_a).font = Font(italic=True, size=9)
-            ws.cell(row, 2, "RA/RE" if label_b == "RA" else label_b).font = Font(size=9)
+            ws.cell(row, 2, label_b).font = Font(size=9)
             ws.cell(row, 2).border = BOX
             for i in range(n_months):
                 col = FIRST_DATA_COL + i
@@ -240,7 +228,7 @@ def add_charts(ws, segments, n_months, chart_step):
         offset = [r[1] for r in BLOCK_ROWS].index(metric)
         for b, (segment, rate_type) in enumerate(segments):
             chart = LineChart()
-            chart.title = "%s - %s" % (metric, SEGMENT_LABELS.get(segment, segment))
+            chart.title = "%s - %s" % (metric, segment)
             chart.style = 2
             chart.height, chart.width = 7.5, 12.5
             chart.y_axis.numFmt = FMT_CRD if metric == "CRD" else FMT_AMOUNT
@@ -278,16 +266,16 @@ def write_info_sheet(wb, args, new_meta, old_meta, common, only_new, only_old, n
         ("Previous RA sheets", ", ".join(old_meta["sheets"])),
         ("Months compared", "%d (%s .. %s), aligned by month INDEX" %
             (n_months, new_meta["months"][0], new_meta["months"][n_months - 1])),
-        ("Updated first month", args.new_start),
-        ("Previous first month", args.old_start),
         ("", ""),
         ("Compared keys", "%d perimeter x segment x rate type x FWL type x metric" % len(common)),
         ("Only in Updated (dropped)", ", ".join(sorted({"/".join(k[:3]) for k in only_new})) or "none"),
         ("Only in Previous (dropped)", ", ".join(sorted({"/".join(k[:3]) for k in only_old})) or "none"),
         ("", ""),
         ("%change", "(Updated - Previous) / Previous, per metric, per month, per key"),
-        ("RA", "RA STAT + RA FI + RE"),
-        ("%RA", "RA x 12 / -CRD (annualised rate over the outstanding)"),
+        ("Metrics", "CRD, RA STAT, RA FI, RE - as they appear in the input. The manual "
+                    "workbook's derived RA and %RA rows are not reproduced (Q6/Q11)."),
+        ("Months", "identified as M1..M361; the report carries no calendar dates (Q3/Q4)."),
+        ("Values", "used exactly as they appear in INPUTS_RA, with no rescaling (Q16)."),
         ("", ""),
         ("Generated by", "tools/ra_compare/build_ra_compare_workbook.py"),
         ("Design", "docs/tseadfwd/977/RA_COMPARISON_REPORT_DESIGN.md"),
@@ -303,17 +291,16 @@ def main():
     p.add_argument("--new", required=True, help="Updated Inputs_RA workbook")
     p.add_argument("--old", required=True, help="Previous Inputs_RA workbook")
     p.add_argument("--out", required=True, help="workbook to write")
-    p.add_argument("--new-start", default="2026-01", help="first projection month of the new file (YYYY-MM)")
-    p.add_argument("--old-start", default="2026-01", help="first projection month of the old file (YYYY-MM)")
+    p.add_argument("--segment-order", default=",".join(DEFAULT_SEGMENT_ORDER),
+                   help="comma-separated segment display order; anything not named follows, "
+                        "alphabetically")
     p.add_argument("--perimeters", default="", help="comma-separated subset; default = all common ones")
     p.add_argument("--chart-step", type=int, default=12, help="x-axis label step of the charts")
     p.add_argument("--raw-div", action="store_true",
                    help="write the manual file's bare =(C5-C42)/C42 (shows #DIV/0!) instead of IFERROR")
     args = p.parse_args()
 
-    def start_of(s):
-        y, m = s.split("-")
-        return date(int(y), int(m), 1)
+    segment_order = [x.strip().upper() for x in args.segment_order.split(",") if x.strip()]
 
     new_series, new_months, new_sheets, new_skipped = read_ra_file(args.new)
     old_series, old_months, old_sheets, old_skipped = read_ra_file(args.old)
@@ -335,7 +322,7 @@ def main():
     wb = Workbook()
     wb.remove(wb.active)
     for perimeter in perimeters:
-        segments = [sr for sr in perimeter_segments(new_series, perimeter)
+        segments = [sr for sr in perimeter_segments(new_series, perimeter, segment_order)
                     if any(k[:3] == (perimeter, sr[0], sr[1]) for k in common)]
         for fwl in FWL_ORDER:
             if not any(k[0] == perimeter and k[3] == fwl for k in common):
@@ -349,9 +336,9 @@ def main():
                 ws.column_dimensions[get_column_letter(FIRST_DATA_COL + i)].width = 11
 
             write_block(ws, UPDATED_FIRST_HEADER, UPDATED_TITLE_ROW, "Updated", new_series,
-                        perimeter, fwl, segments, new_months, start_of(args.new_start), n_months)
+                        perimeter, fwl, segments, new_months, n_months)
             write_block(ws, PREVIOUS_FIRST_HEADER, PREVIOUS_TITLE_ROW, "Previous", old_series,
-                        perimeter, fwl, segments, old_months, start_of(args.old_start), n_months)
+                        perimeter, fwl, segments, old_months, n_months)
             write_evol_block(ws, segments, n_months, safe_div=not args.raw_div)
             add_charts(ws, segments, n_months, args.chart_step)
 
