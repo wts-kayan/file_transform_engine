@@ -316,7 +316,7 @@ Mapping the US's *"test the generated reports against the manual calculations"* 
 | T2 | Degenerate cases | unit test: `old = 0`, both `0`, missing key, missing month → §5 table |
 | T3 | ~~Derived rows~~ | **dropped** with the rows themselves ([Q6](#q6), [Q11](#q11)) — nothing is derived any more |
 | T4 | Scope | unit test: only common keys compared; every dropped key reported (v4-vs-v1 case of §4) |
-| T5 | Geometry | golden test: the job's workbook vs `Compare_RA_reference_model.xlsx` — same sheets, same anchors, same row labels, same chart titles/series/ranges |
+| T5 | Geometry | golden test in `RaCompareGoldenSpec`: the job's workbook vs `Compare_RA_reference_model.xlsx` — same sheets, same column-B layout, same table headers, every `Evol` formula, the values, the chart titles |
 | T6 | Numbers *(deferred)* | the §6.3 CSV against the manual `Compare_RA_BCEF_KO_Prod 26Q2.xlsx`, per perimeter × segment × metric × month, **tolerance `1e-4` relative** (the manual file's cells are display-rounded — see §5). Deferred by [Q7](#q7) |
 | T7 | Opens clean | the produced workbook loads in Excel with no repair prompt and all formulas resolve (the reference model is checked this way in §8) |
 
@@ -436,29 +436,32 @@ conversion.
 
 ---
 
-## 11. What is still open
+## 11. State of play
 
-Nothing is waiting on the business. Two items are deferred rather than decided:
+**Nothing is waiting on the business.** The job of §7 is built, and T1, T2, T4 and T5 are in the
+suite:
+
+| Test | Where |
+|---|---|
+| T1, T2, T4 | `RaCompareViewSpec` — 20 unit tests on the pure core, no Spark and no workbook |
+| **T5** | `RaCompareGoldenSpec` — 8 assertions running the real pipeline over the two inputs the reference model was generated from, diffing sheets, the whole column-B layout, the table headers, **every** `Evol` formula, the values and the chart titles |
+| T7 | checked structurally — zip integrity, every XML part parses, 48 charts |
+
+T5 is a *golden* test, so it is worth exactly what it catches. It was checked against a deliberate
+one-row anchor change (`BlockGap` 2 → 3): three of its assertions failed and named the drift
+precisely — `row 62 → 64`, `C34 → C35` — while the sheet, header and chart assertions correctly
+stayed green. It reads the two real workbooks rather than a miniature fixture, and costs about 25
+seconds; the whole tseadfwd suite is 126 tests in about 45 seconds.
+
+Deferred, in the order it makes sense to pick them up:
 
 | Item | State |
 |---|---|
-| Acceptance test **T6** | deferred by [Q7](#q7) — needs the manual workbook and the two inputs it came from |
-| The **HTML report** (§6.2) | deferred by [Q8](#q8) — designed, not built, pending what the TWIST tab serves |
+| **T6** — reconcile against the manual calculation | deferred by [Q7](#q7); needs `Compare_RA_BCEF_KO_Prod 26Q2.xlsx` and the two `INPUTS_RA` files it was built from |
+| **HTML report** (§6.2) | deferred by [Q8](#q8); designed, not built, pending what the TWIST tab serves |
+| **TWIST wiring** | outside this repo — the job writes a file, TWIST serves it |
 
-The Scala job of §7 is **built and passing**: T1, T2 and T4 as 20 unit tests in
-`RaCompareViewSpec`, and T5 verified by diffing the job's own workbook against the regenerated
-reference model — same sheets, same anchors, same column-B layout, same `Evol` formulas, same 48
-chart titles. T7 checked structurally (zip integrity, 61 XML parts parse, 48 charts).
-
-What is left, in the order it makes sense to do it:
-
-| | |
-|---|---|
-| **T5 as a repeatable test** | the golden comparison ran as a script; it belongs in the suite, which means committing a small fixture pair and a reader for it |
-| **T6** | deferred by [Q7](#q7) — needs the manual workbook |
-| **HTML report** | deferred by [Q8](#q8) |
-| **TWIST wiring** | out of this repo's scope; the job writes a file, TWIST serves it |
-
-One caveat worth carrying forward: the reference model and the Scala job agree because both were
-written from this document, so T5 proves they have not *drifted* — it does not independently prove
-either matches what the Risk team produces by hand. That is exactly what T6 is for.
+The caveat to carry forward: the reference model and the Scala job agree because both were written
+from this document, so T5 proves they have not drifted **from each other**. It does not prove either
+matches what the Risk team produces by hand. That is what T6 is for, which is why deferring T6
+leaves a real gap rather than a formality.
