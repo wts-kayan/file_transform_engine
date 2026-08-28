@@ -1,10 +1,10 @@
-package com.bnp.str.tseadfwd.coherence
+package com.bnp.str.tseadfwd.consistency
 
 import com.bnp.str.tseadfwd.utility.PrimaryUtilities
 import org.apache.spark.sql.SparkSession
 import org.slf4j.LoggerFactory
 
-/** Persists the coherence-check report. */
+/** Persists the consistency-check report. */
 object CheckWriter {
 
   private val log = LoggerFactory.getLogger(this.getClass)
@@ -15,6 +15,6 @@ object CheckWriter {
    */
   def writeHtml(path: String, report: CheckReport)(implicit spark: SparkSession): Unit = {
     PrimaryUtilities.writeStringToHdfs(path, CheckHtmlView.render(report))(spark.sparkContext)
-    log.info(s"Coherence-check report written -> $path")
+    log.info(s"Consistency-check report written -> $path")
   }
 }

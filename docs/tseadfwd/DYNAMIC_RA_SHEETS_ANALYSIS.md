@@ -156,7 +156,7 @@ existing "missing input is skipped with a warning" behaviour is preserved, not r
 | 6 | **A new entity is loaded but has no PARAMETRAGE row** → it silently produces no output | new data-control check: perimeter present in RA, absent from PARAMETRAGE → WARN. This gap exists today and matters more once sheets appear on their own |
 | 7 | An entity is FWL=YES but its stress legs / macro variable are missing | already covered — `RA.stressLegs` (FAIL) and `SCENARIO.macroVars` (FAIL) |
 | 8 | Cost: `spark-excel` re-parses the whole workbook for **each** sheet read | fine at today's sizes (~0.1–0.2 MB, 49×366); measure on the production workbook before enabling discovery over a large file, and use `maxRowsInMemory` (streaming) if needed |
-| 9 | A conf without the new block | keep reading the legacy `RA_BCEF … RA_LS` blocks as a fallback, exactly as `COHERENCE_CHECK` falls back to `DATA_QUALITY` |
+| 9 | A conf without the new block | keep reading the legacy `RA_BCEF … RA_LS` blocks as a fallback, exactly as `CONSISTENCY_CHECK` falls back to `DATA_QUALITY` |
 
 ---
 

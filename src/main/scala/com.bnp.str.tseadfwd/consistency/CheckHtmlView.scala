@@ -1,4 +1,4 @@
-package com.bnp.str.tseadfwd.coherence
+package com.bnp.str.tseadfwd.consistency
 
 /**
  * Renders a [[CheckReport]] as ONE self-contained HTML document.
@@ -108,10 +108,10 @@ object CheckHtmlView {
       if (report.outputFile.isEmpty) ""
       else s"""      <dt>Output file</dt><dd class="mono">${esc(report.outputFile)}</dd>\n"""
     // Browser tab and print header: the file name distinguishes two reports open side by side,
-    // which "Business coherence check: TS_EAD_FWD" alone does not.
+    // which "Business consistency check: TS_EAD_FWD" alone does not.
     val docTitle =
-      if (report.outputFileName.isEmpty) "Business coherence check: TS_EAD_FWD"
-      else s"Business coherence check: ${report.outputFileName}"
+      if (report.outputFileName.isEmpty) "Business consistency check: TS_EAD_FWD"
+      else s"Business consistency check: ${report.outputFileName}"
 
     s"""<!DOCTYPE html>
        |<html lang="en">
@@ -162,7 +162,7 @@ object CheckHtmlView {
        |</head>
        |<body>
        |  <main>
-       |    <h1>Business coherence check: TS_EAD_FWD ${badge(report.verdict)}</h1>
+       |    <h1>Business consistency check: TS_EAD_FWD ${badge(report.verdict)}</h1>
        |    <p class="sub">$fileTitle${report.totalFindings} finding(s) over ${report.rowsIn} output line(s).</p>
        |
        |    <ul class="stats">
@@ -182,7 +182,7 @@ object CheckHtmlView {
        |    <h2>Summary</h2>
        |${renderTable(Seq(("Rule", "mono"), ("Title", ""), ("Status", ""), ("Findings", "num"), ("Action", "")), summaryRows)}
        |${report.results.map(ruleSection).mkString("\n")}
-       |    <p class="foot">IRIS / tseadfwd, business coherence check on the TS_EAD_FWD term structure.</p>
+       |    <p class="foot">IRIS / tseadfwd, business consistency check on the TS_EAD_FWD term structure.</p>
        |  </main>
        |</body>
        |</html>

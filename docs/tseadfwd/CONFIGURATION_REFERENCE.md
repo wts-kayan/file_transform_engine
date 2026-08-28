@@ -8,7 +8,7 @@ key in the file is read **and** its value consumed. See [Audit](#audit--nothing-
 
 ## Block → driver matrix
 
-| Block | `MainDriver` | `CoherenceCheckDriver` | `Term0AnalysisDriver` | `YearAnalysisDriver` | `EadFwdCompare` |
+| Block | `MainDriver` | `ConsistencyCheckDriver` | `Term0AnalysisDriver` | `YearAnalysisDriver` | `EadFwdCompare` |
 |-------|:---:|:---:|:---:|:---:|:---:|
 | `RA` (or the legacy `RA_*` blocks) | yes | – | yes | yes | – |
 | `PARAMETRAGE` | yes | – | yes | yes | – |
@@ -16,7 +16,7 @@ key in the file is read **and** its value consumed. See [Audit](#audit--nothing-
 | `parameters` | yes | yes | yes | yes | – |
 | `audit` | yes | – | – | – | – |
 | `TS_EAD_FWD` | yes | yes | yes | yes | – |
-| `COHERENCE_CHECK` | yes | yes | – | – | – |
+| `CONSISTENCY_CHECK` | yes | yes | – | – | – |
 | `TERM0_ANALYSIS` | – | – | yes | – | – |
 | `YEAR_ANALYSIS` | – | – | – | yes | – |
 | `COMPARE` | – | – | – | – | yes |
@@ -32,7 +32,7 @@ to the three standalone analysis/comparison entry points and are never read by a
 | 2. Run audit starts | `:49` → `TseadfwdAudit.start` → `RunAudit.start` (`RunAudit.scala:113`) | `audit.*`, plus `parameters.as_of_date_quarter`, `MACRO_VARIABLE.sheetNames`, `TS_EAD_FWD.tableName` |
 | 3. Inputs read | `:54` → `PrimaryReader` | `RA` (`raInput`, `PrimaryReader.scala:71`), `PARAMETRAGE` (`:40`), `MACRO_VARIABLE` (`:34`) |
 | 4. Calculation + data control | `:54` → `PrimaryMapper` | `parameters.*` (`PrimaryMapper.scala:41-141`), `TS_EAD_FWD.tmpPath`/`tableName` for the `DATA_CONTROL_*.csv` (`:575-578`) |
-| 5. Coherence check configured | `:62` → `CheckConfig.from` (`CoherenceCheckMapper.scala:57`) | `COHERENCE_CHECK.*`, `TS_EAD_FWD.format`/`singleFile`/`tmpPath`/`tableName`, `parameters.exclude_ead_ra_rate_ge_1` |
+| 5. Consistency check configured | `:62` → `CheckConfig.from` (`ConsistencyCheckMapper.scala:57`) | `CONSISTENCY_CHECK.*`, `TS_EAD_FWD.format`/`singleFile`/`tmpPath`/`tableName`, `parameters.exclude_ead_ra_rate_ge_1` |
 | 6. Output written | `:80` → `PrimaryUtilities.writeDataframe` (`:310`) | `TS_EAD_FWD.*` |
 
 ## Keys per block
@@ -83,13 +83,13 @@ override the config values.
 `format`, `mode`, `numPartition`, `tmpPath`, `tableName`, `singleFile`, `alsoExcel`, `sheetName`
 — all consumed by `writeDataframe` (`PrimaryUtilities.scala:310`) and `writeDataframeToExcel` (`:373`).
 
-### `COHERENCE_CHECK` — read by `CheckConfig.from`
+### `CONSISTENCY_CHECK` — read by `CheckConfig.from`
 
 `enabled`, `htmlPath`, `sourcePath`, and the seven rule keys
 (`rules.all_terms_equal_one.{enabled,remove,tolerance}`,
 `rules.negative_ead_ra_rate.{enabled,includeZero,replaceWith,maxRowsInReport}`).
 
-The block is also honoured under its former name `DATA_QUALITY` (`CoherenceCheckMapper.scala:48`),
+The block is also honoured under its former name `DATA_QUALITY` (`ConsistencyCheckMapper.scala:48`),
 so a config written before the rename still applies rather than silently defaulting.
 
 ## Two things worth knowing
@@ -100,18 +100,18 @@ Four components read it, not just the writer:
 
 - `writeDataframe` — writes `$tmpPath/$tableName.csv` (and `.xlsx` when `alsoExcel`)
 - `PrimaryMapper:575` — places `DATA_CONTROL_$tableName.csv`
-- `CheckConfig:78` — re-derives the output filename from `format` + `singleFile` so the coherence
+- `CheckConfig:78` — re-derives the output filename from `format` + `singleFile` so the consistency
   report names the file it judges; a name that does not match what lands in the directory is worse
   than no name at all
 - `TseadfwdAudit` — records `tableName` as `base_folder_name`
 
 Changing `tableName` therefore moves **four** artefacts, not one.
 
-### `COHERENCE_CHECK.sourcePath` is not used by `MainDriver`
+### `CONSISTENCY_CHECK.sourcePath` is not used by `MainDriver`
 
 `CheckConfig.from` populates it (`:106`), but `MainDriver` passes `outputFile = checks.outputFile`
 explicitly (`:71`) — it already holds the frame in memory and knows where it is about to write it.
-Only the standalone `CoherenceCheckDriver` consumes `sourcePath` (`:52,57,63`), to locate an
+Only the standalone `ConsistencyCheckDriver` consumes `sourcePath` (`:52,57,63`), to locate an
 already-written CSV.
 
 So it is the one key inside a `MainDriver` block that a production run reads but never uses. If
@@ -137,8 +137,8 @@ the file doubles as the documentation of what is tunable:
 
 `RA.sheetPattern`, `RA.requireColumns`, `RA.includeSheets`, `RA.excludeSheets`,
 `parameters.apply_rate_to_shock`, `parameters.allow_negative_ead_ra_rate`, `parameters.debug`,
-`parameters.validation.strict`, `TS_EAD_FWD.singleFile`, `COHERENCE_CHECK.enabled`,
-`COHERENCE_CHECK.sourcePath`, six of the seven `rules.*` keys (all but `includeZero`), and
+`parameters.validation.strict`, `TS_EAD_FWD.singleFile`, `CONSISTENCY_CHECK.enabled`,
+`CONSISTENCY_CHECK.sourcePath`, six of the seven `rules.*` keys (all but `includeZero`), and
 `TERM0_ANALYSIS.tol` / `YEAR_ANALYSIS.tol`.
 
 Note `includeSheets` / `excludeSheets` read as removable, but they are the escape hatches the
@@ -155,7 +155,7 @@ These are the ones actually steering a run:
 | `parameters.exclude_ead_ra_rate_ge_1` | `true` | `false` |
 | `TS_EAD_FWD.alsoExcel` | `true` | `false` |
 | `TS_EAD_FWD.sheetName` | `TS_EAD_FWD` | the table name |
-| `COHERENCE_CHECK.htmlPath` | `CR_TS_EAD_FWD.html` | `CR_TS_EAD_FWD_25Q4_v1_small.html` |
+| `CONSISTENCY_CHECK.htmlPath` | `CR_TS_EAD_FWD.html` | `CR_TS_EAD_FWD_25Q4_v1_small.html` |
 | `rules.negative_ead_ra_rate.includeZero` | `true` | `false` |
 
 Everything else either has no default (the input paths, `as_of_date_quarter`) or is a required

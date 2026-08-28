@@ -1,6 +1,6 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckHtmlView, CheckRule, CoherenceCheckMapper}
+import com.bnp.str.tseadfwd.consistency.{CheckConfig, CheckHtmlView, CheckRule, ConsistencyCheckMapper}
 import com.bnp.str.tseadfwd.utility.PrimaryUtilities
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.sql.functions.{col, regexp_replace}
@@ -8,12 +8,12 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
 /**
- * Simulation of coherence-check rule **CR01** (all terms equal to 1, by EAD_MATRIX_ID and SCENARIO_ID)
+ * Simulation of consistency-check rule **CR01** (all terms equal to 1, by EAD_MATRIX_ID and SCENARIO_ID)
  * on the REAL engine output.
  *
  * The production inputs never produce a full-exposure curve, so the rule reports nothing on a normal
  * run and there is nothing to look at. This app takes the produced `TS_EAD_FWD` CSV, ADDS four
- * simulated curves to it, and runs the real [[CoherenceCheckMapper]] over the result — same code path
+ * simulated curves to it, and runs the real [[ConsistencyCheckMapper]] over the result — same code path
  * as `MainDriver`, removal included:
  *
  *   SIMU_ALLONES_TF_Q / C — every term = 1                  -> CR01: flagged, removed
@@ -35,9 +35,9 @@ import org.apache.spark.sql.types.{StringType, StructField, StructType}
  * Run:
  *   mvn -o dependency:build-classpath -Dmdep.outputFile=cp.txt -DincludeScope=test
  *   java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
- *        com.bnp.str.tseadfwd.CoherenceSimulationApp [localRun/tseadfwd/application.conf]
+ *        com.bnp.str.tseadfwd.ConsistencySimulationApp [localRun/tseadfwd/application.conf]
  */
-object CoherenceSimulationApp {
+object ConsistencySimulationApp {
 
   private val COLUMNS = Seq("EAD_MATRIX_ID", "SCENARIO_ID", "TERM", "EAD_RA_RATE", "EAD_CCF_RATE")
 
@@ -45,7 +45,7 @@ object CoherenceSimulationApp {
     val confPath = args.lift(0).getOrElse("localRun/tseadfwd/application.conf")
 
     implicit val spark: SparkSession = SparkSession.builder()
-      .appName("coherence-simulation").master("local[2]").config("spark.ui.enabled", "false").getOrCreate()
+      .appName("consistency-simulation").master("local[2]").config("spark.ui.enabled", "false").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
     val config: Config = {
@@ -79,7 +79,7 @@ object CoherenceSimulationApp {
 
     // The real thing: same mapper, same settings, removal included. `outputFile` names the CLEANED
     // simulation file, not the production output — the report must not claim to judge the real one.
-    val outcome = new CoherenceCheckMapper(checks)(spark)
+    val outcome = new ConsistencyCheckMapper(checks)(spark)
       .apply(before, source = s"$outDir/TS_EAD_FWD_SIMULATED.csv", runId = "simulation",
         outputFile = s"$outDir/TS_EAD_FWD_SIMULATED_CLEANED.csv")
 
