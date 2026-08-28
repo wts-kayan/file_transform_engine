@@ -5,6 +5,7 @@ import com.bnp.str.tseadfwd.mapping.PrimaryView._
 import com.bnp.str.tseadfwd.utility.PrimaryConstants._
 import com.bnp.str.tseadfwd.validation.{ControlCheck, DataControlView, Severity}
 import com.typesafe.config.Config
+import org.apache.spark.sql.functions.{col, regexp_replace, upper}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
 import org.slf4j.LoggerFactory
@@ -31,6 +32,34 @@ class PrimaryMapper(
   extends MapperProvider {
 
   private val log = LoggerFactory.getLogger(this.getClass)
+
+  /**
+   * `raInput` with the KEY-LESS rows removed, and the only frame the rest of this class reads.
+   *
+   * A row blank across all five key columns is not an RA series: it is a blank line in the sheet.
+   * Excel produces them by the dozen — touching a cell below the table (a stray delete, a format
+   * applied to whole rows) extends the used range, and POI then reports those rows as
+   * present-but-empty.
+   *
+   * They have to go before anything keys on them. [[collectRa]] builds a Map, so every blank row
+   * collapses onto the single key `||||` and all but one are silently overwritten; and
+   * [[duplicateRaKeys]] then reports that one key as appearing N times, which reads as "the same
+   * entity was loaded twice" and FAILs the run for a reason that has nothing to do with the data.
+   *
+   * Emptiness is decided with the SAME normalisation the key uses ([[canon]]): upper-cased, then
+   * everything that is not a letter, digit or sign stripped. Testing for `""` after `trim` would be
+   * close but not identical — a row carrying only punctuation is not blank to `trim` yet still
+   * canons to the empty key, so it has to be dropped too or it defeats the guard.
+   */
+  private lazy val raRows: DataFrame = {
+    val keyCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
+    val canonised = keyCols.map(c => regexp_replace(upper(col(c)), "[^A-Z0-9+-]", ""))
+    val hasKey = canonised.map(c => c.isNotNull && c =!= "").reduce(_ || _)
+    raInput.where(hasKey)
+  }
+
+  /** How many key-less rows [[raRows]] dropped — reported by the data control, never silent. */
+  private lazy val blankKeyRows: Long = raInput.count() - raRows.count()
 
   private val appConf = config.getConfig(APP_CONF)
   /**
@@ -165,8 +194,8 @@ class PrimaryMapper(
   def getDataFrame: DataFrame = {
     log.info(s"Building $OUTPUT_EAD_FWD (as_of=$asOfDateQuarter; shock-window end per PARAMETRAGE PROJECTION_HORIZON, fallback $lastQuarterProjectionHorizon)")
 
-    val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
-    val ra = collectRa(raInput)
+    val perimeters = raRows.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
+    val ra = collectRa(raRows)
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
 
@@ -189,11 +218,11 @@ class PrimaryMapper(
         scenario.where(s"$COL_SCEN_DATE IN (${allShockQuarters(matrices).map(q => s"'$q'").mkString(",")})"))
       // M1..Mn are MONTHLY columns (METRIC is the separate key column). The full series is
       // used by collectRa; here we only preview the first/last 3 months to keep the table readable.
-      val allMonths = monthColumns(raInput)
+      val allMonths = monthColumns(raRows)
       val sampleMonths = allMonths.take(3) ++ allMonths.takeRight(3)
       val raCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC) ++ sampleMonths
       logShow(s"INPUT - RA all perimeters (keys + first/last months; ${allMonths.length} monthly cols used in full)",
-        raInput.select(raCols.head, raCols.tail: _*))
+        raRows.select(raCols.head, raCols.tail: _*))
       val matRows = matrices.map(m => Row(m.matrixId(Quarterly).dropRight(2), m.segments.mkString("+"), m.fwlApplied.toString, m.macroVar))
       val matSchema = StructType(Seq("MATRIX", "SEGMENTS", "FWL_APPLIED", "MACRO_VAR").map(StructField(_, StringType)))
       logShow("PARSED - matrix definitions", sparkSession.createDataFrame(sparkSession.sparkContext.parallelize(matRows, 1), matSchema))
@@ -231,8 +260,8 @@ class PrimaryMapper(
    * window is empty (no RA data, or a missing FWL=YES stress leg) is dropped — as `matrixRows` does.
    */
   def term0AnalysisRows(terms: Seq[Double], freq: Frequency = Quarterly): Seq[Term0RowView] = {
-    val perimeters = raInput.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
-    val ra = collectRa(raInput)
+    val perimeters = raRows.select(COL_PERIMETER).distinct().collect().map(_.getString(0)).toSet
+    val ra = collectRa(raRows)
     val macroData = collectScenario(scenario)
     val matrices = parseParametrage(parametrage, perimeters)
 
@@ -537,6 +566,16 @@ class PrimaryMapper(
   }
 
   /**
+   * A duplicate key as the report shows it, with empty parts named.
+   *
+   * The raw join gives `BCEF||TF||CRD` for a key whose SEGMENT and FWL_TYPE are blank, and `||||`
+   * for one that is blank throughout — neither of which reads as anything. Naming the gaps turns
+   * the message into the diagnosis: it is the blank parts that tell you what is wrong with the row.
+   */
+  private def renderKey(key: String): String =
+    key.split("\\|", -1).map(p => if (p.isEmpty) "<blank>" else p).mkString("|")
+
+  /**
    * RA key tuples that occur more than once, most frequent first, as `PERIMETER|SEGMENT|…` strings.
    *
    * Keys are [[canon]]ed exactly as [[collectRa]] canons them, so this counts the collisions that
@@ -599,13 +638,13 @@ class PrimaryMapper(
     def add(name: String, sev: String, detail: String): Unit = checks += ControlCheck(name, sev, detail)
 
     // --- structural: required columns + monthly grid ---
-    val raCols = raInput.columns.toSet
+    val raCols = raRows.columns.toSet
     val requiredRaCols = Seq(COL_PERIMETER, COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
     val missingCols = requiredRaCols.filterNot(raCols.contains)
     if (missingCols.isEmpty) add("RA.columns", Severity.Pass, s"key columns present: ${requiredRaCols.mkString(", ")}")
     else add("RA.columns", Severity.Fail, s"missing RA key column(s): ${missingCols.mkString(", ")}")
 
-    val months = monthColumns(raInput)
+    val months = monthColumns(raRows)
     if (months.isEmpty) add("RA.months", Severity.Fail, "no monthly M<n> columns detected in RA input")
     else {
       val nums = months.map(_.drop(1).toInt)
@@ -617,18 +656,28 @@ class PrimaryMapper(
     if (ra.isEmpty) add("RA.rows", Severity.Fail, "RA input parsed to zero series")
     else add("RA.rows", Severity.Pass, s"${ra.size} RA series parsed")
 
+    // --- blank lines in the sheet ---
+    // Dropped before anything keys on them (see `raRows`), but reported: "the workbook has 67 rows
+    // of nothing in it" is worth one line, and a reader who sees the series count drop between two
+    // vintages should be able to find out why here rather than guess.
+    if (blankKeyRows > 0)
+      add("RA.blankRows", Severity.Warn,
+        s"$blankKeyRows row(s) carry no key at all and were dropped before parsing " +
+          "(blank lines in the sheet; delete the rows to silence this)")
+    else add("RA.blankRows", Severity.Pass, "no key-less rows in the RA input")
+
     // --- duplicate series: the ONE failure the parsing cannot survive silently ---
     // `collectRa` builds a Map, so two rows with the same key leave one series and drop the other
     // WITHOUT a trace — and the surviving one is whichever came last. That is exactly what a
     // double-loaded sheet produces (the same entity read from two workbooks), so with the RA sheets
     // discovered rather than named one by one, this has to be a hard failure.
     if (missingCols.isEmpty) {
-      val dups = duplicateRaKeys(raInput)
+      val dups = duplicateRaKeys(raRows)
       if (dups.isEmpty) add("RA.duplicateKeys", Severity.Pass, "no RA series appears twice")
       else add("RA.duplicateKeys", Severity.Fail,
         s"${dups.size} RA series key(s) appear more than once, e.g. " +
-          dups.take(5).map { case (k, n) => s"$k x$n" }.mkString("; ") +
-          " -> one of each pair would be SILENTLY dropped (same entity loaded twice?)")
+          dups.take(5).map { case (k, n) => s"${renderKey(k)} x$n" }.mkString("; ") +
+          " -> one of each pair would be SILENTLY dropped")
     }
 
     // --- an entity is present in RA but nothing in PARAMETRAGE asks for it ---
@@ -639,7 +688,7 @@ class PrimaryMapper(
     if (missingCols.isEmpty) {
       val paramPerims =
         parametrage.select(COL_PERIMETER).distinct().collect().map(r => canon(str(r, 0))).toSet
-      val orphanPerims = raInput.select(COL_PERIMETER).distinct().collect()
+      val orphanPerims = raRows.select(COL_PERIMETER).distinct().collect()
         .map(r => str(r, 0)).filter(_.nonEmpty)
         .filterNot(p => paramPerims.contains(canon(p)))
         .distinct.sorted
@@ -727,7 +776,7 @@ class PrimaryMapper(
     else {
       val keyCols = Seq(COL_SEGMENT, COL_RATE_TYPE, COL_FWL_TYPE, COL_METRIC)
       val sel = keyCols ++ months
-      val rows = raInput.select(sel.head, sel.tail: _*).collect()
+      val rows = raRows.select(sel.head, sel.tail: _*).collect()
       val k = keyCols.length
       var scanned = 0
       var bad = 0

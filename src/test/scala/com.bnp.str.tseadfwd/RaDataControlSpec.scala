@@ -96,6 +96,73 @@ class RaDataControlSpec extends AnyFunSuite with Matchers with SparkTestSession 
     controlReport should include("no RA series appears twice")
   }
 
+  // ---- blank lines in the sheet ------------------------------------------------
+
+  /** A row blank across every key column - what Excel leaves below a table. */
+  private def blankRow(months: String = "") =
+    ("", "", "", "", "", months, months, months)
+
+  test("blank rows do not FAIL the run as if an entity had been loaded twice") {
+    // Before the guard, every blank row canon()ed to the same empty key, so N of them looked like
+    // one series read N times and RA.duplicateKeys aborted the run - pointing at a double-loaded
+    // sheet, which is not what is wrong.
+    val withBlanks = ra(rowsFor("BCEF", "-90") ++ Seq.fill(6)(blankRow()))
+
+    val df = run(withBlanks, parametrage("BCEF"))
+
+    df.count() should be > 0L
+    controlReport should include("no RA series appears twice")
+  }
+
+  test("the dropped blank rows are reported, not silently swallowed") {
+    run(ra(rowsFor("BCEF", "-90") ++ Seq.fill(6)(blankRow())), parametrage("BCEF"))
+
+    controlReport should include("RA.blankRows")
+    controlReport should include("6 row(s) carry no key at all")
+  }
+
+  test("blank rows are not counted as parsed series") {
+    run(ra(rowsFor("BCEF", "-90") ++ Seq.fill(6)(blankRow())), parametrage("BCEF"))
+
+    // 3 FWL types x 4 metrics, and not one more
+    controlReport should include("12 RA series parsed")
+  }
+
+  test("a row carrying only strippable punctuation counts as blank") {
+    // trim() would call this row non-empty; canon() reduces it to "" and it would then collide with
+    // every other key-less row. The guard has to use the same normalisation the key does.
+    val punctuation = (".", "/", "()", "", "", "1", "1", "1")
+    run(ra(rowsFor("BCEF", "-90") :+ punctuation), parametrage("BCEF"))
+
+    controlReport should include("1 row(s) carry no key at all")
+    controlReport should include("no RA series appears twice")
+  }
+
+  test("a bare '-' is a key, not a blank — canon keeps the sign") {
+    // canon() strips everything except letters, digits, '+' and '-', because the signs are what
+    // separate STRESS (+) from STRESS (-). So a key column holding only '-' canons to "-", which is
+    // a real (if odd) key: the row is malformed, not empty, and must not be silently dropped.
+    run(ra(rowsFor("BCEF", "-90") :+ (("-", "-", "-", "-", "-", "1", "1", "1"))), parametrage("BCEF"))
+
+    controlReport should include("no key-less rows in the RA input")
+    controlReport should include("13 RA series parsed")
+  }
+
+  test("a clean input says so rather than staying silent") {
+    run(ra(rowsFor("BCEF", "-90")), parametrage("BCEF"))
+    controlReport should include("no key-less rows in the RA input")
+  }
+
+  test("a partially blank key still counts as a key, and is named readably when duplicated") {
+    // Only SOME key columns empty: the row is not blank, it is malformed, and two of them still
+    // collide. The report has to make the gaps visible - "BCEF||TF||CRD" reads as nothing.
+    val partial = ("BCEF", "", "TF", "", "CRD", "1", "1", "1")
+    intercept[IllegalStateException](
+      run(ra(rowsFor("BCEF", "-90") ++ Seq(partial, partial)), parametrage("BCEF")))
+
+    controlReport should include("BCEF|<blank>|TF|<blank>|CRD x2")
+  }
+
   test("an entity nobody configured is reported, and does not stop the run") {
     // The likely shape of "the business added a sheet and the run ignored it": XYZ loads fine, but
     // PARAMETRAGE has no row for it, so it produces nothing. A WARN — the run is still valid.
