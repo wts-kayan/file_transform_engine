@@ -62,21 +62,24 @@ object CheckHtmlView {
       if (!r.enabled) """      <p class="none">Rule disabled in the configuration, not evaluated.</p>"""
       else if (r.total == 0L) """      <p class="none">No line matched this rule.</p>"""
       else {
-        val groupLevel = r.rule == CheckRule.AllTermsEqualOne
+        // The column shape follows the FINDINGS, not the rule's identity: a rule that names curves
+        // (CR01, CR03) or counts kinds of hit (CR02) fills no TERM, and a TERM column standing
+        // empty down the whole table reads as missing data rather than as not-applicable.
+        val rowLevel = r.findings.exists(_.term.nonEmpty)
         val headers =
-          if (groupLevel) Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("EAD_RA_RATE", "num"), ("Detail", ""))
-          else Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("TERM", "num"), ("EAD_RA_RATE", "num"), ("Detail", ""))
+          if (rowLevel) Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("TERM", "num"), ("EAD_RA_RATE", "num"), ("Detail", ""))
+          else Seq(("EAD_MATRIX_ID", ""), ("SCENARIO_ID", ""), ("EAD_RA_RATE", "num"), ("Detail", ""))
         val rows = r.findings.map { f =>
           val key = Seq(Cell(f.matrixId, "mono"), Cell(f.scenarioId, "mono"))
           val values =
-            if (groupLevel) Seq(Cell(f.value, "num mono"))
-            else Seq(Cell(f.term, "num mono"), Cell(f.value, "num mono"))
+            if (rowLevel) Seq(Cell(f.term, "num mono"), Cell(f.value, "num mono"))
+            else Seq(Cell(f.value, "num mono"))
           key ++ values :+ Cell(f.detail)
         }
         val note =
           if (r.truncated)
             s"""      <p class="note">Showing the first ${r.findings.size} of ${r.total} finding(s).
-               |        Raise <code>rules.negative_ead_ra_rate.maxRowsInReport</code> to list more.</p>
+               |        Raise <code>rules.some_terms_equal_one.maxRowsInReport</code> to list more.</p>
                |""".stripMargin
           else ""
         renderTable(headers, rows) + note

@@ -53,18 +53,43 @@ object CheckRule {
       "way the line is KEPT and, by default, so is the value as computed: a negative rate can only " +
       "appear once allow_negative_ead_ra_rate has been switched on, and the point of switching it " +
       "on is to see the real number. Configure a marker (replaceWith) to have the value written as " +
-      "a token instead, for a consumer that cannot take a negative.",
+      "a token instead, for a consumer that cannot take a negative. The report gives a SUMMARY " +
+      "only - how many lines carry a zero and how many carry a negative - never the lines " +
+      "themselves: those two counts are what the business reads, and a zero rate is ordinary " +
+      "enough to run to thousands of lines. The Findings count is the number of LINES affected.",
+    removes = false)
+
+  /**
+   * CR03 — the mirror of CR01. For one (EAD_MATRIX_ID, SCENARIO_ID), SOME terms carry
+   * `EAD_RA_RATE = 1` and others do not: the exposure is full over part of the curve and running
+   * off over the rest. That is a possible shape rather than an impossible one, so nothing is
+   * removed, but the business asked for those curves to be named — a term still at full exposure
+   * where the curve has otherwise started to amortise is worth a look.
+   *
+   * Disjoint from CR01 by construction: CR01 needs EVERY term equal to 1, CR03 needs at least one
+   * and not all. A curve with no term equal to 1 fires neither rule.
+   */
+  val SomeTermsEqualOne = CheckRule(
+    id = "CR03",
+    title = "Some terms equal to 1, but not the whole curve",
+    detail = "Lines are grouped by EAD_MATRIX_ID and SCENARIO_ID; one group is one curve. The " +
+      "group is flagged when AT LEAST ONE of its terms carries EAD_RA_RATE = 1 and at least one " +
+      "does not: full exposure over part of the curve only. A curve whose every term equals 1 " +
+      "belongs to CR01 and is not repeated here; a curve with no term equal to 1 is not flagged " +
+      "at all. The line is KEPT - this rule only names the curve for review. One line is reported " +
+      "per curve, with how many of its terms equal 1, not one line per term.",
     removes = false)
 
   /** Every rule, in report order. */
-  val All: Seq[CheckRule] = Seq(AllTermsEqualOne, NegativeEadRaRate)
+  val All: Seq[CheckRule] = Seq(AllTermsEqualOne, NegativeEadRaRate, SomeTermsEqualOne)
 }
 
 /**
  * One offending item.
  *
- * For a group-level rule (CR01) `term` is empty and `value` describes the group; for a row-level
- * rule (CR02) both identify the exact output row.
+ * Not necessarily one output row: `term` is filled only when the finding names one exact row.
+ *  - group-level rules (CR01, CR03): `term` empty, the two keys name the curve, `value` describes it
+ *  - summary lines (CR02): `term` empty, both keys are "-", and `detail` counts the rows behind it
  */
 final case class CheckFinding(
                             matrixId: String,
@@ -87,6 +112,11 @@ final case class CheckFinding(
  *                   business — distinct from a run where the removal was switched off
  * @param valuesReplaced values rewritten to [[marker]] in the output (the line itself is kept)
  * @param marker    the token written in place of the offending value, empty when none is configured
+ * @param summarised true when `findings` SUMMARISES `total` instead of listing a prefix of it — CR02
+ *                   reports one counted line per kind of hit, whatever the number of rows behind it.
+ *                   Such a result is never [[truncated]]: there is no longer listing to ask for, so
+ *                   a "showing the first 2 of 1247" note would point the reader at a setting that
+ *                   would change nothing.
  */
 final case class CheckRuleResult(
                                rule: CheckRule,
@@ -97,11 +127,12 @@ final case class CheckRuleResult(
                                applied: Boolean,
                                reportOnly: Boolean = false,
                                valuesReplaced: Long = 0L,
-                               marker: String = ""
+                               marker: String = "",
+                               summarised: Boolean = false
                              ) {
 
   /** True when findings were listed but the report shows only a prefix of them. */
-  def truncated: Boolean = total > findings.size
+  def truncated: Boolean = !summarised && total > findings.size
 
   /** PASS (nothing found) / SKIPPED (disabled) / REMOVED (found and dropped) / REPORTED (found, kept). */
   def status: String =

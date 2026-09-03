@@ -1,6 +1,6 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.consistency.{CheckConfig, CheckHtmlView, CheckRule, ConsistencyCheckMapper}
+import com.bnp.str.tseadfwd.consistency.{CheckConfig, CheckFinding, CheckHtmlView, CheckRule, ConsistencyCheckMapper}
 import com.bnp.str.tseadfwd.utility.PrimaryUtilities
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.sql.functions.{col, regexp_replace}
@@ -18,12 +18,14 @@ import org.apache.spark.sql.types.{StringType, StructField, StructType}
  *
  *   SIMU_ALLONES_TF_Q / C — every term = 1                  -> CR01: flagged, removed
  *   SIMU_ALLONES_TF_Q / A — every term = 1 except the last  -> CR01: NOT flagged (the boundary case)
+ *                                                           -> CR03: flagged, "n of m term(s) equal 1"
  *   SIMU_ALLONES_TF_Y / C — every term = 1                  -> CR01: flagged, removed as a SEPARATE
  *                                                              group (the _Y curve of the matrix)
- *   SIMU_NEGATIVE_TF_Q / C — a normal curve with two sub-zero terms
- *                                                           -> CR02: line kept, value written as
+ *   SIMU_NEGATIVE_TF_Q / C — two sub-zero terms, then a tail that has run off to exactly 0
+ *                                                           -> CR02: lines kept, value written as
  *                                                              computed (or as the configured
- *                                                              `replaceWith` marker)
+ *                                                              `replaceWith` marker), and SUMMARISED
+ *                                                              as one counted line per kind of hit
  *
  * It writes three files next to the output (all under the gitignored `output/` directory):
  *   TS_EAD_FWD_SIMULATED.csv          the real output + the simulated lines (the "before")
@@ -67,9 +69,16 @@ object ConsistencySimulationApp {
         curve("SIMU_ALLONES_TF_Q", "A", quarterlyTerms,
           i => if (i == quarterlyTerms.size - 1) "0,98" else "1") ++
         curve("SIMU_ALLONES_TF_Y", "C", yearlyTerms, _ => "1") ++
-        // a plausible decaying curve that dips below zero twice: CR02 territory
+        // CR02 territory: a decaying curve that dips below zero twice and then, from half way,
+        // runs off to exactly 0. BOTH halves of the rule on one curve, and deliberately lopsided —
+        // a hundred-odd zeros against two negatives is precisely the shape the business asked to
+        // see summarised rather than listed line by line.
         curve("SIMU_NEGATIVE_TF_Q", "C", quarterlyTerms,
-          i => if (i == 2) "-0,15" else if (i == 5) "-2,4" else f"0,${99 - math.min(i, 90)}%02d")
+          i =>
+            if (i == 2) "-0,15"
+            else if (i == 5) "-2,4"
+            else if (i >= quarterlyTerms.size / 2) "0"
+            else f"0,${99 - math.min(i, 90)}%02d")
 
     val schema = StructType(COLUMNS.map(StructField(_, StringType)))
     val simDf = spark.createDataFrame(spark.sparkContext.parallelize(simulated, 1), schema)
@@ -90,18 +99,27 @@ object ConsistencySimulationApp {
     // ---- what happened ----
     val r01 = outcome.report.results.find(_.rule == CheckRule.AllTermsEqualOne).get
     val r02 = outcome.report.results.find(_.rule == CheckRule.NegativeEadRaRate).get
+    val r03 = outcome.report.results.find(_.rule == CheckRule.SomeTermsEqualOne).get
+
+    /** A curve-level finding (CR01, CR03): the two keys, then what the rule says about the curve. */
+    def curveFinding(f: CheckFinding): String = f"  ${f.matrixId}%-22s ${f.scenarioId}  ${f.detail}"
+
     println(s"""
-       |=== CR01 / CR02 simulation ===================================================
+       |=== CR01 / CR02 / CR03 simulation ============================================
        |real output          : ${checks.sourcePath} (${real.count()} lines)
        |simulated lines added: ${simulated.size} over 4 curves
        |
        |CR01 status           : ${r01.status}, ${r01.total} group(s) flagged
-       |${r01.findings.map(f => f"  ${f.matrixId}%-22s ${f.scenarioId}  ${f.detail}").mkString("\n")}
+       |${r01.findings.map(curveFinding).mkString("\n")}
        |CR01 action           : ${r01.action}
        |
-       |CR02 status           : ${r02.status}, ${r02.total} value(s) flagged
-       |${r02.findings.map(f => f"  ${f.matrixId}%-22s ${f.scenarioId}  term ${f.term}%-6s = ${f.value}").mkString("\n")}
+       |CR02 status           : ${r02.status}, ${r02.total} line(s) flagged
+       |${r02.findings.map(f => f"  ${f.value}%-5s ${f.detail}").mkString("\n")}
        |CR02 action           : ${r02.action}
+       |
+       |CR03 status           : ${r03.status}, ${r03.total} curve(s) flagged
+       |${r03.findings.map(curveFinding).mkString("\n")}
+       |CR03 action           : ${r03.action}
        |
        |lines in             : ${outcome.report.rowsIn}
        |lines out            : ${outcome.report.rowsOut}
