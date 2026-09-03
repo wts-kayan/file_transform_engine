@@ -434,7 +434,7 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
       .apply(df, source = "TS_EAD_FWD", runId = "test-run", outputFile = "").report
 
     report.outputFileName shouldBe ""
-    report.summaryLine should startWith("COHERENCE CHECK - PASS")
+    report.summaryLine should startWith("CONSISTENCY CHECK - PASS")
   }
 
   // ---- CheckConfig: the output file is resolved as the writer resolves it -------

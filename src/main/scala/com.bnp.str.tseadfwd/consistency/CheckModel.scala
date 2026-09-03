@@ -174,7 +174,7 @@ final case class CheckReport(
   /** One-line summary for the run log — named by the file it judges, when that file is known. */
   def summaryLine: String = {
     val on = if (outputFileName.isEmpty) "" else s" on $outputFileName"
-    s"COHERENCE CHECK$on - $verdict ($rowsIn row(s) in, $rowsOut out): " +
+    s"CONSISTENCY CHECK$on - $verdict ($rowsIn row(s) in, $rowsOut out): " +
       results.map(r => s"${r.rule.id} ${r.status}(${r.total})").mkString(", ")
   }
 }

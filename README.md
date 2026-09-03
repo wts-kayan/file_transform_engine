@@ -346,7 +346,7 @@ path in the header block — resolved from the `TS_EAD_FWD` block exactly as the
 (`.csv`, `.xlsx`, or the directory marked `(part-file directory)` when `singleFile = false`); a
 standalone run names the CSV it read. Reports for several vintages of the same table land in one
 directory, so a report that does not say which file it judged says very little. The same name opens the
-run log's `COHERENCE CHECK on <file> - <verdict> ...` line.
+run log's `CONSISTENCY CHECK on <file> - <verdict> ...` line.
 
 Two consequences worth knowing:
 
