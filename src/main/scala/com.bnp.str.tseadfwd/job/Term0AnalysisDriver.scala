@@ -245,7 +245,7 @@ object Term0AnalysisDriver {
         sb.append(s"  [STEP 4] dOAT = (IR_10Y_FR($leg) - IR_10Y_FR(Central))*10000 = ${dot(r.delta, 6)}   (O167-169)\n")
         sb.append(s"  [STEP 5] fire_scen_det = fire_base_det*(1 - (sens_fi+sens_re)*dOAT) = ${dot(fireScen, 8)}   (O174-176)\n")
         sb.append(s"  [STEP 6] RA($t) = stat_det + fire_scen_det = ${dot(statDet, 8)} + ${dot(fireScen, 8)} = ${dot(r.ra, 8)}   (O179-182)\n")
-        sb.append(s"  [STEP 7] VECTOR($t) = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+        sb.append(s"  [STEP 7] VECTOR($t) = MIN(1; 1 - ${dot(r.ra, 8)}) = ${dot(r.vector, 8)}\n")
       }
       sb.append(s"  [STEP 8] $eadLine\n\n")
     } else if (r.crdAgg == 0.0) {
@@ -278,7 +278,7 @@ object Term0AnalysisDriver {
       sb.append(s"    RA_FI_RE = fire + Rate*(str - fire) = ${dot(fire, 8)} + ${dot(rate, 6)}*(${dot(str, 8)} - ${dot(fire, 8)}) = ${dot(fireRe, 8)}\n")
       sb.append(s"               (equivalently fire + shockSign*(shock_fi + shock_re)*delta)\n")
       sb.append(s"  [STEP 5] RA($t) = stat_det + RA_FI_RE = ${dot(statDet, 8)} + ${dot(fireRe, 8)} = ${dot(r.ra, 8)}\n")
-      sb.append(s"  [STEP 6] VECTOR($t) = 1 - RA = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      sb.append(s"  [STEP 6] VECTOR($t) = MIN(1; 1 - RA) = MIN(1; 1 - ${dot(r.ra, 8)}) = ${dot(r.vector, 8)}\n")
       sb.append(s"  [STEP 7] $eadLine\n\n")
     } else {
       // No shock: Central (FWL=YES -> STAT+FI+RE) or FWL=NO (STAT only).
@@ -291,7 +291,7 @@ object Term0AnalysisDriver {
       sb.append(s"    CRD=${dot(r.crdAgg)}  RA_STAT=${dot(r.statAgg)}" + (if (r.fwlApplied) s"  RA_FI=${dot(r.fiAgg)}  RE=${dot(r.reAgg)}" else "") + "\n")
       sb.append(s"  [STEP 2] numerator = $numTxt\n")
       sb.append(s"           RA($t) = -(numerator)/CRD = -(${dot(numerator)}) / ${dot(r.crdAgg)} = ${dot(r.ra, 8)}\n")
-      sb.append(s"  [STEP 3] VECTOR($t) = 1 - RA = 1 - ${dot(r.ra, 8)} = ${dot(r.vector, 8)}\n")
+      sb.append(s"  [STEP 3] VECTOR($t) = MIN(1; 1 - RA) = MIN(1; 1 - ${dot(r.ra, 8)}) = ${dot(r.vector, 8)}\n")
       sb.append(s"  [STEP 4] $eadLine\n\n")
     }
     sb.toString()
@@ -372,7 +372,7 @@ object Term0AnalysisDriver {
         "spread `(IR_10Y_FR scen-Central)*10000`; Adverse != Extreme.\n")
     else
       sb.append("Quarterly non-Central: baseline detail + macro-weighted stress shock on FI/RE.\n")
-    sb.append("`VECTOR = 1 - RA`; `EAD_RA_RATE` = cumulative product of VECTOR (held flat past horizon).\n")
+    sb.append("`VECTOR = MIN(1; 1 - RA)`; `EAD_RA_RATE` = cumulative product of VECTOR (held flat past horizon).\n")
     if (reconciled)
       sb.append("`ENGINE` / `STATUS` reconcile each `EAD_RA_RATE` against the real engine output CSV.\n")
     sb.append("\n---\n\n")
@@ -411,7 +411,7 @@ object Term0AnalysisDriver {
         sb.append("**Worked Term 0 — Central (no shock)**\n\n```\n")
         sb.append(s"numerator           = $numTxt\n")
         sb.append(s"RA(Term 0)          = -(${dot(numerator)}) / ${dot(c.crdAgg)} = ${dot(c.ra, 8)}\n")
-        sb.append(s"VECTOR(Term 0)      = 1 - ${dot(c.ra, 8)} = ${dot(c.vector, 8)}\n")
+        sb.append(s"VECTOR(Term 0)      = MIN(1; 1 - ${dot(c.ra, 8)}) = ${dot(c.vector, 8)}\n")
         sb.append(s"EAD_RA_RATE(Term 0) = ${dot(c.ead, 8)}\n```\n\n")
       }
 

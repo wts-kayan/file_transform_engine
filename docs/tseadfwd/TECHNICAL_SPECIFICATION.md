@@ -94,7 +94,8 @@ Pure functions, no Spark dependency:
 | `centralRa(crd, raStat, raFi, re, freq)` | FWL=YES Central per-period `RA = -(STAT+FI+RE)/CRD`; run-off guard `CRD==0 → 0` |
 | `statOnlyRa(crd, raStat, freq)` | FWL=NO per-period `RA = -(STAT)/CRD` (FI/RE excluded) |
 | `scenarioRa(crdBase, raStatBase, raFiBase, reBase, crdLeg, raFiLeg, reLeg, freq, deltaAt)` | FWL=YES non-Central RA; caller fixes the stress leg by scenario, `deltaAt(period)` is the per-term macro delta |
-| `vectorFactored(ra)` | cumulative product of `1 - RA` |
+| `vector(ra)` | one period's `VECTOR = MIN(1; 1 - RA)` (02/09/2026 spec update; STEP 3 / STEP 6) |
+| `vectorFactored(ra)` | cumulative product of `vector(RA)` |
 | `termSeries(vf, freq)` | maps the output grid to `vf`, holding the last value flat |
 
 Aggregation windows (1-based months):
@@ -274,7 +275,7 @@ Iterate `p = 1, 2, …`; **stop** when `term > 30` (`COMPUTED_HORIZON_Y`) **or**
 
 ### 4.7 Survival factor  `vectorFactored`
 ```
-VECTOR_p      = 1 - RA_p
+VECTOR_p      = MIN(1, 1 - RA_p)            (02/09/2026 spec update: the cap is on the FACTOR)
 EAD_RA_RATE_p = Π_{k=1..p} VECTOR_k         (cumulative product; acc starts at 1)
 emitted value = min(1, max(0, EAD_RA_RATE_p))   (clamp backstop: an exposure factor ∈ [0,1])
 ```

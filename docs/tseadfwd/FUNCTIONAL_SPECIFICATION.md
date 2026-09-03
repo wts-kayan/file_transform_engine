@@ -148,7 +148,7 @@ No macro shock applies here, so all four scenarios share one curve. Per period (
 1. Loss rate:
    - **FWL = YES, Central:** `RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i`
    - **FWL = NO:** `RA_i = -(RA_STAT_i) / CRD_i` — `RA_FI` and `RE` are **excluded**.
-2. `VECTOR_i = 1 - RA_i`.
+2. `VECTOR_i = MIN(1; 1 - RA_i)` — the MIN is the specification update of 02/09/2026 (STEP 3 for FWL=NO, STEP 6 for FWL=YES), applied identically on the quarterly and yearly grids. It caps the FACTOR, not the running product: a period with a negative `RA` (a gain) contributes `VECTOR_i = 1` instead of a factor above 1, so a gain can no longer offset a later loss and `EAD_RA_RATE` never rises.
 3. `EAD_RA_RATE = cumulative product of VECTOR` (factored vector).
 4. Held flat from term 30.
 

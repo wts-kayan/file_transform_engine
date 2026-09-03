@@ -186,10 +186,11 @@ The OAT model in §2.1–§2.4 applies only when `FWL_TO_BE_APPLIED = YES`.
 
 ---
 
-## 3. STEP 6–7 — Vector and vector factored (final EAD TS) *(unchanged)*
+## 3. STEP 6–7 — Vector and vector factored (final EAD TS)
 
 ```
-VECTOR_i      = 1 − RA_i                                          # Excel O185–O188 = 1 − O179..O182
+VECTOR_i      = MIN(1; 1 − RA_i)                                  # Excel O185–O188, capped at 1
+                                                                  #   (spec update 02/09/2026)
 EAD_RA_RATE_i = Π(VECTOR_1 … VECTOR_i)                            # Excel O191–O194 (compounding)
 ```
 `PrimaryView.vectorFactored` + `termSeries`.

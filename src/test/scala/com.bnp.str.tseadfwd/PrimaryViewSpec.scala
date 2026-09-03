@@ -213,15 +213,48 @@ class PrimaryViewSpec extends AnyFunSuite with Matchers {
 
   // ---- §4.7 survival factor + clamp --------------------------------------------------------
 
-  test("vectorFactored is the cumulative product of (1 - RA)") {
+  test("vectorFactored is the cumulative product of MIN(1; 1 - RA)") {
     val vf = vectorFactored(Vector(0.1, 0.2))
     vf(0) shouldBe (0.9 +- tol)
     vf(1) shouldBe (0.72 +- tol) // 0.9 * 0.8
   }
 
+  test("vector is MIN(1; 1 - RA): a loss reduces it, a gain is capped at 1") {
+    PrimaryView.vector(0.25) shouldBe (0.75 +- tol)
+    PrimaryView.vector(0.0) shouldBe (1.0 +- tol)
+    PrimaryView.vector(-1.0) shouldBe (1.0 +- tol) // 1-(-1)=2 -> capped
+    PrimaryView.vector(-0.4) shouldBe (1.0 +- tol) // 1-(-0.4)=1.4 -> capped
+  }
+
   test("vectorFactored caps at 1, and reports a negative running product as 1 (full exposure)") {
-    vectorFactored(Vector(-1.0)).head shouldBe (1.0 +- tol) // 1*(1-(-1))=2  -> capped at 1
+    vectorFactored(Vector(-1.0)).head shouldBe (1.0 +- tol) // MIN(1; 1-(-1)) = 1
     vectorFactored(Vector(2.0)).head shouldBe (1.0 +- tol)  // 1*(1-2)=-1 (<0) -> reported as 1, per PrimaryView
+  }
+
+  test("emitNegative still emits a sub-zero product, and still caps the gain factor at 1") {
+    // The CR02 path (allow_negative_ead_ra_rate). RA = 2 gives a factor of 1-2 = -1, which the MIN
+    // leaves alone — MIN caps gains, it does not floor losses — so the negative product survives to
+    // the output for CR02 to report.
+    vectorFactored(Vector(2.0), emitNegative = true).head shouldBe (-1.0 +- tol)
+    vectorFactored(Vector(2.0, 0.5), emitNegative = true)(1) shouldBe (-0.5 +- tol)
+    // ...while a gain is capped on this path too, so emitNegative cannot smuggle a factor above 1
+    // back into the product.
+    vectorFactored(Vector(-1.0, 0.5), emitNegative = true)(1) shouldBe (0.5 +- tol)
+  }
+
+  test("a gain period cannot offset a later loss - the 02/09/2026 MIN is on the FACTOR") {
+    // RA = -1 is a period that gained. Before the update its factor was 1-(-1) = 2, which stayed in
+    // the running product and let the later 0.5 loss land on 2 instead of 1: term 1 read
+    // min(1, 2*0.5) = 1, i.e. the loss vanished. Capping the FACTOR makes the gain a no-op.
+    val vf = vectorFactored(Vector(-1.0, 0.5))
+    vf(0) shouldBe (1.0 +- tol)
+    vf(1) shouldBe (0.5 +- tol)
+  }
+
+  test("EAD_RA_RATE is monotonically non-increasing once every factor is capped at 1") {
+    val vf = vectorFactored(Vector(0.1, -0.3, 0.2, -0.8, 0.05))
+    vf.zip(vf.tail).foreach { case (a, b) => b should be <= (a + tol) }
+    vf.head should be <= 1.0
   }
 
   // ---- §4.8 term grid + flat tail ----------------------------------------------------------

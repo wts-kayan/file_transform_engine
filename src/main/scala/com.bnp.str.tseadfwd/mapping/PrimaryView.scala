@@ -16,7 +16,9 @@ package com.bnp.str.tseadfwd.mapping
  *     MEAN over the window — SUM/divisor (Y1 = 6 months /6, Yn = 12 months /12). Unlike quarterly,
  *     RA metrics are NOT a half-weighted sum here.
  *   - Core RA (Central / FWL=NO):  RA_i = -(RA_STAT_i + RA_FI_i + RE_i) / CRD_i   (BASELINE)
- *   - VECTOR_i = 1 - RA_i ; EAD_RA_RATE = cumulative product of VECTOR.
+ *   - VECTOR_i = MIN(1; 1 - RA_i) ; EAD_RA_RATE = cumulative product of VECTOR.
+ *     (The MIN is the specification update of 02/09/2026 — STEP 3 for FWL=NO, STEP 6 for FWL=YES,
+ *      on both the quarterly and the yearly grid. See `PrimaryView.vector`.)
  *   - Computation runs to term 30y; from term 30 on the value is held flat (... 50, 100).
  */
 object PrimaryView {
@@ -252,10 +254,28 @@ object PrimaryView {
   def vectorFactored(ra: Vector[Double], emitNegative: Boolean = false): Vector[Double] = {
     var acc = 1.0
     ra.map { x =>
-      acc *= (1.0 - x)
+      acc *= vector(x)
       if (acc < 0.0 && !emitNegative) 1.0 else math.min(1.0, acc)
     }
   }
+
+  /**
+   * One period's VECTOR, per the specification update of 02/09/2026:
+   * {{{
+   *   FWL=NO  (STEP 3)  VECTOR_RA_Qi            = MIN(1; 1 - DET RA STAT_Qi)
+   *   FWL=YES (STEP 6)  VECTOR_RA_Qi (Scenario) = MIN(1; 1 - RA_Qi (Scenario))
+   * }}}
+   * and identically on the yearly grid (`_Yi`). Both cases reduce to the same arithmetic on
+   * whichever RA the caller computed, which is why one definition serves all four.
+   *
+   * The cap is on the FACTOR, not on the running product. A NEGATIVE `RA` is a period in which the
+   * book gained rather than lost; before this update its `1 - RA > 1` factor was multiplied into the
+   * product, so a gain could offset a later loss and the curve could climb back up (only the
+   * DISPLAYED value was clamped, in [[vectorFactored]]). Capping each factor at 1 makes a gain
+   * period a no-op instead: the exposure factor never rises, and `EAD_RA_RATE` is monotonically
+   * non-increasing wherever the run-off cap keeps every factor positive.
+   */
+  def vector(ra: Double): Double = math.min(1.0, 1.0 - ra)
 
   /**
    * Map the output term grid onto the computed vector-factored series, holding the last

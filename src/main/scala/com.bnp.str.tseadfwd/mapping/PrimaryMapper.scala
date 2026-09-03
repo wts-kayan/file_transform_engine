@@ -329,7 +329,7 @@ class PrimaryMapper(
       val ead    = if (vf.isEmpty) Double.NaN else vf(Math.max(0, eadIdx))
       // RA / VECTOR exist only where a period was actually computed (<= raDetail length); else NaN.
       val ra0    = if (period >= 1 && period <= raDetail.length) raDetail(period - 1) else Double.NaN
-      val vec0   = if (ra0.isNaN) Double.NaN else 1.0 - ra0
+      val vec0   = if (ra0.isNaN) Double.NaN else PrimaryView.vector(ra0)
       // delta: quarterly = raw macro Rate/100; yearly = OAT spread (IR_10Y_FR scen-Central)*100 (O167-169).
       val delta  = if (!usesShock) 0.0 else if (freq == Yearly) oatDeltaFn(period) else deltaFn(period)
 
@@ -467,7 +467,7 @@ class PrimaryMapper(
       Row(p, (p - 1) * freq.step,
         agg(crd, p, isCrd = true), agg(raStat, p, isCrd = false),
         agg(raFi, p, isCrd = false), agg(re, p, isCrd = false),
-        ra(i), 1.0 - ra(i), vf(i))
+        ra(i), PrimaryView.vector(ra(i)), vf(i))
     }
     val schema = StructType(Seq(
       StructField("period", IntegerType), StructField("term", DoubleType),
