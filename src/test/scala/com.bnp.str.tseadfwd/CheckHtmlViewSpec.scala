@@ -86,11 +86,41 @@ class CheckHtmlViewSpec extends AnyFunSuite with Matchers {
   }
 
   test("a truncated listing says so") {
-    val many = (1 to 3).map(i => CheckFinding("M", "C", s"$i", s"-0,$i", "negative exposure factor"))
-    val r02 = CheckRuleResult(CheckRule.NegativeEadRaRate, enabled = true, 42L, many, 0L, applied = false)
-    val html = CheckHtmlView.render(report(Seq(r02)))
+    val many = (1 to 3).map(i => CheckFinding(s"M$i", "C", "", "1 of 4", "1 of 4 term(s) equal 1"))
+    val r03 = CheckRuleResult(CheckRule.SomeTermsEqualOne, enabled = true, 42L, many, 0L, applied = false)
+    val html = CheckHtmlView.render(report(Seq(r03)))
 
     html should include("Showing the first 3 of 42 finding(s)")
+    html should include("rules.some_terms_equal_one.maxRowsInReport")
+  }
+
+  test("a summarised result is not truncated, however many lines it counts") {
+    // CR02 reports two counted lines for any number of offending rows — offering to "list more"
+    // would point the reader at a setting that would change nothing.
+    val r02 = CheckRuleResult(
+      rule = CheckRule.NegativeEadRaRate,
+      enabled = true,
+      total = 1247L,
+      findings = Seq(CheckFinding("-", "-", "", "0", "1247 line(s) with a zero exposure factor")),
+      rowsRemoved = 0L,
+      applied = false,
+      summarised = true)
+    val html = CheckHtmlView.render(report(Seq(r02)))
+
+    html should include("1247 line(s) with a zero exposure factor")
+    html should not include "Showing the first"
+    // the count still reaches the summary table, so nothing is hidden
+    html should include(">1247</td>")
+  }
+
+  test("a finding that names no term renders without an empty TERM column") {
+    val r03 = CheckRuleResult(CheckRule.SomeTermsEqualOne, enabled = true, 1L,
+      Seq(CheckFinding("BCEF_CONSO_TF_Q", "C", "", "2 of 4", "2 of 4 term(s) equal 1")),
+      0L, applied = false)
+    val html = CheckHtmlView.render(report(Seq(r03)))
+
+    html should include("2 of 4")
+    html should not include "<th class=\"num\">TERM</th>"
   }
 
   test("cell content is HTML-escaped") {

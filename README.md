@@ -334,7 +334,8 @@ Business rules on the **output** term structure, requested by the business team.
 | Rule | Checks | Action |
 |---|---|---|
 | **CR01** | lines grouped **by `EAD_MATRIX_ID` and `SCENARIO_ID`** (one group = one curve); flagged when **every** term of the group has `EAD_RA_RATE = 1` — full exposure throughout, so the line carries no information. A single term below 1 keeps the whole group. `EAD_MATRIX_ID` ends in `_Q`/`_Y`, so a matrix's quarterly and yearly curves are two separate groups. | group **removed** from the output and listed in the report |
-| **CR02** | `EAD_RA_RATE` is strictly negative (an exposure factor must lie in `[0, 1]`) | line **and value kept** as computed, and reported. Optionally masked by a `replaceWith` token for a consumer that cannot take a negative |
+| **CR02** | `EAD_RA_RATE` is strictly negative (an exposure factor must lie in `[0, 1]`), or exactly `0` under `includeZero` | line **and value kept** as computed, and reported as a **summary**: one counted line for the zeros and one for the negatives, never the offending lines themselves. Optionally masked by a `replaceWith` token for a consumer that cannot take a negative |
+| **CR03** | the mirror of CR01 on the same grouping and `tolerance`: **at least one** term of the curve has `EAD_RA_RATE = 1` and **at least one does not** — full exposure over part of the curve only. CR01 and CR03 partition every curve between them; a curve with no term equal to 1 is named by neither. | line **kept**, and reported **one line per curve** with how many of its terms equal 1 — never one line per term |
 
 The split is deliberate: `consistency/ConsistencyCheckMapper` never writes a row — it evaluates the rules
 and names the offending keys. The **main job** performs the removal, once, on the frame it is about to

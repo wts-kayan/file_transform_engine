@@ -32,6 +32,7 @@ final case class CheckConfig(
                            allTermsEqualOneEnabled: Boolean,
                            allTermsEqualOneRemoves: Boolean,
                            tolerance: Double,
+                           someTermsEqualOneEnabled: Boolean,
                            negativeEnabled: Boolean,
                            negativeIncludesZero: Boolean,
                            maxRowsInReport: Int,
@@ -96,6 +97,7 @@ object CheckConfig {
 
     val one = sub("all_terms_equal_one")
     val neg = sub("negative_ead_ra_rate")
+    val someOne = sub("some_terms_equal_one")
 
     // The file the term structure is actually written to, resolved exactly as
     // `PrimaryUtilities.writeDataframe` resolves it — the report has to name the file it judges, and
@@ -119,13 +121,21 @@ object CheckConfig {
       allTermsEqualOneEnabled = bool(one, "enabled", default = true),
       allTermsEqualOneRemoves = bool(one, "remove", default = true),
       tolerance               = dbl(one, "tolerance", default = 1e-9),
+      // CR03 is the mirror of CR01 and reuses CR01's `tolerance` on purpose: the two rules split
+      // every curve between them, so a term the one counted as a 1 and the other did not would
+      // leave a curve reported by neither.
+      someTermsEqualOneEnabled = bool(someOne, "enabled", default = true),
       negativeEnabled         = bool(neg, "enabled", default = true),
       // Widen CR02 from "strictly negative" to "non-positive". A zero rate is not impossible the
       // way a negative one is — it is the exposure fully extinguished — but the business asked to
       // see those terms named too. Default false keeps the historical < 0 scope for a conf that
       // does not mention the key.
       negativeIncludesZero    = bool(neg, "includeZero", default = false),
-      maxRowsInReport         = int(neg, "maxRowsInReport", default = 500),
+      // Cap on the rows LISTED in the report; the counts are always complete. CR03 is the only rule
+      // that can overflow it now — CR01 reports few curves, CR02 reports two counted lines — so the
+      // key lives on CR03's block. Read from CR02's block as a fallback, where it used to live, so a
+      // conf that had tuned it there keeps its value instead of being silently reset to the default.
+      maxRowsInReport         = int(someOne, "maxRowsInReport", int(neg, "maxRowsInReport", default = 500)),
       // Empty by default: a negative value only exists once `allow_negative_ead_ra_rate` has been
       // opted into, and whoever opted in asked to SEE it. Masking it behind a token would hide the
       // very thing the flag was turned on for. Set a marker (e.g. "NV") only when a downstream
@@ -152,7 +162,12 @@ final case class CheckOutcome(cleaned: DataFrame, report: CheckReport)
  *
  * Rules (see [[CheckRule]]):
  *  - CR01 all terms = 1 for one (EAD_MATRIX_ID, SCENARIO_ID) -> the group's rows are removed
- *  - CR02 negative (and, with `includeZero`, zero) EAD_RA_RATE -> reported, never removed
+ *  - CR02 negative (and, with `includeZero`, zero) EAD_RA_RATE -> summarised, never removed
+ *  - CR03 SOME terms = 1 for one group but not all of them -> reported per curve, never removed
+ *
+ * No rule reports one line per output row any more: CR01 and CR03 report one line per curve, CR02
+ * one line per KIND of hit. The report is read by the business, and a listing that runs to
+ * thousands of rows is not read at all.
  *
  * `EAD_RA_RATE` and `TERM` reach here as decimal-comma STRINGS (`PrimaryMapper.fmtNumber`), so every
  * comparison goes through [[numeric]] rather than a raw string test.
@@ -163,12 +178,11 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
 
   private val TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
-  /**
-   * Temp column carrying the PARSED rate into the CR02 finding builder, so "was this hit a zero or
-   * a negative?" is answered from the number rather than by re-parsing the decimal-comma string.
-   * Underscore-prefixed: the output schema is fixed and must not gain a column by accident.
-   */
-  private val CR02_RATE = "__cr02_rate"
+  /** Aggregate column names, on frames of our own making — never on the output schema. */
+  private val TERMS = "terms"
+  private val ONES = "ones"
+  private val HITS = "hits"
+  private val ZEROS = "zeros"
 
   /** Decimal-comma string -> Double; blank/absent -> null (a null is never "equal to 1"). */
   private def numeric(c: Column): Column =
@@ -207,7 +221,8 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
       results = Seq(
         cr01Result(if (cfg.allTermsEqualOneEnabled) allOnesGroups(df) else Seq.empty,
           rowsRemoved = 0L, applied = false, reportOnly = true),
-        ruleNegative(df)
+        ruleNegative(df),
+        ruleSomeOnes(df)
       ),
       outputFile = outputFile
     )
@@ -254,7 +269,11 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
       rowsOut = rowsOut,
       results = Seq(
         cr01Result(keys, rowsRemoved = rowsIn - afterCr01Rows, applied = removeCr01),
-        ruleNegative(df, valuesReplaced = replaced, marker = if (markNegatives) cfg.negativeMarker else "")
+        ruleNegative(df, valuesReplaced = replaced, marker = if (markNegatives) cfg.negativeMarker else ""),
+        // On `df`, like the other two: the rules judge what was COMPUTED. Reading CR03 off the
+        // cleaned frame would let `exclude_ead_ra_rate_ge_1` delete the very terms it looks for and
+        // report every mixed curve as clean.
+        ruleSomeOnes(df)
       ),
       outputFile = outputFile
     )
@@ -266,25 +285,40 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
     CheckOutcome(cleaned, report)
   }
 
-  // ---- CR01: all terms equal to 1 -------------------------------------------
+  // ---- CR01 / CR03: terms equal to 1, by curve ------------------------------
 
   /**
-   * The (EAD_MATRIX_ID, SCENARIO_ID) groups whose EVERY term carries `EAD_RA_RATE = 1` (within
-   * [[CheckConfig.tolerance]]). A group with a single deviating — or unparseable — term is NOT flagged.
+   * "Equal to 1" within [[CheckConfig.tolerance]] — 1 for a full-exposure term, 0 otherwise.
+   *
+   * Defined once and shared by CR01 and CR03: the two rules partition every curve between them
+   * ("all its terms" against "some but not all"), so a term one of them counted as a 1 and the
+   * other did not would leave a curve reported by neither.
+   */
+  private def isOne: Column =
+    when(rate.isNotNull && abs(rate - lit(1.0)) <= lit(cfg.tolerance), lit(1)).otherwise(lit(0))
+
+  /**
+   * One row per curve: the (EAD_MATRIX_ID, SCENARIO_ID) key, how many terms it has and how many of
+   * them equal 1. Both CR01 and CR03 are a `where` on this frame.
    *
    * NOTE the matrix id carries the frequency suffix (`..._Q` / `..._Y`), so the quarterly and yearly
    * curves of the same matrix are separate groups, which is what "all terms" has to mean.
    */
-  private def allOnesGroups(df: DataFrame): Seq[CheckFinding] = {
-    val isOne = when(rate.isNotNull && abs(rate - lit(1.0)) <= lit(cfg.tolerance), lit(1)).otherwise(lit(0))
-
+  private def onesPerCurve(df: DataFrame): DataFrame =
     df.groupBy(col(OUT_MATRIX_ID), col(OUT_SCENARIO_ID))
-      .agg(count(lit(1)).as("terms"), sum(isOne).as("ones"))
-      .where(col("terms") > lit(0) && col("terms") === col("ones"))
+      .agg(count(lit(1)).as(TERMS), sum(isOne).as(ONES))
+
+  /**
+   * The curves whose EVERY term carries `EAD_RA_RATE = 1`. A curve with a single deviating — or
+   * unparseable — term is NOT flagged here; it is CR03's, if any of its terms is a 1 at all.
+   */
+  private def allOnesGroups(df: DataFrame): Seq[CheckFinding] =
+    onesPerCurve(df)
+      .where(col(TERMS) > lit(0) && col(TERMS) === col(ONES))
       .orderBy(col(OUT_MATRIX_ID), col(OUT_SCENARIO_ID))
       .collect()
       .map { r =>
-        val terms = r.getAs[Long]("terms")
+        val terms = r.getAs[Long](TERMS)
         CheckFinding(
           matrixId = r.getAs[String](OUT_MATRIX_ID),
           scenarioId = r.getAs[String](OUT_SCENARIO_ID),
@@ -293,7 +327,6 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
           detail = s"all $terms term(s) equal 1 (full exposure over the whole curve)")
       }
       .toSeq
-  }
 
   private def cr01Result(findings: Seq[CheckFinding], rowsRemoved: Long, applied: Boolean,
                         reportOnly: Boolean = false): CheckRuleResult =
@@ -308,17 +341,63 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
       applied = applied,
       reportOnly = reportOnly)
 
+  /**
+   * CR03 — the curves carrying at least one term equal to 1 and at least one that is not: full
+   * exposure over part of the curve only. Reporting only, one line PER CURVE with the count of
+   * terms equal to 1 — never one line per term, which for a wide term structure would bury the
+   * report under thousands of rows saying the same thing.
+   *
+   * `ones < terms` is what excludes CR01's curves, so the two rules never name the same curve; a
+   * curve with no term equal to 1 fails `ones > 0` and is named by neither. An unparseable rate
+   * counts as "not a 1" ([[isOne]]), so it can only ever push a curve INTO this rule, never out of it.
+   *
+   * The listing is capped at [[CheckConfig.maxRowsInReport]]; `total` is not.
+   */
+  private def ruleSomeOnes(df: DataFrame): CheckRuleResult = {
+    if (!cfg.someTermsEqualOneEnabled)
+      return CheckRuleResult(CheckRule.SomeTermsEqualOne, enabled = false, 0L, Seq.empty, 0L, applied = false)
+
+    val mixed = onesPerCurve(df).where(col(ONES) > lit(0) && col(ONES) < col(TERMS))
+    val total = mixed.count()
+
+    val listed =
+      if (total == 0L) Seq.empty[CheckFinding]
+      else mixed
+        .orderBy(col(OUT_MATRIX_ID), col(OUT_SCENARIO_ID))
+        .limit(cfg.maxRowsInReport)
+        .collect()
+        .map { r =>
+          val terms = r.getAs[Long](TERMS)
+          val ones = r.getAs[Long](ONES)
+          CheckFinding(
+            matrixId = r.getAs[String](OUT_MATRIX_ID),
+            scenarioId = r.getAs[String](OUT_SCENARIO_ID),
+            term = "",
+            value = s"$ones of $terms",
+            detail = s"$ones of $terms term(s) equal 1, the curve is not full exposure throughout")
+        }
+        .toSeq
+
+    CheckRuleResult(CheckRule.SomeTermsEqualOne, enabled = true, total, listed,
+      rowsRemoved = 0L, applied = false)
+  }
+
   // ---- CR02: negative EAD_RA_RATE -------------------------------------------
 
   /**
-   * Every output row whose `EAD_RA_RATE` is strictly negative — or non-positive, when
-   * `includeZero` is on. Reporting only: these rows stay in the output, because the term exists
-   * and dropping it would leave a hole in the curve. The listing is capped at
-   * [[CheckConfig.maxRowsInReport]]; the total count is not.
+   * The output rows whose `EAD_RA_RATE` is strictly negative — or non-positive, when `includeZero`
+   * is on. Reporting only: these rows stay in the output, because the term exists and dropping it
+   * would leave a hole in the curve.
    *
-   * The two hits mean different things and are named apart in the report: a NEGATIVE rate is
-   * non-physical, whereas a ZERO rate is a real state — the exposure fully run off — that the
-   * business wants listed rather than treated as an error.
+   * Reported as a SUMMARY, at the business's request: two counted lines, one for the zeros and one
+   * for the negatives, instead of one line per offending row. The two hits mean different things —
+   * a NEGATIVE rate is non-physical, whereas a ZERO rate is a real state, the exposure fully run
+   * off — so they are counted apart rather than added together, and a kind with no hit is left out
+   * entirely rather than shown as a "0 line(s)" row that says nothing.
+   *
+   * `total` stays the number of LINES affected, uncapped, so the summary table and the run-log line
+   * still report the size of the problem; only the listing has shrunk. Nothing here can truncate,
+   * which is why the result is marked `summarised`.
    *
    * On the negative side this rule finds nothing under the engine's default settings, by
    * construction: the run-off freeze truncates the RA series before the cumulative product can go
@@ -331,30 +410,33 @@ class ConsistencyCheckMapper(cfg: CheckConfig)(implicit spark: SparkSession) {
     if (!cfg.negativeEnabled)
       return CheckRuleResult(CheckRule.NegativeEadRaRate, enabled = false, 0L, Seq.empty, 0L, applied = false)
 
-    val negatives = df.where(rate.isNotNull && cr02Hit)
-    val total = negatives.count()
+    // One pass over the hits for both counts. Nothing is collected row by row any more, so a run
+    // with a million zero terms costs the same as one with three.
+    val counted = df
+      .where(rate.isNotNull && cr02Hit)
+      .agg(
+        count(lit(1)).as(HITS),
+        // `sum` over no row is null, not 0 — coalesce, or a clean run reads as a missing count.
+        coalesce(sum(when(rate === lit(0.0), lit(1L)).otherwise(lit(0L))), lit(0L)).as(ZEROS))
+      .head()
 
-    val listed =
-      if (total == 0L) Seq.empty[CheckFinding]
-      else negatives
-        .orderBy(col(OUT_MATRIX_ID), col(OUT_SCENARIO_ID), numeric(col(OUT_TERM)))
-        .withColumn(CR02_RATE, rate)
-        .limit(cfg.maxRowsInReport)
-        .collect()
-        .map { r =>
-          CheckFinding(
-            matrixId = r.getAs[String](OUT_MATRIX_ID),
-            scenarioId = r.getAs[String](OUT_SCENARIO_ID),
-            term = r.getAs[String](OUT_TERM),
-            value = r.getAs[String](OUT_EAD_RA_RATE),
-            detail =
-              if (r.getAs[Double](CR02_RATE) == 0.0) "zero exposure factor (exposure fully run off)"
-              else "negative exposure factor")
-        }
-        .toSeq
+    val total = counted.getAs[Long](HITS)
+    val zeros = counted.getAs[Long](ZEROS)
+    val negatives = total - zeros
+
+    val listed = Seq(
+      if (zeros > 0L)
+        Some(CheckFinding("-", "-", "", "0",
+          s"$zeros line(s) with a zero exposure factor (exposure fully run off)"))
+      else None,
+      if (negatives > 0L)
+        Some(CheckFinding("-", "-", "", "< 0",
+          s"$negatives line(s) with a negative exposure factor (not a possible exposure factor)"))
+      else None
+    ).flatten
 
     CheckRuleResult(CheckRule.NegativeEadRaRate, enabled = true, total, listed, rowsRemoved = 0L,
-      applied = false, valuesReplaced = valuesReplaced, marker = marker)
+      applied = false, valuesReplaced = valuesReplaced, marker = marker, summarised = true)
   }
 
   // ---- removal --------------------------------------------------------------

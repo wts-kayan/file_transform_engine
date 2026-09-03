@@ -85,9 +85,14 @@ override the config values.
 
 ### `CONSISTENCY_CHECK` — read by `CheckConfig.from`
 
-`enabled`, `htmlPath`, `sourcePath`, and the seven rule keys
+`enabled`, `htmlPath`, `sourcePath`, and the eight rule keys
 (`rules.all_terms_equal_one.{enabled,remove,tolerance}`,
-`rules.negative_ead_ra_rate.{enabled,includeZero,replaceWith,maxRowsInReport}`).
+`rules.some_terms_equal_one.{enabled,maxRowsInReport}`,
+`rules.negative_ead_ra_rate.{enabled,includeZero,replaceWith}`).
+
+`maxRowsInReport` used to live on `negative_ead_ra_rate` and is still read from there as a fallback:
+CR02 now reports a summary and has nothing left to cap, so the key moved to `some_terms_equal_one`,
+the only rule that can still overflow it.
 
 The block is also honoured under its former name `DATA_QUALITY` (`ConsistencyCheckMapper.scala:48`),
 so a config written before the rename still applies rather than silently defaulting.

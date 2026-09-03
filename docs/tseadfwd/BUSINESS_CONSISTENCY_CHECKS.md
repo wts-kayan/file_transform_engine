@@ -21,12 +21,13 @@ can abort the run — nothing here ever aborts anything.
 
 ---
 
-## The two rules
+## The three rules
 
 | Rule | What it checks | What happens to the line |
 |---|---|---|
 | **CR01** — all terms equal to 1 | Lines are grouped **by `EAD_MATRIX_ID` *and* `SCENARIO_ID`** — one group is one curve. The group is flagged when **every** one of its terms carries `EAD_RA_RATE = 1` (within `tolerance`): exposure is full at every term, no loss ever accrues, so the line carries no information. A single term below 1 keeps the whole group. `EAD_MATRIX_ID` ends in `_Q` / `_Y`, so a matrix's quarterly and yearly curves are **two separate groups**. | **Removed** from the output and listed in the report. `remove = false` keeps the lines and only reports them. |
-| **CR02** — negative or zero `EAD_RA_RATE` | The rate is strictly negative, which is not a possible exposure factor (it must lie in `[0, 1]`). With `includeZero = true` the rule **also** fires on exactly `0` — a term where the exposure has fully run off; with `includeZero` unset (the default) a zero does not fire. The two are named apart in the report (`negative exposure factor` vs `zero exposure factor (exposure fully run off)`). A blank/unparseable cell is treated as *not* a number, never as 1. | **Line and value kept as computed**, and reported — `includeZero` widens what is *reported*, it never removes a line. A `replaceWith` token can mask the value for a consumer that cannot take a negative; the mask follows the same scope, so a zero is masked too. |
+| **CR02** — negative or zero `EAD_RA_RATE` | The rate is strictly negative, which is not a possible exposure factor (it must lie in `[0, 1]`). With `includeZero = true` the rule **also** fires on exactly `0` — a term where the exposure has fully run off; with `includeZero` unset (the default) a zero does not fire. The two are **counted apart** in the report. A blank/unparseable cell is treated as *not* a number, never as 1. The report shows a **summary only** — one counted line for the zeros and one for the negatives — never the offending lines themselves; a kind with no hit is left out rather than shown as a `0 line(s)` row. The *Findings* count stays the number of **lines** affected. | **Line and value kept as computed**, and reported — `includeZero` widens what is *reported*, it never removes a line. A `replaceWith` token can mask the value for a consumer that cannot take a negative; the mask follows the same scope, so a zero is masked too. |
+| **CR03** — some terms equal to 1, but not the whole curve | The mirror of CR01, on the same grouping and the same `tolerance`. The curve is flagged when **at least one** of its terms carries `EAD_RA_RATE = 1` and **at least one does not**: full exposure over part of the curve only. CR01 and CR03 partition every curve between them — `ones == terms` is CR01's, `0 < ones < terms` is CR03's, and a curve with no term equal to 1 is named by neither. | **Kept**, and reported **one line per curve** with how many of its terms equal 1 — never one line per term. |
 
 Rule identity, wording and the report's value model live in `consistency/CheckModel.scala`
 (`CheckRule`, `CheckFinding`, `CheckRuleResult`, `CheckReport`) — pure data, no Spark, no IO.
@@ -126,9 +127,11 @@ It carries:
   to its execution) and generation timestamp;
 - a summary table, one row per rule (id, title, status, findings, action);
 - one section per rule: the rule in the business team's own terms, what was done about it, then the
-  findings — group-level for CR01 (matrix, scenario, value), row-level for CR02 (matrix, scenario, term,
-  value). The CR02 listing is capped by `maxRowsInReport`; the **count is always complete**, and a
-  truncated listing says so.
+  findings. No rule lists one row per output line: CR01 and CR03 report one line per curve (matrix,
+  scenario, value), CR02 one counted line per kind of hit. The column shape follows the findings, so a
+  table that names no term carries no empty `TERM` column. The CR03 listing is capped by
+  `maxRowsInReport` and a truncated listing says so; CR02's summary cannot truncate, and never offers
+  to list more. Every **count is always complete**.
 
 `CheckWriter.writeHtml` goes through Hadoop's `FileSystem`, so `htmlPath` may be local or HDFS with no
 change.
@@ -137,7 +140,7 @@ change.
 
 ## Configuration — `tseadfwd_app.CONSISTENCY_CHECK`
 
-Every key has a default, so a conf predating this feature still runs (the checks on, both rules on,
+Every key has a default, so a conf predating this feature still runs (the checks on, all three rules on,
 CR01 removing, report written next to `TS_EAD_FWD`).
 
 ```hocon
@@ -152,13 +155,20 @@ CONSISTENCY_CHECK {
       remove    = true      # false: report the line, keep it
       tolerance = 1e-9      # |value - 1| <= tolerance counts as "equal to 1"
     }
+    some_terms_equal_one {
+      enabled         = true
+      maxRowsInReport = 500 # cap on the curves LISTED; the count is always complete
+                            # "equal to 1" is CR01's `tolerance` above — the two rules have to agree
+    }
     negative_ead_ra_rate {
       enabled         = true
       includeZero     = true # fire on <= 0, not just < 0. Default false = strictly negative only.
                              # Reporting only either way: the line is never removed
       replaceWith     = ""  # empty: write the value AS COMPUTED. A token (e.g. "NV") only for a
                             # consumer that cannot take a negative — it makes the cell non-numeric
-      maxRowsInReport = 500 # cap on rows LISTED; the count is always complete
+                            # NOTE: no maxRowsInReport here any more — CR02 reports a summary, so
+                            # there is nothing left to cap. The key moved to some_terms_equal_one,
+                            # and is still read from here for a conf that had tuned it.
     }
   }
 }
@@ -197,15 +207,20 @@ as a **difference** instead of killing the job.
 
 ## Tests and demonstration
 
-- `ConsistencyCheckMapperSpec` — 26 tests: CR01 grouping (including `_Q` vs `_Y` as separate groups), the
-  single-deviating-term boundary, tolerance, blank values, `remove = false`, disabled rules; CR02
+- `ConsistencyCheckMapperSpec` — 42 tests: CR01 grouping (including `_Q` vs `_Y` as separate groups), the
+  single-deviating-term boundary, tolerance, blank values, `remove = false`, disabled rules; CR03
+  reporting one line per curve, CR01 and CR03 partitioning the curves between them, the shared
+  tolerance moving a curve from one rule to the other, blank values, the report cap, and the curve
+  still being seen when `exclude_ead_ra_rate_ge_1` drops its full-exposure terms; CR02
   reporting, the marker and its ordering after the numeric filters, the empty-`replaceWith` default,
-  zero not firing by default and firing under `includeZero` (including the two findings named apart,
-  the marker masking a zero, and the lines still not being removed), the report cap; `exclude_ead_ra_rate_ge_1` running *after* the rules; `reportOnly`
+  zero not firing by default and firing under `includeZero` (including the two kinds counted apart,
+  the marker masking a zero, and the lines still not being removed), the summary not growing with the
+  number of offending lines and never reading as truncated, a kind with no hit being left out;
+  `exclude_ead_ra_rate_ge_1` running *after* the rules; `reportOnly`
   removing nothing; a clean output producing `PASS`; and the output file the report names — carried
   through from the caller, defaulted to the file a standalone run read, and resolved from the conf for
   a collapsed CSV, a part-file directory and an Excel workbook.
-- `CheckHtmlViewSpec` — 12 tests: self-containment (no external stylesheet, script, image or web font),
+- `CheckHtmlViewSpec` — 14 tests: self-containment (no external stylesheet, script, image or web font),
   plain-ASCII wording, HTML escaping, `PASS` vs `SKIPPED`, truncation notice, verdict, and the output
   file — named as a path and as a name, escaped, and leaving no blank line when unknown.
 - `SparkTestSession` — one local `SparkSession` shared by every tseadfwd suite (a session per suite
@@ -220,7 +235,8 @@ as a **difference** instead of killing the job.
   | `SIMU_ALLONES_TF_Q` / `C` — every term = 1 | CR01: flagged, removed |
   | `SIMU_ALLONES_TF_Q` / `A` — every term = 1 except the last | CR01: **not** flagged (the boundary case) |
   | `SIMU_ALLONES_TF_Y` / `C` — every term = 1 | CR01: flagged, removed as a **separate** group |
-  | `SIMU_NEGATIVE_TF_Q` / `C` — two sub-zero terms | CR02: line kept, value written as computed (or as the marker) |
+  | `SIMU_ALLONES_TF_Q` / `A` — every term = 1 except the last | CR03: flagged, `n of m term(s) equal 1` |
+  | `SIMU_NEGATIVE_TF_Q` / `C` — two sub-zero terms | CR02: lines kept, counted as `2 line(s) with a negative exposure factor` |
 
   It writes `TS_EAD_FWD_SIMULATED.csv` (before), `TS_EAD_FWD_SIMULATED_CLEANED.csv` (after) and
   `CR_SIMULATION.html` under the gitignored `output/` directory. The real CSV is read, never rewritten.

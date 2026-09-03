@@ -26,6 +26,7 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     allTermsEqualOneEnabled = true,
     allTermsEqualOneRemoves = true,
     tolerance = 1e-9,
+    someTermsEqualOneEnabled = true,
     negativeEnabled = true,
     negativeIncludesZero = false,
     maxRowsInReport = 500,
@@ -154,9 +155,134 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     outcome.cleaned.count() shouldBe 2L
   }
 
+  // ---- CR03: some terms equal to 1, but not the whole curve -----------------
+
+  test("CR03 reports one line per curve that is 1 at some terms and not at others") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,25", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,5", "0,98"),
+      ("BCEF_CONSO_TF_Q", "C", "0,75", "0,91"))
+
+    val r03 = result(run(df), CheckRule.SomeTermsEqualOne)
+
+    r03.total shouldBe 1L // ONE finding for the curve, not one per term equal to 1
+    r03.status shouldBe "REPORTED"
+    r03.rowsRemoved shouldBe 0L
+    r03.findings.head.matrixId shouldBe "BCEF_CONSO_TF_Q"
+    r03.findings.head.scenarioId shouldBe "C"
+    r03.findings.head.term shouldBe "" // a curve, not a row
+    r03.findings.head.value shouldBe "2 of 4"
+    r03.findings.head.detail shouldBe
+      "2 of 4 term(s) equal 1, the curve is not full exposure throughout"
+  }
+
+  test("CR03 leaves the lines in the output — it only names the curve") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,25", "0,98"))
+
+    val outcome = run(df)
+
+    result(outcome, CheckRule.SomeTermsEqualOne).action shouldBe "kept (reporting only)"
+    outcome.cleaned.count() shouldBe 2L
+    outcome.report.rowsOut shouldBe 2L
+  }
+
+  test("CR01 and CR03 partition the curves: neither names the other's, and no curve is missed") {
+    val df = output(
+      // all 1 -> CR01 only
+      ("ALL_ONES_Q", "C", "0", "1"),
+      ("ALL_ONES_Q", "C", "0,25", "1"),
+      // some 1 -> CR03 only
+      ("MIXED_Q", "C", "0", "1"),
+      ("MIXED_Q", "C", "0,25", "0,9"),
+      // no 1 -> neither
+      ("NO_ONES_Q", "C", "0", "0,99"),
+      ("NO_ONES_Q", "C", "0,25", "0,9"))
+
+    val outcome = run(df)
+
+    result(outcome, CheckRule.AllTermsEqualOne).findings.map(_.matrixId) shouldBe Seq("ALL_ONES_Q")
+    result(outcome, CheckRule.SomeTermsEqualOne).findings.map(_.matrixId) shouldBe Seq("MIXED_Q")
+  }
+
+  test("CR03 groups on the matrix id, so the quarterly and yearly curves are separate lines") {
+    val df = output(
+      ("BNL_CONSO_TF_Q", "C", "0", "1"),
+      ("BNL_CONSO_TF_Q", "C", "0,25", "0,9"),
+      ("BNL_CONSO_TF_Y", "C", "0", "1"),
+      ("BNL_CONSO_TF_Y", "C", "1", "0,8"))
+
+    val r03 = result(run(df), CheckRule.SomeTermsEqualOne)
+
+    r03.total shouldBe 2L
+    r03.findings.map(_.matrixId) shouldBe Seq("BNL_CONSO_TF_Q", "BNL_CONSO_TF_Y")
+  }
+
+  test("CR03 counts a blank EAD_RA_RATE as not equal to 1, so the curve is flagged") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,25", ""))
+
+    val r03 = result(run(df), CheckRule.SomeTermsEqualOne)
+
+    r03.total shouldBe 1L
+    r03.findings.head.value shouldBe "1 of 2"
+  }
+
+  test("CR03 shares CR01's tolerance, so a rounded 1 moves the curve between the two rules") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,25", "0,9999999999"))
+
+    // loose: both terms count as 1 -> the whole curve is CR01's
+    val loose = run(df, baseConf.copy(tolerance = 1e-6))
+    result(loose, CheckRule.AllTermsEqualOne).total shouldBe 1L
+    result(loose, CheckRule.SomeTermsEqualOne).total shouldBe 0L
+
+    // tight: only the first term counts as 1 -> the curve is CR03's
+    val tight = run(df, baseConf.copy(tolerance = 1e-12))
+    result(tight, CheckRule.AllTermsEqualOne).total shouldBe 0L
+    result(tight, CheckRule.SomeTermsEqualOne).total shouldBe 1L
+  }
+
+  test("CR03 caps the listed curves but keeps the full count") {
+    val rows = (1 to 10).flatMap(i =>
+      Seq((s"M$i" + "_Q", "C", "0", "1"), (s"M$i" + "_Q", "C", "1", "0,9")))
+    val r03 = result(run(output(rows: _*), baseConf.copy(maxRowsInReport = 3)),
+      CheckRule.SomeTermsEqualOne)
+
+    r03.total shouldBe 10L
+    r03.findings.size shouldBe 3
+    r03.truncated shouldBe true
+  }
+
+  test("CR03 disabled: nothing evaluated") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "C", "0,25", "0,9"))
+
+    val outcome = run(df, baseConf.copy(someTermsEqualOneEnabled = false))
+    result(outcome, CheckRule.SomeTermsEqualOne).status shouldBe "SKIPPED"
+    outcome.cleaned.count() shouldBe 2L
+  }
+
+  test("CR03 sees the full-exposure terms even when exclude_ead_ra_rate_ge_1 drops them") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "A", "0", "1"),
+      ("BCEF_CONSO_TF_Q", "A", "0,25", "0,97"))
+
+    val outcome = run(df, baseConf.copy(excludeEadRaRateGe1 = true))
+
+    // the rules judge what was computed; the >= 1 exclusion runs after them
+    result(outcome, CheckRule.SomeTermsEqualOne).total shouldBe 1L
+    outcome.cleaned.count() shouldBe 1L
+  }
+
   // ---- CR02: negative EAD_RA_RATE -------------------------------------------
 
-  test("CR02 reports every negative EAD_RA_RATE and removes none of them") {
+  test("CR02 summarises the negative EAD_RA_RATE lines and removes none of them") {
     val df = output(
       ("BCEF_CONSO_TF_Q", "C", "0", "0,98"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "-0,15"),
@@ -165,11 +291,45 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     val outcome = run(df, baseConf.copy(negativeMarker = ""))
     val r02 = result(outcome, CheckRule.NegativeEadRaRate)
 
-    r02.total shouldBe 2L
+    r02.total shouldBe 2L // the COUNT of affected lines is complete
     r02.status shouldBe "REPORTED"
     r02.rowsRemoved shouldBe 0L
-    r02.findings.map(_.value) should contain allOf ("-0,15", "-2,4")
+    // ...but the report carries one counted line, not one line per offending row
+    r02.findings.map(_.value) shouldBe Seq("< 0")
+    r02.findings.head.detail shouldBe
+      "2 line(s) with a negative exposure factor (not a possible exposure factor)"
     outcome.cleaned.count() shouldBe 3L // nothing removed
+  }
+
+  test("the CR02 summary does not grow with the number of offending lines") {
+    def rows(n: Int) = output((1 to n).map(i => ("BCEF_CONSO_TF_Q", "C", s"$i", s"-0,$i")): _*)
+
+    val few = result(run(rows(3), baseConf.copy(negativeMarker = "")), CheckRule.NegativeEadRaRate)
+    val many = result(run(rows(40), baseConf.copy(negativeMarker = "")), CheckRule.NegativeEadRaRate)
+
+    few.total shouldBe 3L
+    many.total shouldBe 40L
+    few.findings.size shouldBe 1
+    many.findings.size shouldBe 1
+    // a summary is never a prefix of a longer listing, so it must not offer to show more
+    many.truncated shouldBe false
+    many.findings.head.detail should startWith("40 line(s)")
+  }
+
+  test("the CR02 summary counts a kind it found, and leaves out one it did not") {
+    val df = output(
+      ("BCEF_CONSO_TF_Q", "C", "0", "0"),
+      ("BCEF_CONSO_TF_Q", "C", "1", "0"),
+      ("BCEF_CONSO_TF_Q", "C", "2", "0,5"))
+
+    // zeros only: no "0 line(s) with a negative..." row, which would say nothing
+    val r02 = result(run(df, baseConf.copy(negativeIncludesZero = true, negativeMarker = "")),
+      CheckRule.NegativeEadRaRate)
+
+    r02.total shouldBe 2L
+    r02.findings.size shouldBe 1
+    r02.findings.head.value shouldBe "0"
+    r02.findings.head.detail shouldBe "2 line(s) with a zero exposure factor (exposure fully run off)"
   }
 
   test("CR02 writes the marker in place of a negative value, keeping the line and the column order") {
@@ -188,8 +348,9 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     r02.valuesReplaced shouldBe 1L
     r02.marker shouldBe "NV"
     r02.action shouldBe "line(s) kept, 1 value(s) written as NV in the output"
-    // the report keeps the value AS COMPUTED — the marker is an output concern, not a finding
-    r02.findings.map(_.value) shouldBe Seq("-0,15")
+    // the marker is an output concern; the report counts the line either way
+    r02.total shouldBe 1L
+    r02.findings.map(_.value) shouldBe Seq("< 0")
   }
 
   test("CR02 marker is applied after the numeric filters, never before") {
@@ -240,16 +401,6 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     result(outcome, CheckRule.NegativeEadRaRate).status shouldBe "SKIPPED"
   }
 
-  test("CR02 caps the listed rows but keeps the full count") {
-    val rows = (1 to 10).map(i => ("BCEF_CONSO_TF_Q", "C", s"$i", s"-0,$i"))
-    val outcome = run(output(rows: _*), baseConf.copy(maxRowsInReport = 3))
-    val r02 = result(outcome, CheckRule.NegativeEadRaRate)
-
-    r02.total shouldBe 10L
-    r02.findings.size shouldBe 3
-    r02.truncated shouldBe true
-  }
-
   test("CR02 does not fire on zero by default — only strictly negative values") {
     val outcome = run(output(("BCEF_CONSO_TF_Q", "C", "0", "0")))
     result(outcome, CheckRule.NegativeEadRaRate).total shouldBe 0L
@@ -261,10 +412,10 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     val r02 = result(outcome, CheckRule.NegativeEadRaRate)
 
     r02.total shouldBe 1L
-    r02.findings.head.detail shouldBe "zero exposure factor (exposure fully run off)"
+    r02.findings.head.detail shouldBe "1 line(s) with a zero exposure factor (exposure fully run off)"
   }
 
-  test("CR02 with includeZero names a zero and a negative apart") {
+  test("CR02 with includeZero counts the zeros and the negatives apart") {
     val outcome = run(
       output(
         ("BCEF_CONSO_TF_Q", "C", "0", "0"),
@@ -274,8 +425,11 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
     val r02 = result(outcome, CheckRule.NegativeEadRaRate)
 
     r02.total shouldBe 2L
-    r02.findings.map(_.detail) should contain theSameElementsAs Seq(
-      "zero exposure factor (exposure fully run off)", "negative exposure factor")
+    // two summary lines — the two kinds mean different things and must not be added together
+    r02.findings.map(_.value) shouldBe Seq("0", "< 0")
+    r02.findings.map(_.detail) shouldBe Seq(
+      "1 line(s) with a zero exposure factor (exposure fully run off)",
+      "1 line(s) with a negative exposure factor (not a possible exposure factor)")
   }
 
   test("CR02 with includeZero still REMOVES nothing — the lines stay in the output") {
@@ -463,5 +617,27 @@ class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTes
   test("CheckConfig resolves an Excel output to the workbook") {
     confWith("""format = "com.crealytics.spark.excel"""").outputFile shouldBe
       "localRun/tseadfwd/output/TS_EAD_FWD_25Q4.xlsx"
+  }
+
+  private def checksFrom(rules: String): CheckConfig =
+    CheckConfig.from(ConfigFactory.parseString(
+      s"""tseadfwd_app {
+         |  TS_EAD_FWD { tmpPath = "target", tableName = "T" }
+         |  CONSISTENCY_CHECK { enabled = true, rules { $rules } }
+         |}""".stripMargin))
+
+  test("CR03 is on by default, so a conf written before the rule still runs it") {
+    checksFrom("").someTermsEqualOneEnabled shouldBe true
+    checksFrom("""some_terms_equal_one { enabled = false }""").someTermsEqualOneEnabled shouldBe false
+  }
+
+  test("maxRowsInReport is read off CR03, falling back to where it used to live on CR02") {
+    checksFrom("").maxRowsInReport shouldBe 500
+    // a conf written before the move keeps the cap it had chosen
+    checksFrom("""negative_ead_ra_rate { maxRowsInReport = 25 }""").maxRowsInReport shouldBe 25
+    // once set on CR03, that is the one that counts
+    checksFrom(
+      """some_terms_equal_one { maxRowsInReport = 40 }
+        |negative_ead_ra_rate { maxRowsInReport = 25 }""".stripMargin).maxRowsInReport shouldBe 40
   }
 }
