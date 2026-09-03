@@ -121,7 +121,7 @@ It carries:
   block exactly as `PrimaryUtilities.writeDataframe` resolves it — `.csv` when the part files are
   collapsed, `.xlsx` for an Excel output, and the directory name marked `(part-file directory)` when
   `singleFile = false`. A standalone run names the CSV it actually read instead. The file name also
-  opens the run log's `COHERENCE CHECK on <file> - <verdict> ...` line;
+  opens the run log's `CONSISTENCY CHECK on <file> - <verdict> ...` line;
 - **source** (the dataset, `TS_EAD_FWD`), **run id** (the `run_history` run id, so a report ties back
   to its execution) and generation timestamp;
 - a summary table, one row per rule (id, title, status, findings, action);
