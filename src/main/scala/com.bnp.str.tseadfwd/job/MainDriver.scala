@@ -8,7 +8,7 @@ import com.bnp.str.tseadfwd.reader.PrimaryReader
 import com.bnp.str.tseadfwd.utility.{PrimaryConstants, PrimaryUtilities}
 import com.bnp.str.tseadfwd.writer.PrimaryWriter
 import com.bnp.str.tseadfwd.audit.TseadfwdAudit
-import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckWriter, CoherenceCheckMapper}
+import com.bnp.str.tseadfwd.consistency.{CheckConfig, CheckWriter, ConsistencyCheckMapper}
 import org.slf4j.LoggerFactory
 
 object MainDriver {
@@ -54,19 +54,19 @@ object MainDriver {
         new PrimaryRunner(primaryReader, outputTableName)(sparkSession, config)
           .run_tseadfwd_runner()
 
-      // ---- business coherence check ----
+      // ---- business consistency check ----
       // The mapper now emits EVERY computed term, so the rules see the complete curve. The rules
-      // themselves only ever REPORT (CoherenceCheckMapper never writes); the removal below is the main
+      // themselves only ever REPORT (ConsistencyCheckMapper never writes); the removal below is the main
       // job's, applied once, to the frame it is about to write. An HTML report naming what was taken
       // out is written alongside the output.
       val checks = CheckConfig.from(config)
       val toWrite =
         if (!checks.enabled) {
-          logger.info("COHERENCE_CHECK.enabled = false -> rules not evaluated, every computed row written")
+          logger.info("CONSISTENCY_CHECK.enabled = false -> rules not evaluated, every computed row written")
           df
         } else {
           val outcome =
-            new CoherenceCheckMapper(checks)(sparkSession)
+            new ConsistencyCheckMapper(checks)(sparkSession)
               .apply(df, source = outputTableName, runId = audit.runId,
                 outputFile = checks.outputFile) // the file this very frame is about to be written to
           logger.info(outcome.report.summaryLine)

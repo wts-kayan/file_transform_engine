@@ -108,7 +108,7 @@ class PrimaryMapper(
    * before the cumulative product can ever go negative, so relaxing only the backstop changes nothing.
    *
    * Default `false` — today's validated behaviour, and what the target output was reconciled against.
-   * Set true when the business wants the sub-zero curves visible; the coherence-check rule `CR02` then
+   * Set true when the business wants the sub-zero curves visible; the consistency-check rule `CR02` then
    * has something to report. NOTE: with the freeze off, a run-off matrix keeps computing past the
    * cliff instead of holding its last good value flat, so its whole tail changes.
    */
@@ -446,8 +446,8 @@ class PrimaryMapper(
     }
 
     // Emit EVERY computed term. Row removal (the full-exposure `EAD_RA_RATE >= 1` exclusion and the
-    // business coherence-check rules) is applied downstream by
-    // [[com.bnp.str.tseadfwd.coherence.CoherenceCheckMapper]], so the check report can see — and name —
+    // business consistency-check rules) is applied downstream by
+    // [[com.bnp.str.tseadfwd.consistency.ConsistencyCheckMapper]], so the check report can see — and name —
     // what it dropped. Filtering here would delete the evidence before it is ever reported.
     termSeries(vf, freq).map { case (term, value) =>
       Row(m.matrixId(freq), scenCode, fmtNumber(term, 2), fmtNumber(value, 9), "") // EAD_CCF_RATE empty

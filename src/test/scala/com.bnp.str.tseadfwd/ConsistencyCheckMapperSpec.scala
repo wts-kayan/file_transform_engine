@@ -1,13 +1,13 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.coherence.{CheckConfig, CheckRule, CoherenceCheckMapper}
+import com.bnp.str.tseadfwd.consistency.{CheckConfig, CheckRule, ConsistencyCheckMapper}
 import com.typesafe.config.ConfigFactory
 import org.apache.spark.sql.DataFrame
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /**
- * Unit tests for the business coherence-check rules on the TS_EAD_FWD output.
+ * Unit tests for the business consistency-check rules on the TS_EAD_FWD output.
  *
  * Values are built exactly as the engine emits them — decimal-comma STRINGS, trailing zeros
  * stripped, so a full-exposure term is the literal "1" — because the rules have to parse them.
@@ -15,9 +15,9 @@ import org.scalatest.matchers.should.Matchers
  * Run (offline, via the ScalaTest runner on the test classpath):
  *   mvn -o dependency:build-classpath -Dmdep.outputFile=cp.txt -DincludeScope=test
  *   java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
- *        org.scalatest.tools.Runner -o -s com.bnp.str.tseadfwd.CoherenceCheckMapperSpec
+ *        org.scalatest.tools.Runner -o -s com.bnp.str.tseadfwd.ConsistencyCheckMapperSpec
  */
-class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestSession {
+class ConsistencyCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestSession {
 
   private val baseConf = CheckConfig(
     enabled = true,
@@ -40,9 +40,9 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
   }
 
   private def run(df: DataFrame, conf: CheckConfig = baseConf) =
-    new CoherenceCheckMapper(conf)(spark).apply(df, source = "TS_EAD_FWD", runId = "test-run")
+    new ConsistencyCheckMapper(conf)(spark).apply(df, source = "TS_EAD_FWD", runId = "test-run")
 
-  private def result(outcome: com.bnp.str.tseadfwd.coherence.CheckOutcome, rule: CheckRule) =
+  private def result(outcome: com.bnp.str.tseadfwd.consistency.CheckOutcome, rule: CheckRule) =
     outcome.report.results.find(_.rule == rule).get
 
   // ---- CR01: all terms equal to 1 -------------------------------------------
@@ -220,7 +220,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
     val conf = com.typesafe.config.ConfigFactory.parseString(
       """tseadfwd_app {
         |  TS_EAD_FWD { tmpPath = "target", tableName = "T" }
-        |  COHERENCE_CHECK { enabled = true }
+        |  CONSISTENCY_CHECK { enabled = true }
         |}""".stripMargin)
 
     val checks = CheckConfig.from(conf)
@@ -304,6 +304,57 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
     result(outcome, CheckRule.NegativeEadRaRate).valuesReplaced shouldBe 1L
   }
 
+  // ---- block naming: the two former names must keep working ------------------
+
+  test("CheckConfig reads the current block name") {
+    val c = ConfigFactory.parseString(
+      """tseadfwd_app {
+        |  TS_EAD_FWD { tmpPath = "out", tableName = "T" }
+        |  CONSISTENCY_CHECK { htmlPath = "from-consistency.html" }
+        |}""".stripMargin)
+    CheckConfig.from(c).htmlPath shouldBe "from-consistency.html"
+  }
+
+  test("a conf still using COHERENCE_CHECK is read, not silently defaulted") {
+    // The block has been renamed twice. Falling through to defaults would put the report somewhere
+    // else and ignore every configured rule setting, with nothing in the output to say so.
+    val c = ConfigFactory.parseString(
+      """tseadfwd_app {
+        |  TS_EAD_FWD { tmpPath = "out", tableName = "T" }
+        |  COHERENCE_CHECK { htmlPath = "from-coherence.html", enabled = false }
+        |}""".stripMargin)
+    val cfg = CheckConfig.from(c)
+    cfg.htmlPath shouldBe "from-coherence.html"
+    cfg.enabled shouldBe false
+  }
+
+  test("a conf still using DATA_QUALITY is read too") {
+    val c = ConfigFactory.parseString(
+      """tseadfwd_app {
+        |  TS_EAD_FWD { tmpPath = "out", tableName = "T" }
+        |  DATA_QUALITY { htmlPath = "from-dq.html" }
+        |}""".stripMargin)
+    CheckConfig.from(c).htmlPath shouldBe "from-dq.html"
+  }
+
+  test("the current name wins when an old one is also present") {
+    val c = ConfigFactory.parseString(
+      """tseadfwd_app {
+        |  TS_EAD_FWD { tmpPath = "out", tableName = "T" }
+        |  CONSISTENCY_CHECK { htmlPath = "current.html" }
+        |  COHERENCE_CHECK   { htmlPath = "old.html" }
+        |}""".stripMargin)
+    CheckConfig.from(c).htmlPath shouldBe "current.html"
+  }
+
+  test("no block at all falls back to defaults derived from the output block") {
+    val c = ConfigFactory.parseString(
+      """tseadfwd_app { TS_EAD_FWD { tmpPath = "out", tableName = "T" } }""")
+    val cfg = CheckConfig.from(c)
+    cfg.enabled shouldBe true
+    cfg.htmlPath shouldBe "out/CR_T.html"
+  }
+
   // ---- the exclude_ead_ra_rate_ge_1 engine option, moved out of the mapper ---
 
   test("exclude_ead_ra_rate_ge_1 drops the full-exposure terms AFTER the rules have seen them") {
@@ -330,7 +381,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
       ("BCEF_CONSO_TF_Q", "C", "0", "1"),
       ("BCEF_CONSO_TF_Q", "C", "0,25", "1"))
 
-    val report = new CoherenceCheckMapper(baseConf)(spark).reportOnly(df, "some.csv", "standalone")
+    val report = new ConsistencyCheckMapper(baseConf)(spark).reportOnly(df, "some.csv", "standalone")
 
     report.results.find(_.rule == CheckRule.AllTermsEqualOne).get.total shouldBe 1L
     report.results.find(_.rule == CheckRule.AllTermsEqualOne).get.status shouldBe "REPORTED"
@@ -357,7 +408,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
   test("the report names the output file the rules were run on") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
 
-    val report = new CoherenceCheckMapper(baseConf)(spark)
+    val report = new ConsistencyCheckMapper(baseConf)(spark)
       .apply(df, source = "TS_EAD_FWD", runId = "test-run",
         outputFile = "hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv").report
 
@@ -370,7 +421,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
     val conf = baseConf.copy(sourcePath = "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv")
 
-    val report = new CoherenceCheckMapper(conf)(spark).reportOnly(df, "TS_EAD_FWD", "standalone")
+    val report = new ConsistencyCheckMapper(conf)(spark).reportOnly(df, "TS_EAD_FWD", "standalone")
 
     report.outputFile shouldBe "localRun/tseadfwd/output/A_PREVIOUS_VINTAGE.csv"
     report.outputFileName shouldBe "A_PREVIOUS_VINTAGE.csv"
@@ -379,7 +430,7 @@ class CoherenceCheckMapperSpec extends AnyFunSuite with Matchers with SparkTestS
   test("an unknown output file leaves the report — and the log line — without one") {
     val df = output(("BCEF_CONSO_TF_Q", "C", "0", "0,99"))
 
-    val report = new CoherenceCheckMapper(baseConf)(spark)
+    val report = new ConsistencyCheckMapper(baseConf)(spark)
       .apply(df, source = "TS_EAD_FWD", runId = "test-run", outputFile = "").report
 
     report.outputFileName shouldBe ""

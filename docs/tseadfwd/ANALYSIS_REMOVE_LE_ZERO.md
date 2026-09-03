@@ -14,7 +14,7 @@ Traced on `main` at the merge of ticket 977, against
 
 The mapper emits **every** computed term ([`PrimaryMapper.matrixRows`]) — it filters nothing. Row
 removal happens once, downstream, in
-[`CoherenceCheckMapper.apply`](../../src/main/scala/com.bnp.str.tseadfwd/coherence/CoherenceCheckMapper.scala),
+[`ConsistencyCheckMapper.apply`](../../src/main/scala/com.bnp.str.tseadfwd/consistency/ConsistencyCheckMapper.scala),
 on the frame `MainDriver` is about to write. There are three operations, in this order:
 
 | # | Operation | Keys on | Removes a row? |
@@ -158,7 +158,7 @@ explanation. A remove-on-zero rule would silently delete them.
 Smallest value anywhere: `0.38316` (`BNL_MORTGAGE_TF_Y` / `A`, terms 29+) — four orders of magnitude
 clear of the rounding path in §3.
 
-The coherence report for the same run reads **12 240 examined, 12 240 kept, 0 removed**, with CR01
+The consistency report for the same run reads **12 240 examined, 12 240 kept, 0 removed**, with CR01
 and CR02 both `PASS`. So on this vintage nothing is removed by anything: filter 2 is switched on
 (`exclude_ead_ra_rate_ge_1 = true`) but has nothing to act on, because a curve starts below 1 at
 term 0 and decays.
@@ -169,7 +169,7 @@ It would be a small change in one place, but it needs a decision first, not a pa
 
 1. **A business decision.** Q11/Q12 settled that CR02 reports and keeps. Reversing that is their
    call, and it changes the shape of a delivered term structure.
-2. **The code.** One predicate in `CoherenceCheckMapper.apply`, alongside the existing filter —
+2. **The code.** One predicate in `ConsistencyCheckMapper.apply`, alongside the existing filter —
    `filtered.where(rate.isNull || rate > lit(0.0))` — plus `removes = true` on the rule and a config
    flag mirroring `exclude_ead_ra_rate_ge_1` (`exclude_ead_ra_rate_le_0`, off by default). The
    report already counts and lists what it drops, so the reporting side needs nothing new.

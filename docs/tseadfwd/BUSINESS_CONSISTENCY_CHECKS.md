@@ -1,6 +1,6 @@
-# Business coherence checks on `TS_EAD_FWD`
+# Business consistency checks on `TS_EAD_FWD`
 
-What the branch `feature/tseadfwd-data-quality` added: two **business coherence check rules** on the
+What the branch `feature/tseadfwd-data-quality` added: two **business consistency check rules** on the
 **output** term structure, the row removal they imply, and a self-contained HTML report handed to the
 business team.
 
@@ -8,12 +8,16 @@ This is **post-calculation, business** control on what the engine produced. It i
 `validation/DataControlView`, which is the **pre-calculation, technical** control on the *inputs* and
 can abort the run — nothing here ever aborts anything.
 
-> **Naming.** The feature was first written as "business data quality" and renamed to **business
-> coherence checks**; the rules are coded **`CR01`, `CR02`, …** (*check rule*). The branch keeps its
-> original name. Everything else moved with the rename: the package is `coherence`, the conf block
-> `COHERENCE_CHECK`, the standalone job `CoherenceCheckDriver`, the report `CR_<tableName>.html`. A
-> conf still carrying the old `DATA_QUALITY` block is read as a fallback, so an unconverted
-> configuration keeps applying instead of being silently defaulted.
+> **Naming.** The feature has been renamed twice: first written as "business data quality", then
+> "business coherence checks", now **business consistency checks**. The rules are coded **`CR01`,
+> `CR02`, …** (*check rule*). Everything moved with each rename: the package is `consistency`, the
+> conf block `CONSISTENCY_CHECK`, the standalone job `ConsistencyCheckDriver`, the report
+> `CR_<tableName>.html`.
+>
+> A conf still carrying **either** former block name — `COHERENCE_CHECK` or `DATA_QUALITY` — is read
+> as a fallback and logs a warning naming the block to rename. That list is not a tidy-up candidate:
+> dropping a name would make a conf still using it fall through to defaults silently, writing the
+> report somewhere else and ignoring every configured rule setting.
 
 ---
 
@@ -24,7 +28,7 @@ can abort the run — nothing here ever aborts anything.
 | **CR01** — all terms equal to 1 | Lines are grouped **by `EAD_MATRIX_ID` *and* `SCENARIO_ID`** — one group is one curve. The group is flagged when **every** one of its terms carries `EAD_RA_RATE = 1` (within `tolerance`): exposure is full at every term, no loss ever accrues, so the line carries no information. A single term below 1 keeps the whole group. `EAD_MATRIX_ID` ends in `_Q` / `_Y`, so a matrix's quarterly and yearly curves are **two separate groups**. | **Removed** from the output and listed in the report. `remove = false` keeps the lines and only reports them. |
 | **CR02** — negative or zero `EAD_RA_RATE` | The rate is strictly negative, which is not a possible exposure factor (it must lie in `[0, 1]`). With `includeZero = true` the rule **also** fires on exactly `0` — a term where the exposure has fully run off; with `includeZero` unset (the default) a zero does not fire. The two are named apart in the report (`negative exposure factor` vs `zero exposure factor (exposure fully run off)`). A blank/unparseable cell is treated as *not* a number, never as 1. | **Line and value kept as computed**, and reported — `includeZero` widens what is *reported*, it never removes a line. A `replaceWith` token can mask the value for a consumer that cannot take a negative; the mask follows the same scope, so a zero is masked too. |
 
-Rule identity, wording and the report's value model live in `coherence/CheckModel.scala`
+Rule identity, wording and the report's value model live in `consistency/CheckModel.scala`
 (`CheckRule`, `CheckFinding`, `CheckRuleResult`, `CheckReport`) — pure data, no Spark, no IO.
 
 ### Statuses
@@ -39,11 +43,11 @@ the "nothing found" case first, so a clean run never reads as though its removal
 
 Enforced structurally, because it is what the business asked for:
 
-- `coherence/CoherenceCheckMapper` **evaluates** the rules and **names** the offending keys. It never
+- `consistency/ConsistencyCheckMapper` **evaluates** the rules and **names** the offending keys. It never
   writes a row.
 - `job/MainDriver` performs the removal — **once**, on the frame it is about to write — then writes
   the report next to the output.
-- `job/CoherenceCheckDriver` re-runs the *same* rules against an **already produced CSV** and rewrites
+- `job/ConsistencyCheckDriver` re-runs the *same* rules against an **already produced CSV** and rewrites
   the report. Report only; it changes nothing.
 
 Two entry points on the mapper reflect that:
@@ -72,7 +76,7 @@ comparison goes through a `numeric()` column helper rather than a raw string tes
 
 It used to delete every `EAD_RA_RATE >= 1` row inside `PrimaryMapper` — which is exactly what CR01
 needs to see: an all-ones curve had already vanished before any rule could group it. `PrimaryMapper`
-now emits **every** computed term, and the exclusion is applied by the coherence-check mapper afterwards.
+now emits **every** computed term, and the exclusion is applied by the consistency-check mapper afterwards.
 
 The conf key keeps its name and its place (`parameters.exclude_ead_ra_rate_ge_1`), so existing
 configuration files run unchanged, and a local run reproduces the previous CSV byte for byte.
@@ -102,7 +106,7 @@ Mechanically: every RA function (`PrimaryView.centralRa` / `statOnlyRa` / `scena
 
 ## The HTML report
 
-One **self-contained** HTML document (`coherence/CheckHtmlView`, pure `String` in / `String` out):
+One **self-contained** HTML document (`consistency/CheckHtmlView`, pure `String` in / `String` out):
 no external stylesheet, script, image or web font, and plain ASCII wording throughout. It is mailed
 around and opened from a share, and a character mangled by a gateway reads as a defect in the numbers
 next to it. Cells are HTML-escaped.
@@ -111,7 +115,7 @@ It carries:
 
 - header verdict (`PASS` / `FINDINGS`) and the counters — lines examined, kept, removed, findings;
 - the **output file the rules were run on**, named twice: the file *name* next to the title and in the
-  browser tab (`Business coherence check: TS_EAD_FWD_25Q4_v1_small.csv`), where a reader checks it first
+  browser tab (`Business consistency check: TS_EAD_FWD_25Q4_v1_small.csv`), where a reader checks it first
   because several vintages of the same table live side by side in one output directory, and the full *path*
   in the metadata block, which identifies it without ambiguity. It is resolved from the `TS_EAD_FWD`
   block exactly as `PrimaryUtilities.writeDataframe` resolves it — `.csv` when the part files are
@@ -131,16 +135,16 @@ change.
 
 ---
 
-## Configuration — `tseadfwd_app.COHERENCE_CHECK`
+## Configuration — `tseadfwd_app.CONSISTENCY_CHECK`
 
 Every key has a default, so a conf predating this feature still runs (the checks on, both rules on,
 CR01 removing, report written next to `TS_EAD_FWD`).
 
 ```hocon
-COHERENCE_CHECK {
+CONSISTENCY_CHECK {
   enabled    = true                                              # false: no rules, no report, every row written
   htmlPath   = "localRun/tseadfwd/output/CR_TS_EAD_FWD.html"     # default: <tmpPath>/CR_<tableName>.html
-  sourcePath = "localRun/tseadfwd/output/TS_EAD_FWD_...csv"      # CoherenceCheckDriver only; default: the output CSV
+  sourcePath = "localRun/tseadfwd/output/TS_EAD_FWD_...csv"      # ConsistencyCheckDriver only; default: the output CSV
 
   rules {
     all_terms_equal_one {
@@ -173,11 +177,11 @@ spark-submit --class com.bnp.str.tseadfwd.job.MainDriver \
   --master "local[*]" target/wts-training-spark.jar localRun/tseadfwd/application.conf
 
 # regenerate the report from an already produced CSV (report only)
-spark-submit --class com.bnp.str.tseadfwd.job.CoherenceCheckDriver \
+spark-submit --class com.bnp.str.tseadfwd.job.ConsistencyCheckDriver \
   --master "local[*]" target/wts-training-spark.jar localRun/tseadfwd/application.conf
 ```
 
-**Caveat.** `CoherenceCheckDriver` can only report what is still in the file. When the main run already
+**Caveat.** `ConsistencyCheckDriver` can only report what is still in the file. When the main run already
 removed the CR01 lines — the default — a standalone pass over its output correctly finds nothing; the
 report that *names* them is the one `MainDriver` wrote.
 
@@ -193,7 +197,7 @@ as a **difference** instead of killing the job.
 
 ## Tests and demonstration
 
-- `CoherenceCheckMapperSpec` — 26 tests: CR01 grouping (including `_Q` vs `_Y` as separate groups), the
+- `ConsistencyCheckMapperSpec` — 26 tests: CR01 grouping (including `_Q` vs `_Y` as separate groups), the
   single-deviating-term boundary, tolerance, blank values, `remove = false`, disabled rules; CR02
   reporting, the marker and its ordering after the numeric filters, the empty-`replaceWith` default,
   zero not firing by default and firing under `includeZero` (including the two findings named apart,
@@ -206,7 +210,7 @@ as a **difference** instead of killing the job.
   file — named as a path and as a name, escaped, and leaving no blank line when unknown.
 - `SparkTestSession` — one local `SparkSession` shared by every tseadfwd suite (a session per suite
   multiplied the run time and made two live sessions fight over the temp dirs).
-- `CoherenceSimulationApp` (test sources, next to `EadFwdValidationApp`) — the production inputs never
+- `ConsistencySimulationApp` (test sources, next to `EadFwdValidationApp`) — the production inputs never
   produce a full-exposure curve, so the rules report nothing on a normal run. This app reads the
   produced `TS_EAD_FWD` CSV, **adds four simulated curves** to it and runs the real mapper over the
   result — same code path as `MainDriver`, removal included:
@@ -239,13 +243,13 @@ java -cp "target/classes;target/test-classes;$(cat cp.txt)" org.scalatest.tools.
 
 | File | Role |
 |---|---|
-| `coherence/CheckModel.scala` | Rules, findings, per-rule result, report — pure data |
-| `coherence/CoherenceCheckMapper.scala` | `CheckConfig` + rule evaluation, removal, marker |
-| `coherence/CheckHtmlView.scala` | Self-contained HTML rendering |
-| `coherence/CheckWriter.scala` | Persists the report through Hadoop's `FileSystem` |
-| `job/CoherenceCheckDriver.scala` | Standalone report job |
+| `consistency/CheckModel.scala` | Rules, findings, per-rule result, report — pure data |
+| `consistency/ConsistencyCheckMapper.scala` | `CheckConfig` + rule evaluation, removal, marker |
+| `consistency/CheckHtmlView.scala` | Self-contained HTML rendering |
+| `consistency/CheckWriter.scala` | Persists the report through Hadoop's `FileSystem` |
+| `job/ConsistencyCheckDriver.scala` | Standalone report job |
 | `job/MainDriver.scala` | Calls the mapper, writes the cleaned frame and the report |
 | `mapping/PrimaryMapper.scala` | Emits every term; resolves `raCap` / `allowNegativeEadRaRate` |
 | `mapping/PrimaryView.scala`, `mapping/PrimaryViewYearly.scala` | `raCap` parameter, `NO_RUNOFF_CAP`, `vectorFactored(emitNegative)` |
 | `job/EadFwdCompare.scala` | Non-numeric cell → `null` instead of a crash |
-| `README.md` | "Business coherence checks" section, new job and conf keys |
+| `README.md` | "Business consistency checks" section, new job and conf keys |

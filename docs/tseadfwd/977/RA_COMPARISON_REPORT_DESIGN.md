@@ -242,8 +242,8 @@ labels, one tick every 12 months), placed in a 4 × 4 grid under the `Evol` bloc
 ### 6.2 HTML report (secondary)
 
 Same tables and the same curves as a **self-contained** page, following the pattern already used for
-the coherence checks
-([`coherence/CheckHtmlView`](../../../src/main/scala/com.bnp.str.tseadfwd/coherence/CheckHtmlView.scala)):
+the consistency checks
+([`consistency/CheckHtmlView`](../../../src/main/scala/com.bnp.str.tseadfwd/consistency/CheckHtmlView.scala)):
 one HTML string, inline CSS, no external asset, written through Hadoop's `FileSystem` so the path may
 be local or HDFS. Curves as inline SVG polylines (361 points, two per chart) — no chart library.
 Whether TWIST needs it in addition to the workbook is [Q8](#q8).

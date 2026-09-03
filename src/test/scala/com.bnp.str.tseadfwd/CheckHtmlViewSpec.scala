@@ -1,11 +1,11 @@
 package com.bnp.str.tseadfwd
 
-import com.bnp.str.tseadfwd.coherence._
+import com.bnp.str.tseadfwd.consistency._
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 /**
- * Unit tests for the HTML rendering of the coherence-check report (pure String, no Spark).
+ * Unit tests for the HTML rendering of the consistency-check report (pure String, no Spark).
  *
  * Run (offline, via the ScalaTest runner on the test classpath):
  *   java -cp "target/classes;target/test-classes;$(cat cp.txt)" \
@@ -116,7 +116,7 @@ class CheckHtmlViewSpec extends AnyFunSuite with Matchers {
     html should include("<dt>Output file</dt>")
     html should include("hdfs:///user/tseadfwd/output/TS_EAD_FWD_25Q4_v1.csv")
     // the file NAME alone, next to the title and in the browser tab, where the path would not fit
-    html should include("<title>Business coherence check: TS_EAD_FWD_25Q4_v1.csv</title>")
+    html should include("<title>Business consistency check: TS_EAD_FWD_25Q4_v1.csv</title>")
     html should include("""<span class="file">TS_EAD_FWD_25Q4_v1.csv</span>""")
   }
 
@@ -125,7 +125,7 @@ class CheckHtmlViewSpec extends AnyFunSuite with Matchers {
 
     html should not include "Output file"
     html should not include """<span class="file">"""
-    html should include("<title>Business coherence check: TS_EAD_FWD</title>")
+    html should include("<title>Business consistency check: TS_EAD_FWD</title>")
   }
 
   test("the output file name is HTML-escaped like every other cell") {

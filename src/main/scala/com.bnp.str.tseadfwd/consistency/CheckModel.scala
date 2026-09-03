@@ -1,9 +1,9 @@
-package com.bnp.str.tseadfwd.coherence
+package com.bnp.str.tseadfwd.consistency
 
 /**
- * Value model of the TS_EAD_FWD business coherence-check report.
+ * Value model of the TS_EAD_FWD business consistency-check report.
  *
- * Pure data — no Spark, no IO — so the rules ([[CoherenceCheckMapper]]) and the rendering
+ * Pure data — no Spark, no IO — so the rules ([[ConsistencyCheckMapper]]) and the rendering
  * ([[CheckHtmlView]]) can be unit-tested independently of each other.
  */
 
@@ -14,7 +14,7 @@ package com.bnp.str.tseadfwd.coherence
  * @param title   short human label
  * @param detail  what the rule checks, in the business team's own terms
  * @param removes true when a hit REMOVES rows from the output — the Main job performs the removal;
- *                the coherence-check side only names the rows. False = reporting only.
+ *                the consistency-check side only names the rows. False = reporting only.
  */
 final case class CheckRule(id: String, title: String, detail: String, removes: Boolean)
 
