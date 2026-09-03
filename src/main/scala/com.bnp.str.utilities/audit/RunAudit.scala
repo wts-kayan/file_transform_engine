@@ -237,22 +237,115 @@ object RunAudit {
   private val YarnAppJarPlaceholder = "__app__.jar"
 
   /**
-   * Best-effort file name of the jar this code was launched from. Preference order:
-   *   1. the classloader code-source basename (works for an IDE / plain `java -jar` / YARN client run);
-   *   2. the real submitted jar recovered from the Spark configuration (YARN cluster mode, where the
-   *      code source is the useless `__app__.jar` placeholder).
-   * Returns None only when neither yields a usable `*.jar` name, in which case the caller falls back
-   * to "UNKNOWN". A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` / config.
+   * Best-effort identification of the jar this code was launched from. Preference order:
+   *   1. the LOCATION IT WAS UPLOADED TO — the `hdfs://…` (or other remote) URI recovered from the
+   *      distributed-cache configuration. Preferred because it identifies the artefact for anyone
+   *      reading `run_history` later: it can be fetched, checksummed and compared across runs;
+   *   2. the classloader code-source basename (an IDE or a plain `java -jar`, where there is no
+   *      upload to point at);
+   *   3. the submitted jar's basename recovered from the Spark configuration (YARN cluster mode,
+   *      where the code source is the useless `__app__.jar` placeholder).
+   *
+   * Note what is deliberately NOT recorded: the container-local path the classloader reports on YARN
+   * (`/hadoop/yarn/nm/usercache/…/filecache/<id>/…`). It looks informative but is per-node and
+   * per-run — the NodeManager cache slot is reused — so it identifies nothing after the fact. Only
+   * its BASENAME is ever kept, as the level-2/3 fallback.
+   *
+   * Returns None only when none of the three yields anything usable, in which case the caller falls
+   * back to "UNKNOWN". A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` /
+   * config.
    */
   private def detectJar(implicit spark: SparkSession): Option[String] =
-    codeSourceJar.orElse(jarFromSparkConf)
+    uploadedJarLocation.orElse(codeSourceJar).orElse(jarFromSparkConf)
+
+  /**
+   * Spark configuration keys carrying the ORIGINAL, pre-localization location of the distributed
+   * jars, most authoritative first.
+   *
+   * `spark.yarn.cache.filenames` is the upload record itself: YARN writes one
+   * `<source uri>#<localized name>` entry per resource it distributed, so it maps the container-local
+   * file straight back to the HDFS path it was uploaded to. The other two carry what was submitted,
+   * which is the same URI whenever the jar was already on HDFS.
+   */
+  private val JarLocationKeys = Seq("spark.yarn.cache.filenames", "spark.jars", "spark.yarn.dist.jars")
+
+  /** A URI with a scheme other than `file:` — i.e. somewhere the jar was uploaded, not a local copy. */
+  private def isRemoteUri(s: String): Boolean =
+    s.indexOf("://") > 0 && !s.toLowerCase.startsWith("file://")
+
+  /** `<uri>#<link>` -> `<uri>`; an entry with no fragment is the URI itself. */
+  private def uriPart(entry: String): String = {
+    val i = entry.indexOf('#')
+    if (i >= 0) entry.substring(0, i) else entry
+  }
+
+  /** `<uri>#<link>` -> `<link>`; with no fragment, the localized name is the URI's own basename. */
+  private def linkPart(entry: String): String = {
+    val i = entry.indexOf('#')
+    if (i >= 0) entry.substring(i + 1) else jarBaseName(entry)
+  }
+
+  /**
+   * The location the running jar was UPLOADED to, e.g.
+   * `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/str-file-transform-engine.jar`.
+   *
+   * On YARN the classloader only ever sees the container-local copy — say
+   * `/hadoop/yarn/nm/usercache/<user>/filecache/25008/str-file-transform-engine-1.4.2-RELEASE.jar`,
+   * or the bare `__app__.jar` placeholder in cluster mode. That path is per-container and per-run:
+   * the `filecache/25008` slot is a NodeManager cache id that means nothing on another node and is
+   * reused for something else later, so it cannot be resolved back to a build. The distributed-cache
+   * entry can, which is why it is preferred over both fallbacks.
+   *
+   * Matching is by localized name, so a run with `--jars` does not report a dependency jar as the
+   * application one. When nothing matches by name the result is None and the caller falls back to
+   * the basename, which is imprecise but never wrong.
+   */
+  private def uploadedJarLocation(implicit spark: SparkSession): Option[String] =
+    try {
+      val conf = spark.sparkContext.getConf
+      resolveUploadedJar(codeSourceName, JarLocationKeys.flatMap(k => conf.getOption(k).toSeq))
+    } catch { case _: Throwable => None }
+
+  /**
+   * Pure core of [[uploadedJarLocation]]: pick the remote URI that the localized jar came from.
+   *
+   * @param localName the container-local jar name the classloader reports (may be `__app__.jar`)
+   * @param confValues raw values of [[JarLocationKeys]], in preference order, each comma-separated
+   */
+  private[audit] def resolveUploadedJar(localName: Option[String], confValues: Seq[String]): Option[String] = {
+    val name = localName.map(jarBaseName).filter(nonBlank)
+    val entries = confValues
+      .flatMap(_.split(","))
+      .map(_.trim)
+      .filter(nonBlank)
+      .filter(e => uriPart(e).toLowerCase.endsWith(".jar"))
+      .filter(e => isRemoteUri(uriPart(e)))
+
+    // The localized name matches either the `#link` YARN gave the resource or the source basename —
+    // `__app__.jar` only ever matches the former, a real name usually both.
+    def sameJar(e: String, n: String): Boolean = linkPart(e) == n || jarBaseName(uriPart(e)) == n
+
+    name match {
+      case Some(n) => entries.find(e => sameJar(e, n)).map(uriPart)
+      // No local name to match on: only safe when a single remote jar was distributed, otherwise we
+      // would be guessing which of them the application was launched from.
+      case None => entries.map(uriPart).distinct match {
+        case Seq(only) => Some(only)
+        case _ => None
+      }
+    }
+  }
+
+  /** Raw basename of the jar this code was loaded from, placeholder included (for matching). */
+  private def codeSourceName: Option[String] =
+    try {
+      val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
+      Some(jarBaseName(path)).filter(nonBlank)
+    } catch { case _: Throwable => None }
 
   /** Basename of the jar this code was loaded from, ignoring the YARN `__app__.jar` placeholder. */
   private def codeSourceJar: Option[String] =
-    try {
-      val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
-      Some(jarBaseName(path)).filter(nonBlank).filterNot(_ == YarnAppJarPlaceholder)
-    } catch { case _: Throwable => None }
+    codeSourceName.filterNot(_ == YarnAppJarPlaceholder)
 
   /**
    * Recover the real submitted jar name from the Spark configuration, for the YARN-cluster case where

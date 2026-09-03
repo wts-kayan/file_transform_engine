@@ -45,7 +45,7 @@ Partition columns are **`module_name`** and **`run_id`**; the rest are regular c
 | `run_id` | string | **P** | no | Unique run id — generated (UUID) or given in the conf | `5afc5010-3e62-46f3-a5ea-3856f01dcf0d` |
 | `application_id` | string | | no | Spark application id | `application_1773889567248_10449` |
 | `module_name` | string | **P** | no | Module that ran | `addons` / `climatetables` / `excelor` / `tseadfwd` |
-| `used_jar` | string | | no | Jar the run was launched from | `str-file-transform-engine-1.0-RELEASE-Climate-Tables.jar` |
+| `used_jar` | string | | no | Where the jar the run was launched from was uploaded (basename only when there is no upload to point at) | `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/str-file-transform-engine-1.4.2-RELEASE.jar` |
 | `used_conf` | string | | no | Path of the `application.conf` used | `/Projects/…/application_climate_tables_run_2.conf` |
 | `user_launcher` | string | | no | User who launched the run (from the conf) | `j03627` |
 | `status` | string | | no | Spark run state: `RUNNING` \| `SUCCESS` \| `FAILED` | `SUCCESS` |
@@ -90,12 +90,24 @@ Resolved per field, first non-blank wins:
 | `run_id` | — | — | `audit.runId` | generated UUID |
 | `user_launcher` | `run.userLauncher` | `RUN_USER_LAUNCHER` | `audit.userLauncher` | JVM `user.name` |
 | `motor` | `run.motor` | `RUN_MOTOR` | `audit.motor` | `UNKNOWN` |
-| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected from the running jar |
+| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected: upload URI, else jar basename |
 
-> On YARN **cluster** mode the app jar is localized under the placeholder `__app__.jar`, so
-> auto-detection cannot see the real file name from the classloader. It falls back to `spark.jars` /
-> `spark.yarn.dist.jars`; if those don't carry the app jar, set the name explicitly via
-> `-Drun.usedJar`, `RUN_USED_JAR`, or `audit.usedJar`.
+> **On YARN, `used_jar` records the location the jar was UPLOADED to**, e.g.
+> `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/app.jar`. Detection reads the
+> distributed-cache configuration — `spark.yarn.cache.filenames` first (YARN's own
+> `<source uri>#<localized name>` upload record), then `spark.jars` / `spark.yarn.dist.jars` — and
+> matches on the localized name, so a run with `--jars` cannot report a dependency jar as the
+> application one.
+>
+> What is deliberately NOT recorded is the container-local path the classloader reports
+> (`/hadoop/yarn/nm/usercache/<user>/filecache/<id>/app.jar`, or the bare `__app__.jar` placeholder
+> in cluster mode). It looks informative but identifies nothing after the run: the `filecache/<id>`
+> slot is a NodeManager cache id, meaningless on another node and reused later for something else.
+>
+> When there is no upload to point at — an IDE run, a plain `java -jar`, a jar submitted from a local
+> path — `used_jar` falls back to the jar's **basename**. It also falls back rather than guess when
+> no distributed entry matches by name. Set it explicitly via `-Drun.usedJar`, `RUN_USED_JAR`, or
+> `audit.usedJar` when you need it pinned.
 
 `application_id` is read from `spark.sparkContext.applicationId`. `projection_dates`, `scenarios`
 and `base_folder_name` are module-specific and passed by the driver (null when not applicable).
