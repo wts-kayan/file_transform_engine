@@ -45,7 +45,7 @@ Partition columns are **`module_name`** and **`run_id`**; the rest are regular c
 | `run_id` | string | **P** | no | Unique run id — generated (UUID) or given in the conf | `5afc5010-3e62-46f3-a5ea-3856f01dcf0d` |
 | `application_id` | string | | no | Spark application id | `application_1773889567248_10449` |
 | `module_name` | string | **P** | no | Module that ran | `addons` / `climatetables` / `excelor` / `tseadfwd` |
-| `used_jar` | string | | no | HDFS path the jar the run was launched from was uploaded to (`UNKNOWN` when there is no upload) | `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/str-file-transform-engine-1.4.2-RELEASE.jar` |
+| `used_jar` | string | | no | Path of the jar the run was launched from, off the classloader | `/apps/str/lib/str-file-transform-engine-1.4.2-RELEASE.jar` |
 | `used_conf` | string | | no | Path of the `application.conf` used | `/Projects/…/application_climate_tables_run_2.conf` |
 | `user_launcher` | string | | no | User who launched the run (from the conf) | `j03627` |
 | `status` | string | | no | Spark run state: `RUNNING` \| `SUCCESS` \| `FAILED` | `SUCCESS` |
@@ -90,28 +90,27 @@ Resolved per field, first non-blank wins:
 | `run_id` | — | — | `audit.runId` | generated UUID |
 | `user_launcher` | `run.userLauncher` | `RUN_USER_LAUNCHER` | `audit.userLauncher` | JVM `user.name` |
 | `motor` | `run.motor` | `RUN_MOTOR` | `audit.motor` | `UNKNOWN` |
-| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected HDFS upload path, else `UNKNOWN` |
+| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | classloader code-source path, else `UNKNOWN` |
 
-> **On YARN, `used_jar` records the location the jar was UPLOADED to**, e.g.
-> `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/app.jar`. Detection reads the
-> distributed-cache configuration — `spark.yarn.cache.filenames` first (YARN's own
-> `<source uri>#<localized name>` upload record), then `spark.jars` / `spark.yarn.dist.jars` — and
-> matches on the localized name, so a run with `--jars` cannot report a dependency jar as the
-> application one.
+> `used_jar` is read straight off the classloader:
 >
-> What is deliberately NOT recorded is the container-local path the classloader reports
-> (`/hadoop/yarn/nm/usercache/<user>/filecache/<id>/app.jar`, or the bare `__app__.jar` placeholder
-> in cluster mode). It looks informative but identifies nothing after the run: the `filecache/<id>`
-> slot is a NodeManager cache id, meaningless on another node and reused later for something else.
+> ```scala
+> getClass.getProtectionDomain.getCodeSource.getLocation.toURI.getPath
+> ```
 >
-> **Nothing else is ever recorded.** Where no upload can be found, `used_jar` is `UNKNOWN` — not the
-> local path, not the bare file name. An unrunnable path is worse than an honest blank, and a bare
-> name cannot be told apart from two builds that happen to share it. `UNKNOWN` is therefore the
-> expected value off-cluster (an IDE run, a plain `java -jar`), where there is no upload to name, and
-> also when no distributed entry matches the running jar.
+> the same expression the other engines use (`RunHistorization.jarPath`), so a `run_history` row
+> means the same thing whichever module wrote it. It reports the FILE the JVM loaded the class from.
 >
-> Set it explicitly via `-Drun.usedJar`, `RUN_USED_JAR`, or `audit.usedJar` wherever you need it
-> pinned — that override is checked before detection and is unaffected by any of the above.
+> **Known limit.** Under YARN **cluster** mode the driver runs in a container, so that file is the
+> NodeManager's localized copy and the value reads
+> `/hadoop/yarn/nm/usercache/<user>/filecache/<id>/<jar>`. The `filecache/<id>` slot is per-node and
+> is reused, so such a row identifies the build by its file **name** only — the path around it
+> resolves nowhere afterwards. Under **client** mode the value is the edge-node path and carries no
+> such caveat. Off-cluster (an IDE run) the code source is the classes directory, not a jar at all.
+>
+> Where a run has to be pinned unambiguously — a test build, or anything cluster-side you intend to
+> trace back — set `-Drun.usedJar`, `RUN_USED_JAR`, or `audit.usedJar`. The override is applied
+> before detection, so it wins in every mode.
 
 `application_id` is read from `spark.sparkContext.applicationId`. `projection_dates`, `scenarios`
 and `base_folder_name` are module-specific and passed by the driver (null when not applicable).

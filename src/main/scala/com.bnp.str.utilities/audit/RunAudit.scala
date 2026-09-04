@@ -230,124 +230,28 @@ object RunAudit {
     if (cfg.hasPath(key)) cfg.getBoolean(key) else default
 
   /**
-   * The jar this code was launched from, as the DISTRIBUTED-FILESYSTEM PATH IT WAS UPLOADED TO —
-   * `hdfs://…` (or any other non-`file:` scheme, so a federated `viewfs://` or an `s3a://` bucket
-   * reads the same way). That path identifies the artefact for whoever reads `run_history` later: it
-   * can be fetched, checksummed and compared across runs.
+   * Path of the jar this code was launched from, straight off the classloader.
    *
-   * Nothing else is ever recorded. In particular the classloader code source is NOT, even though it
-   * is the obvious place to look: on YARN it reports the container-local copy
-   * (`/hadoop/yarn/nm/usercache/…/filecache/<id>/…`, or the bare `__app__.jar` placeholder in cluster
-   * mode), and that is per-node and per-run — the NodeManager cache slot is reused for unrelated
-   * resources — so it identifies nothing after the fact. It is read only to learn the jar's LOCAL
-   * NAME, which is what the upload entry is matched on.
+   * The same expression the other engines in the estate use (`RunHistorization.jarPath`), and used
+   * here for the same reason: one way of naming the jar across every module, so `run_history` rows
+   * can be compared without knowing which engine wrote them. It reports whichever FILE the JVM
+   * actually loaded this class from, which is a real, fetchable path wherever the driver runs from a
+   * jar on a filesystem it owns.
    *
-   * Returns None when no upload can be found, and the caller then records "UNKNOWN" rather than
-   * something local: an unrunnable path is worse than an honest blank. This is the expected outcome
-   * off-cluster (an IDE run, a plain `java -jar`), where there is no upload to name. Pin it there —
-   * or anywhere detection comes up short — with `-Drun.usedJar` / `RUN_USED_JAR` / `audit.usedJar`.
+   * Known limit, deliberately accepted for that consistency: under YARN CLUSTER mode the driver runs
+   * in a container, so the file is the NodeManager's localized copy and the value reads
+   * `/hadoop/yarn/nm/usercache/<user>/filecache/<id>/<jar>`. The `filecache/<id>` slot is per-node
+   * and gets reused, so such a row identifies the build by its file NAME only - the path around it
+   * resolves nowhere afterwards. Under client mode the value is the edge-node path and carries no
+   * such caveat. Where a run must be pinned unambiguously, set `-Drun.usedJar` / `RUN_USED_JAR` /
+   * `audit.usedJar`; the override is applied before this.
+   *
+   * Returns None only when the code source is unavailable (some classloaders expose none), and the
+   * caller then records "UNKNOWN".
    */
-  private def detectJar(implicit spark: SparkSession): Option[String] = uploadedJarLocation
-
-  /**
-   * Spark configuration keys carrying the ORIGINAL, pre-localization location of the distributed
-   * jars, most authoritative first.
-   *
-   * `spark.yarn.cache.filenames` is the upload record itself: YARN writes one
-   * `<source uri>#<localized name>` entry per resource it distributed, so it maps the container-local
-   * file straight back to the HDFS path it was uploaded to. The other two carry what was submitted,
-   * which is the same URI whenever the jar was already on HDFS.
-   */
-  private val JarLocationKeys = Seq("spark.yarn.cache.filenames", "spark.jars", "spark.yarn.dist.jars")
-
-  /** A URI with a scheme other than `file:` — i.e. somewhere the jar was uploaded, not a local copy. */
-  private def isRemoteUri(s: String): Boolean =
-    s.indexOf("://") > 0 && !s.toLowerCase.startsWith("file://")
-
-  /** `<uri>#<link>` -> `<uri>`; an entry with no fragment is the URI itself. */
-  private def uriPart(entry: String): String = {
-    val i = entry.indexOf('#')
-    if (i >= 0) entry.substring(0, i) else entry
-  }
-
-  /** `<uri>#<link>` -> `<link>`; with no fragment, the localized name is the URI's own basename. */
-  private def linkPart(entry: String): String = {
-    val i = entry.indexOf('#')
-    if (i >= 0) entry.substring(i + 1) else jarBaseName(entry)
-  }
-
-  /**
-   * The location the running jar was UPLOADED to, e.g.
-   * `hdfs://ns/user/x/.sparkStaging/application_1773889567248_10449/str-file-transform-engine.jar`.
-   *
-   * On YARN the classloader only ever sees the container-local copy — say
-   * `/hadoop/yarn/nm/usercache/<user>/filecache/25008/str-file-transform-engine-1.4.2-RELEASE.jar`,
-   * or the bare `__app__.jar` placeholder in cluster mode. That path is per-container and per-run:
-   * the `filecache/25008` slot is a NodeManager cache id that means nothing on another node and is
-   * reused for something else later, so it cannot be resolved back to a build. The distributed-cache
-   * entry can, which is why it is preferred over both fallbacks.
-   *
-   * Matching is by localized name, so a run with `--jars` does not report a dependency jar as the
-   * application one. When nothing matches by name the result is None and the caller falls back to
-   * the basename, which is imprecise but never wrong.
-   */
-  private def uploadedJarLocation(implicit spark: SparkSession): Option[String] =
-    try {
-      val conf = spark.sparkContext.getConf
-      resolveUploadedJar(codeSourceName, JarLocationKeys.flatMap(k => conf.getOption(k).toSeq))
-    } catch { case _: Throwable => None }
-
-  /**
-   * Pure core of [[uploadedJarLocation]]: pick the remote URI that the localized jar came from.
-   *
-   * @param localName the container-local jar name the classloader reports (may be `__app__.jar`)
-   * @param confValues raw values of [[JarLocationKeys]], in preference order, each comma-separated
-   */
-  private[audit] def resolveUploadedJar(localName: Option[String], confValues: Seq[String]): Option[String] = {
-    val name = localName.map(jarBaseName).filter(nonBlank)
-    val entries = confValues
-      .flatMap(_.split(","))
-      .map(_.trim)
-      .filter(nonBlank)
-      .filter(e => uriPart(e).toLowerCase.endsWith(".jar"))
-      .filter(e => isRemoteUri(uriPart(e)))
-
-    // The localized name matches either the `#link` YARN gave the resource or the source basename —
-    // `__app__.jar` only ever matches the former, a real name usually both.
-    def sameJar(e: String, n: String): Boolean = linkPart(e) == n || jarBaseName(uriPart(e)) == n
-
-    name match {
-      case Some(n) => entries.find(e => sameJar(e, n)).map(uriPart)
-      // No local name to match on: only safe when a single remote jar was distributed, otherwise we
-      // would be guessing which of them the application was launched from.
-      case None => entries.map(uriPart).distinct match {
-        case Seq(only) => Some(only)
-        case _ => None
-      }
-    }
-  }
-
-  /**
-   * The jar's LOCAL name, from the classloader code source — `getProtectionDomain.getCodeSource`,
-   * the one place the running JVM knows which file it loaded this class from.
-   *
-   * Used ONLY to match the upload entry, never as a recorded value: on YARN this is the container
-   * copy (`…/filecache/<id>/app.jar`) or the `__app__.jar` placeholder, and the path around the name
-   * is meaningless off that node. The placeholder is deliberately kept rather than filtered out —
-   * cluster mode has nothing else to match on, and YARN's own cache entry is tagged `#__app__.jar`,
-   * so the placeholder is exactly the right key there.
-   */
-  private def codeSourceName: Option[String] =
+  private def detectJar: Option[String] =
     try {
       val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
-      Some(jarBaseName(path)).filter(nonBlank)
+      Option(path).map(_.trim).filter(nonBlank)
     } catch { case _: Throwable => None }
-
-  /** Basename of a path: everything after the last '/' or '\' (the whole path when neither is present). */
-  private def jarBaseName(path: String): String = {
-    if (path == null || path.isEmpty) return ""
-    var idx = path.lastIndexOf('/')
-    if (idx == -1) idx = path.lastIndexOf('\\')
-    path.substring(idx + 1)
-  }
 }
