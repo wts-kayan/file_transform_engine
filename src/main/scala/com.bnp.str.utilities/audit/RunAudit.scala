@@ -230,33 +230,24 @@ object RunAudit {
     if (cfg.hasPath(key)) cfg.getBoolean(key) else default
 
   /**
-   * On YARN the submitted application jar is localized on the cluster under the fixed placeholder
-   * name `__app__.jar`, so the classloader code source reports that placeholder instead of the real
-   * file name. Treat it as "not a real name" so detection falls through to the Spark config.
-   */
-  private val YarnAppJarPlaceholder = "__app__.jar"
-
-  /**
-   * Best-effort identification of the jar this code was launched from. Preference order:
-   *   1. the LOCATION IT WAS UPLOADED TO — the `hdfs://…` (or other remote) URI recovered from the
-   *      distributed-cache configuration. Preferred because it identifies the artefact for anyone
-   *      reading `run_history` later: it can be fetched, checksummed and compared across runs;
-   *   2. the classloader code-source basename (an IDE or a plain `java -jar`, where there is no
-   *      upload to point at);
-   *   3. the submitted jar's basename recovered from the Spark configuration (YARN cluster mode,
-   *      where the code source is the useless `__app__.jar` placeholder).
+   * The jar this code was launched from, as the DISTRIBUTED-FILESYSTEM PATH IT WAS UPLOADED TO —
+   * `hdfs://…` (or any other non-`file:` scheme, so a federated `viewfs://` or an `s3a://` bucket
+   * reads the same way). That path identifies the artefact for whoever reads `run_history` later: it
+   * can be fetched, checksummed and compared across runs.
    *
-   * Note what is deliberately NOT recorded: the container-local path the classloader reports on YARN
-   * (`/hadoop/yarn/nm/usercache/…/filecache/<id>/…`). It looks informative but is per-node and
-   * per-run — the NodeManager cache slot is reused — so it identifies nothing after the fact. Only
-   * its BASENAME is ever kept, as the level-2/3 fallback.
+   * Nothing else is ever recorded. In particular the classloader code source is NOT, even though it
+   * is the obvious place to look: on YARN it reports the container-local copy
+   * (`/hadoop/yarn/nm/usercache/…/filecache/<id>/…`, or the bare `__app__.jar` placeholder in cluster
+   * mode), and that is per-node and per-run — the NodeManager cache slot is reused for unrelated
+   * resources — so it identifies nothing after the fact. It is read only to learn the jar's LOCAL
+   * NAME, which is what the upload entry is matched on.
    *
-   * Returns None only when none of the three yields anything usable, in which case the caller falls
-   * back to "UNKNOWN". A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` /
-   * config.
+   * Returns None when no upload can be found, and the caller then records "UNKNOWN" rather than
+   * something local: an unrunnable path is worse than an honest blank. This is the expected outcome
+   * off-cluster (an IDE run, a plain `java -jar`), where there is no upload to name. Pin it there —
+   * or anywhere detection comes up short — with `-Drun.usedJar` / `RUN_USED_JAR` / `audit.usedJar`.
    */
-  private def detectJar(implicit spark: SparkSession): Option[String] =
-    uploadedJarLocation.orElse(codeSourceJar).orElse(jarFromSparkConf)
+  private def detectJar(implicit spark: SparkSession): Option[String] = uploadedJarLocation
 
   /**
    * Spark configuration keys carrying the ORIGINAL, pre-localization location of the distributed
@@ -336,33 +327,20 @@ object RunAudit {
     }
   }
 
-  /** Raw basename of the jar this code was loaded from, placeholder included (for matching). */
+  /**
+   * The jar's LOCAL name, from the classloader code source — `getProtectionDomain.getCodeSource`,
+   * the one place the running JVM knows which file it loaded this class from.
+   *
+   * Used ONLY to match the upload entry, never as a recorded value: on YARN this is the container
+   * copy (`…/filecache/<id>/app.jar`) or the `__app__.jar` placeholder, and the path around the name
+   * is meaningless off that node. The placeholder is deliberately kept rather than filtered out —
+   * cluster mode has nothing else to match on, and YARN's own cache entry is tagged `#__app__.jar`,
+   * so the placeholder is exactly the right key there.
+   */
   private def codeSourceName: Option[String] =
     try {
       val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
       Some(jarBaseName(path)).filter(nonBlank)
-    } catch { case _: Throwable => None }
-
-  /** Basename of the jar this code was loaded from, ignoring the YARN `__app__.jar` placeholder. */
-  private def codeSourceJar: Option[String] =
-    codeSourceName.filterNot(_ == YarnAppJarPlaceholder)
-
-  /**
-   * Recover the real submitted jar name from the Spark configuration, for the YARN-cluster case where
-   * the code source is `__app__.jar`. Scans `spark.jars` then `spark.yarn.dist.jars` for the first
-   * `*.jar` basename that is not the placeholder. Best-effort: returns None if nothing usable is found.
-   */
-  private def jarFromSparkConf(implicit spark: SparkSession): Option[String] =
-    try {
-      val conf = spark.sparkContext.getConf
-      Seq("spark.jars", "spark.yarn.dist.jars")
-        .flatMap(k => conf.getOption(k).toSeq)
-        .flatMap(_.split(","))
-        .map(_.trim).filter(nonBlank)
-        .map(jarBaseName)
-        .filter(_.toLowerCase.endsWith(".jar"))
-        .filterNot(_ == YarnAppJarPlaceholder)
-        .headOption
     } catch { case _: Throwable => None }
 
   /** Basename of a path: everything after the last '/' or '\' (the whole path when neither is present). */

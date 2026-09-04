@@ -52,7 +52,7 @@ class RunAuditJarSpec extends AnyFunSuite with Matchers {
     resolve(Some(Jar), s"/hadoop/yarn/nm/usercache/sttengineihm/filecache/25008/$Jar") shouldBe None
   }
 
-  test("no match by name yields None, so the caller falls back rather than guessing") {
+  test("no match by name yields None - used_jar is then UNKNOWN, never a local path or a name") {
     resolve(Some("some-other-app.jar"), s"$Staging#__app__.jar") shouldBe None
     resolve(Some(Jar)) shouldBe None
     resolve(Some(Jar), "") shouldBe None
