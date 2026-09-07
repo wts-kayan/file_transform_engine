@@ -45,7 +45,7 @@ Partition columns are **`module_name`** and **`run_id`**; the rest are regular c
 | `run_id` | string | **P** | no | Unique run id — generated (UUID) or given in the conf | `5afc5010-3e62-46f3-a5ea-3856f01dcf0d` |
 | `application_id` | string | | no | Spark application id | `application_1773889567248_10449` |
 | `module_name` | string | **P** | no | Module that ran | `addons` / `climatetables` / `excelor` / `tseadfwd` |
-| `used_jar` | string | | no | Jar the run was launched from | `str-file-transform-engine-1.0-RELEASE-Climate-Tables.jar` |
+| `used_jar` | string | | no | File name of the jar the run was launched from (never a path) | `str-file-transform-engine-1.0-RELEASE-Climate-Tables.jar` |
 | `used_conf` | string | | no | Path of the `application.conf` used | `/Projects/…/application_climate_tables_run_2.conf` |
 | `user_launcher` | string | | no | User who launched the run (from the conf) | `j03627` |
 | `status` | string | | no | Spark run state: `RUNNING` \| `SUCCESS` \| `FAILED` | `SUCCESS` |
@@ -90,12 +90,61 @@ Resolved per field, first non-blank wins:
 | `run_id` | — | — | `audit.runId` | generated UUID |
 | `user_launcher` | `run.userLauncher` | `RUN_USER_LAUNCHER` | `audit.userLauncher` | JVM `user.name` |
 | `motor` | `run.motor` | `RUN_MOTOR` | `audit.motor` | `UNKNOWN` |
-| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected from the running jar |
+| `used_jar` | `run.usedJar` | `RUN_USED_JAR` | `audit.usedJar` | auto-detected jar file name, else `UNKNOWN` |
 
-> On YARN **cluster** mode the app jar is localized under the placeholder `__app__.jar`, so
-> auto-detection cannot see the real file name from the classloader. It falls back to `spark.jars` /
-> `spark.yarn.dist.jars`; if those don't carry the app jar, set the name explicitly via
-> `-Drun.usedJar`, `RUN_USED_JAR`, or `audit.usedJar`.
+> `used_jar` is always the jar's **file name**, never a path. Detection tries, in order:
+>
+> 1. the classloader code source, **following the `__app__.jar` symlink** when that is what it
+>    reports — covers an IDE, a plain `java -jar`, a YARN **client** run, and YARN **cluster** mode;
+> 2. that same symlink read straight from the container working directory, for when the code source
+>    is unavailable or reports something else;
+> 3. the application jar on YARN's distributed cache, `spark.yarn.cache.filenames`;
+> 4. `spark.jars` / `spark.yarn.dist.jars`.
+>
+> **The symlink is what makes cluster mode work.** YARN localizes the application jar into the
+> NodeManager cache under its real name and puts a link beside it:
+>
+> ```
+> __app__.jar -> /hadoop/yarn/nm/usercache/<user>/filecache/<id>/str-…-RELEASE.jar
+> ```
+>
+> so following it recovers the name the placeholder hides. Everything else comes up empty there:
+> the code source is only the placeholder; `ApplicationMaster` **deletes** the `spark.yarn.cache.*`
+> keys from the SparkConf as soon as it has built the executor resources, so level 3 finds nothing
+> by the time user code runs; and Spark does not always copy the primary application resource into
+> `spark.jars`, leaving level 4 empty too. That combination is what produced `UNKNOWN`.
+>
+> The link is followed **only** for `__app__.jar`. Everywhere else the code source is already the
+> real file, and resolving it would rename a perfectly good jar wherever a deployment symlinks its
+> jars. Level 3 is likewise strict — only the `#__app__.jar` cache entry counts, because falling back
+> to "the first jar in the list" would report a `--jars` dependency as the application jar, which is
+> worse than `UNKNOWN`: a wrong build name reads as fact, a missing one reads as missing.
+>
+> The path is dropped at every level on purpose. On YARN the classloader reports the container-local
+> copy (`/hadoop/yarn/nm/usercache/<user>/filecache/<id>/app.jar`), whose directory is per-node and
+> per-run — the NodeManager cache slot gets reused — so it resolves nowhere afterwards. The name
+> still says which **build** ran.
+>
+> If all three come up empty, `used_jar` is `UNKNOWN` **and the driver log says why** — one WARN
+> line naming the code source and every conf key that was read:
+>
+> ```
+> [audit] used_jar not detected, recording UNKNOWN. codeSource='…', codeSourceResolved='…',
+> appJarSymlink='…', cwd='…', spark.yarn.cache.filenames=<absent>, spark.jars=<absent>,
+> spark.yarn.dist.jars=<absent>, spark.submit.deployMode='cluster', spark.master='yarn'.
+> Set audit.usedJar (or -Drun.usedJar / RUN_USED_JAR) to record it explicitly.
+> ```
+>
+> Grep the driver log for `used_jar not detected` when a run shows `UNKNOWN`; that line is the whole
+> diagnosis.
+>
+> **The guaranteed answer is the override.** `-Drun.usedJar`, `RUN_USED_JAR` or `audit.usedJar` is
+> applied *before* detection and works in every mode, so a submit script that sets it never depends
+> on detection at all:
+>
+> ```bash
+> spark-submit --conf spark.driver.extraJavaOptions=-Drun.usedJar=str-file-transform-engine-1.4.2-RELEASE.jar …
+> ```
 
 `application_id` is read from `spark.sparkContext.applicationId`. `projection_dates`, `scenarios`
 and `base_folder_name` are module-specific and passed by the driver (null when not applicable).
