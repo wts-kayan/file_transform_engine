@@ -237,22 +237,170 @@ object RunAudit {
   private val YarnAppJarPlaceholder = "__app__.jar"
 
   /**
-   * Best-effort file name of the jar this code was launched from. Preference order:
-   *   1. the classloader code-source basename (works for an IDE / plain `java -jar` / YARN client run);
-   *   2. the real submitted jar recovered from the Spark configuration (YARN cluster mode, where the
-   *      code source is the useless `__app__.jar` placeholder).
-   * Returns None only when neither yields a usable `*.jar` name, in which case the caller falls back
-   * to "UNKNOWN". A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` / config.
+   * Best-effort FILE NAME of the jar this code was launched from — always a bare name, never a path.
+   * Preference order:
+   *   1. the classloader code source, following the `__app__.jar` SYMLINK when that is what it
+   *      reports — an IDE, a plain `java -jar`, a YARN client run, and YARN CLUSTER mode;
+   *   2. the same symlink read straight from the container working directory, for when the code
+   *      source is unavailable or reports something else entirely;
+   *   3. the application jar named on YARN's distributed cache, `spark.yarn.cache.filenames`;
+   *   4. the submitted jar recovered from `spark.jars` / `spark.yarn.dist.jars`.
+   *
+   * The symlink levels exist because everything else can come up empty on a CLUSTER run, which is
+   * how `used_jar` reached "UNKNOWN". There the code source is the `__app__.jar` placeholder;
+   * `ApplicationMaster` deletes the `spark.yarn.cache.*` keys from the SparkConf as soon as it has
+   * built the executor resources, so level 3 finds nothing by the time user code runs; and Spark
+   * does not always copy the primary application resource into `spark.jars`, leaving level 4 empty
+   * too. YARN's symlink is the one thing still in place: see [[codeSourceJar]].
+   *
+   * Only the NAME is kept at every level. The path around it is dropped deliberately — on YARN it is
+   * the container-local copy (`/hadoop/yarn/nm/usercache/…/filecache/<id>/…`), whose directory is
+   * per-node and per-run because the NodeManager cache slot gets reused, so it resolves nowhere for
+   * whoever reads `run_history` later. The name still says which BUILD ran, which is the part worth
+   * keeping.
+   *
+   * Returns None only when all three come up empty, in which case the caller falls back to "UNKNOWN".
+   * A launcher can always bypass detection via `-Drun.usedJar` / `RUN_USED_JAR` / config.
    */
-  private def detectJar(implicit spark: SparkSession): Option[String] =
-    codeSourceJar.orElse(jarFromSparkConf)
+  private def detectJar(implicit spark: SparkSession): Option[String] = {
+    val detected = codeSourceJar.orElse(appJarSymlinkName).orElse(yarnCacheJar).orElse(jarFromSparkConf)
+    if (detected.isEmpty) log.warn(s"[audit] used_jar not detected, recording UNKNOWN. $jarDiagnostics")
+    detected
+  }
 
-  /** Basename of the jar this code was loaded from, ignoring the YARN `__app__.jar` placeholder. */
+  /**
+   * Why detection came up empty, for the run log — every input the three levels read, verbatim.
+   *
+   * Emitted only on the UNKNOWN path, so it costs nothing on a healthy run. It exists because this
+   * cannot be reproduced off-cluster: the answer is in the submitted job's own configuration, and
+   * without it any fix is guesswork. Each value is truncated, and the whole thing is guarded — a
+   * diagnostic must never be the reason an audit fails.
+   */
+  private def jarDiagnostics(implicit spark: SparkSession): String = {
+    def clip(s: String): String = if (s.length <= 500) s else s.take(500) + "…(truncated)"
+    def show(v: Option[String]): String = v.filter(nonBlank).map(x => s"'${clip(x)}'").getOrElse("<absent>")
+
+    val codeSource =
+      try Option(classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath)
+      catch { case e: Throwable => Some(s"<unavailable: ${e.getClass.getSimpleName}>") }
+
+    // Both halves matter: a code source of '__app__.jar' whose canonical path is the SAME string
+    // means the symlink is missing or unreadable, which is a different problem from not having one.
+    val resolved = codeSource.map(canonicalPath)
+    val symlink =
+      try {
+        val link = new java.io.File(YarnAppJarPlaceholder)
+        if (link.exists()) Some(canonicalPath(YarnAppJarPlaceholder)) else Some("<no __app__.jar in cwd>")
+      } catch { case e: Throwable => Some(s"<unreadable: ${e.getClass.getSimpleName}>") }
+
+    val confKeys = Seq("spark.yarn.cache.filenames", "spark.jars", "spark.yarn.dist.jars",
+                       "spark.submit.deployMode", "spark.master")
+    val confDump =
+      try {
+        val conf = spark.sparkContext.getConf
+        confKeys.map(k => s"$k=${show(conf.getOption(k))}").mkString(", ")
+      } catch { case e: Throwable => s"<spark conf unavailable: ${e.getClass.getSimpleName}>" }
+
+    s"codeSource=${show(codeSource)}, codeSourceResolved=${show(resolved)}, " +
+      s"appJarSymlink=${show(symlink)}, cwd=${show(Option(System.getProperty("user.dir")))}, $confDump. " +
+      "Set audit.usedJar (or -Drun.usedJar / RUN_USED_JAR) to record it explicitly."
+  }
+
+  /**
+   * File name of the jar this code was loaded from, resolving the YARN `__app__.jar` placeholder
+   * through the filesystem.
+   *
+   * YARN localizes the application jar into the NodeManager cache under its REAL name and puts a
+   * SYMLINK named `__app__.jar` in the container working directory:
+   * {{{
+   *   __app__.jar -> /hadoop/yarn/nm/usercache/<user>/filecache/<id>/str-…-RELEASE.jar
+   * }}}
+   * so following the link recovers the name the placeholder hides. That is the only local source of
+   * it under cluster mode: `spark.yarn.cache.filenames` carries it too, but `ApplicationMaster`
+   * DELETES those keys from the SparkConf once it has built the executor resources, well before any
+   * user code runs — which is why detection reached "UNKNOWN" with the cache lookup in place.
+   *
+   * The link is followed ONLY when the name is the placeholder. Everywhere else the code source is
+   * already the real file (an IDE, a plain `java -jar`, a YARN client run), and resolving it would
+   * only turn a perfectly good name into a different one if the deployment happens to symlink its
+   * jars.
+   */
   private def codeSourceJar: Option[String] =
     try {
       val path = classOf[RunAudit].getProtectionDomain.getCodeSource.getLocation.toURI.getPath
-      Some(jarBaseName(path)).filter(nonBlank).filterNot(_ == YarnAppJarPlaceholder)
+      jarNameFrom(path, canonicalPath)
     } catch { case _: Throwable => None }
+
+  /**
+   * The `__app__.jar` symlink in the container working directory, read directly.
+   *
+   * Same trick as [[codeSourceJar]], but starting from the well-known link name rather than from the
+   * classloader — it still answers when the code source is unavailable or reports something else
+   * entirely (a shaded launcher, an unusual classloader).
+   */
+  private def appJarSymlinkName: Option[String] =
+    try {
+      val link = new java.io.File(YarnAppJarPlaceholder)
+      if (link.exists()) jarNameFrom(YarnAppJarPlaceholder, canonicalPath) else None
+    } catch { case _: Throwable => None }
+
+  /**
+   * Pure core of both: the jar's file name, following `resolve` only when the name is the
+   * `__app__.jar` placeholder. Returns None when the result is still the placeholder or is blank —
+   * a link that resolves to nothing is not a name.
+   *
+   * `resolve` is a parameter so the symlink-following branch is testable without creating one, which
+   * needs privileges on Windows.
+   */
+  private[audit] def jarNameFrom(path: String, resolve: String => String): Option[String] = {
+    val direct = jarBaseName(path)
+    val name = if (direct == YarnAppJarPlaceholder) jarBaseName(resolve(path)) else direct
+    Some(name).filter(nonBlank).filterNot(_ == YarnAppJarPlaceholder)
+  }
+
+  /** Symlink-resolving absolute path; the input unchanged when it cannot be resolved. */
+  private def canonicalPath(path: String): String =
+    try new java.io.File(path).getCanonicalPath catch { case _: Throwable => path }
+
+  /**
+   * The application jar's name as YARN itself recorded it when distributing the job.
+   *
+   * `spark.yarn.cache.filenames` is YARN's upload record: one `<source uri>#<localized name>` entry
+   * per resource it shipped. The primary application jar is always the one localized as
+   * `__app__.jar`, so its entry gives back the real file name that the placeholder hides —
+   * `hdfs://…/str-file-transform-engine-1.4.2-RELEASE.jar#__app__.jar` yields
+   * `str-file-transform-engine-1.4.2-RELEASE.jar`. Only that basename is taken; the URI it came from
+   * is not stored.
+   *
+   * Deliberately strict: ONLY the entry tagged `#__app__.jar` counts. Falling back to "the first jar
+   * in the list" would report a `--jars` dependency as the application, which is worse than the
+   * "UNKNOWN" this replaces — a wrong build name reads as fact, a missing one reads as missing.
+   */
+  private def yarnCacheJar(implicit spark: SparkSession): Option[String] =
+    try appJarNameFromCache(spark.sparkContext.getConf.getOption("spark.yarn.cache.filenames").toSeq)
+    catch { case _: Throwable => None }
+
+  /** Pure core of [[yarnCacheJar]]: the `#__app__.jar` entry's source basename. */
+  private[audit] def appJarNameFromCache(confValues: Seq[String]): Option[String] =
+    confValues
+      .flatMap(_.split(","))
+      .map(_.trim).filter(nonBlank)
+      .find(e => linkPart(e) == YarnAppJarPlaceholder)
+      .map(e => jarBaseName(uriPart(e)))
+      .filter(_.toLowerCase.endsWith(".jar"))
+      .filterNot(_ == YarnAppJarPlaceholder)
+
+  /** `<uri>#<link>` -> `<uri>`; an entry with no fragment is the URI itself. */
+  private def uriPart(entry: String): String = {
+    val i = entry.indexOf('#')
+    if (i >= 0) entry.substring(0, i) else entry
+  }
+
+  /** `<uri>#<link>` -> `<link>`; with no fragment, the localized name is the URI's own basename. */
+  private def linkPart(entry: String): String = {
+    val i = entry.indexOf('#')
+    if (i >= 0) entry.substring(i + 1) else jarBaseName(entry)
+  }
 
   /**
    * Recover the real submitted jar name from the Spark configuration, for the YARN-cluster case where
@@ -273,7 +421,7 @@ object RunAudit {
     } catch { case _: Throwable => None }
 
   /** Basename of a path: everything after the last '/' or '\' (the whole path when neither is present). */
-  private def jarBaseName(path: String): String = {
+  private[audit] def jarBaseName(path: String): String = {
     if (path == null || path.isEmpty) return ""
     var idx = path.lastIndexOf('/')
     if (idx == -1) idx = path.lastIndexOf('\\')
