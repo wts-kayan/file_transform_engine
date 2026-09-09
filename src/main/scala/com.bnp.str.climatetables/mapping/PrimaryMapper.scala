@@ -7,7 +7,8 @@ import com.bnp.str.climatetables.utility.{DataframesResult, FrameMeta}
 import com.typesafe.config.Config
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.storage.StorageLevel
 import org.slf4j.LoggerFactory
 
@@ -38,6 +39,8 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
                     input_tiers_table: DataFrame,
                     frameMeta: FrameMeta)
                    (implicit sparkSession: SparkSession, config: Config) extends MapperProvider {
+
+  import PrimaryMapper._
 
   private val log = LoggerFactory.getLogger(this.getClass)
 
@@ -694,65 +697,44 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
         col("cap").alias("__det_cap__")
       )
 
-    log.info(s"Join with input deterioration pd extension")
-    val windowSpecAsOf = Window
-      .partitionBy(col("id_technique"))
-      .orderBy(col("det_as_of.__det_rule_num__").cast("long").asc)
+    // The rule table is wildcard-matched (an empty rule cell means "any"), so which rule applies
+    // depends on the portfolio row and cannot be pre-reduced on the rule table alone the way
+    // computeRatingDeterioration does it. Folding the (already broadcast-sized) rules into a
+    // first-match-wins CASE chain, lowest rule_num first, gives the same answer as the previous
+    // row_number() == 1 over a join, but resolves the rule on the small side: no nested-loop join,
+    // no row explosion, no shuffle and no sort on the portfolio.
+    val orderedRules: Array[Row] = inputDeteriorationPdFiltered
+      .orderBy(col(DET_RULE_NUM).cast("long").asc)
+      .collect()
 
-    val withPdDeteriorationAsOf = dfDistinct.join(
-      inputDeteriorationPdFiltered.as("det_as_of").hint("broadcast"),
-      (
-        (col("pd_model").substr(1, 6) === col("det_as_of.__det_pd_model_short_name__").substr(1, 6) ||
-          col("det_as_of.__det_pd_model_short_name__") === "") &&
-        (col("cd_pays_residence_cal") === col("det_as_of.__det_geographical_breakdown__") ||
-          col("det_as_of.__det_geographical_breakdown__") === "") &&
-        (col("cd_sect_wiod") === col("det_as_of.__det_nace_sector_ecb__") ||
-          col("det_as_of.__det_nace_sector_ecb__") === "") &&
-        (col("nace_sector_ecb_epc_rating") === col("det_as_of.__det_epc_rating__") ||
-          col("det_as_of.__det_epc_rating__") === "") &&
-        (col("cd_niv_risq_chr") === col("det_as_of.__det_cd_niv_risq_chr__") ||
-          col("det_as_of.__det_cd_niv_risq_chr__") === "") &&
-        (col("ste_target_rating_scale") === col("det_as_of.__det_rating_scale__") ||
-          col("det_as_of.__det_rating_scale__") === "")
-      ),
-      "left"
-    )
-      .withColumn("__row_num__", row_number().over(windowSpecAsOf))
-      .filter(col("__row_num__") === 1)
+    log.info(s"Resolve pd deterioration against ${orderedRules.length} rule(s) for " +
+      s"scenario=${frameMeta.scenario}, year=${frameMeta.date}")
+
+    // A rule_num that does not parse as a long casts to null, and null sorts first: such a rule
+    // would silently win over every valid one. Surface it rather than change the ordering.
+    val unparsableRuleNums = orderedRules.count(r => Option(r.getAs[Any](DET_RULE_NUM))
+      .forall(v => scala.util.Try(v.toString.trim.toLong).isFailure))
+    if (unparsableRuleNums > 0) {
+      log.warn(s"$unparsableRuleNums deterioration pd rule(s) have a non-numeric rule_num; " +
+        s"they take precedence over every valid rule. Check input_deterioration_pd.")
+    }
+
+    val matchType = pdDeteriorationMatchType(inputDeteriorationPdFiltered)
+
+    val withPdDeteriorationAsOf = dfDistinct
+      .withColumn(PD_DET_AS_OF, resolvePdDeterioration(orderedRules, PD_DET_AS_OF_KEYS, matchType))
       .select(
         dfDistinct("*"),
-        col("det_as_of.__det_value__").as("__det_value__"),
-        col("det_as_of.__det_cap__").as("__det_cap__")
+        col(s"$PD_DET_AS_OF.value").as("__det_value__"),
+        col(s"$PD_DET_AS_OF.cap").as("__det_cap__")
       )
 
-    val windowSpecAsOrig = Window
-      .partitionBy(col("id_technique"))
-      .orderBy(col("det_orig.__det_rule_num__").cast("long").asc)
-
-    val withPdDeteriorationAsOri = withPdDeteriorationAsOf.join(
-      inputDeteriorationPdFiltered.as("det_orig").hint("broadcast"),
-      (
-        (col("pd_model_origination").substr(1, 6) === col("det_orig.__det_pd_model_short_name__").substr(1, 6) ||
-          col("det_orig.__det_pd_model_short_name__") === "") &&
-        (col("cd_pays_residence_cal") === col("det_orig.__det_geographical_breakdown__") ||
-          col("det_orig.__det_geographical_breakdown__") === "") &&
-        (col("cd_sect_wiod") === col("det_orig.__det_nace_sector_ecb__") ||
-          col("det_orig.__det_nace_sector_ecb__") === "") &&
-        (col("nace_sector_ecb_epc_rating") === col("det_orig.__det_epc_rating__") ||
-          col("det_orig.__det_epc_rating__") === "") &&
-        (col("chr_at_origination") === col("det_orig.__det_cd_niv_risq_chr__") ||
-          col("det_orig.__det_cd_niv_risq_chr__") === "") &&
-        (col("ste_target_rating_scale_origination") === col("det_orig.__det_rating_scale__") ||
-          col("det_orig.__det_rating_scale__") === "")
-      ),
-      "left"
-    )
-      .withColumn("__row_num__", row_number().over(windowSpecAsOrig))
-      .filter(col("__row_num__") === 1)
+    val withPdDeteriorationAsOri = withPdDeteriorationAsOf
+      .withColumn(PD_DET_ORIG, resolvePdDeterioration(orderedRules, PD_DET_ORIGINATION_KEYS, matchType))
       .select(
         withPdDeteriorationAsOf("*"),
-        col("det_orig.__det_value__").as("__det_value_origination__"),
-        col("det_orig.__det_cap__").as("__det_cap_origination__")
+        col(s"$PD_DET_ORIG.value").as("__det_value_origination__"),
+        col(s"$PD_DET_ORIG.cap").as("__det_cap_origination__")
       )
 
     log.info(s"Prepare idealized term structure data for mapping")
@@ -1217,6 +1199,98 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
 
     result
   }
+}
+
+/**
+ * Pure, Spark-session-free helpers backing `computePdDeterioration`: everything that only needs
+ * the (small, already filtered) deterioration rule table, so it can be resolved on the driver
+ * instead of joined against the portfolio. Package-visible for the non-regression test that
+ * pins this against the join + `row_number()` shape it replaces.
+ */
+private[mapping] object PrimaryMapper {
+
+  /** Aliased columns of `input_deterioration_pd` used to resolve the applicable rule. */
+  private[mapping] val DET_RULE_NUM = "__det_rule_num__"
+  private[mapping] val DET_PD_MODEL_SHORT_NAME = "__det_pd_model_short_name__"
+
+  /** Working columns holding the resolved rule, dropped by the enclosing select. */
+  private[mapping] val PD_DET_AS_OF = "__pd_det_as_of__"
+  private[mapping] val PD_DET_ORIG = "__pd_det_orig__"
+
+  /**
+   * Rule column of `input_deterioration_pd` paired with the portfolio column it is matched against,
+   * for the as-of resolution. An empty rule cell is a wildcard that matches any portfolio value.
+   */
+  private[mapping] val PD_DET_AS_OF_KEYS: Seq[(String, String)] = Seq(
+    DET_PD_MODEL_SHORT_NAME -> "pd_model",
+    "__det_geographical_breakdown__" -> "cd_pays_residence_cal",
+    "__det_nace_sector_ecb__" -> "cd_sect_wiod",
+    "__det_epc_rating__" -> "nace_sector_ecb_epc_rating",
+    "__det_cd_niv_risq_chr__" -> "cd_niv_risq_chr",
+    "__det_rating_scale__" -> "ste_target_rating_scale"
+  )
+
+  /** Same pairing for the origination resolution: three of the six columns differ. */
+  private[mapping] val PD_DET_ORIGINATION_KEYS: Seq[(String, String)] = Seq(
+    DET_PD_MODEL_SHORT_NAME -> "pd_model_origination",
+    "__det_geographical_breakdown__" -> "cd_pays_residence_cal",
+    "__det_nace_sector_ecb__" -> "cd_sect_wiod",
+    "__det_epc_rating__" -> "nace_sector_ecb_epc_rating",
+    "__det_cd_niv_risq_chr__" -> "chr_at_origination",
+    "__det_rating_scale__" -> "ste_target_rating_scale_origination"
+  )
+
+  /**
+   * Type of the struct a resolved rule yields, taken from the rule table itself so `__det_value__`
+   * and `__det_cap__` keep exactly the types they had when they came out of a join.
+   */
+  private[mapping] def pdDeteriorationMatchType(rules: DataFrame): StructType = StructType(Seq(
+    StructField("value", rules.schema("__det_value__").dataType),
+    StructField("cap", rules.schema("__det_cap__").dataType)
+  ))
+
+  /**
+   * Match condition of a single deterioration rule, as the equivalent of the join predicate it
+   * replaces (`portfolio === rule || rule === ""`), with the rule side already known:
+   *
+   *  - an empty rule cell is a wildcard, so its predicate is dropped instead of evaluated per row;
+   *  - a null rule cell made the old disjunction null, i.e. never matched, so the rule is disabled;
+   *  - `pd_model` keeps the six-character prefix comparison of the original condition.
+   *
+   * @param rule one row of the filtered rule table, already collected to the driver
+   * @param keys rule column -> portfolio column pairing, see [[PD_DET_AS_OF_KEYS]]
+   */
+  private[mapping] def pdDeteriorationRuleCondition(rule: Row, keys: Seq[(String, String)]): Column = {
+    val predicates = keys.flatMap { case (ruleColumn, portfolioColumn) =>
+      Option(rule.getAs[String](ruleColumn)) match {
+        case Some("") => None
+        case Some(value) if ruleColumn == DET_PD_MODEL_SHORT_NAME =>
+          Some(col(portfolioColumn).substr(1, 6) === lit(value).substr(1, 6))
+        case Some(value) => Some(col(portfolioColumn) === lit(value))
+        case None => Some(lit(false))
+      }
+    }
+    if (predicates.isEmpty) lit(true) else predicates.reduce(_ && _)
+  }
+
+  /**
+   * First-match-wins chain over `rules`, which must already be ordered by ascending rule_num. The
+   * outermost `when` is therefore the lowest rule_num, reproducing `row_number() == 1` ordered on
+   * `rule_num` without ranking anything. A row matching no rule yields a typed null, as the left
+   * join used to.
+   */
+  private[mapping] def resolvePdDeterioration(rules: Array[Row],
+                                              keys: Seq[(String, String)],
+                                              matchType: StructType): Column =
+    rules.foldRight(lit(null).cast(matchType)) { (rule, fallback) =>
+      when(
+        pdDeteriorationRuleCondition(rule, keys),
+        struct(
+          lit(rule.getAs[Any]("__det_value__")).cast(matchType("value").dataType).as("value"),
+          lit(rule.getAs[Any]("__det_cap__")).cast(matchType("cap").dataType).as("cap")
+        )
+      ).otherwise(fallback)
+    }
 }
 
 /* TODO[EXTRACTION] lines 170-171 were hidden behind the IDE sticky header and
