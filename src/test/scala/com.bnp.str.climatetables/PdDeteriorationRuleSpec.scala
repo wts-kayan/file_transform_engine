@@ -15,7 +15,8 @@ import org.scalatest.matchers.should.Matchers
  * `row_number() over (partitionBy id_technique orderBy rule_num) == 1`. Because none of the six
  * predicates is an equality (each is `portfolio === rule || rule === ""`), that planned as a
  * BroadcastNestedLoopJoin whose output was then fully sorted - once per resolution, twice per run.
- * It is now a first-match-wins CASE chain built from the collected rule table.
+ * It is now resolved on the rule table: the rules are split by wildcard pattern, reduced to the
+ * lowest rule_num per pattern and key tuple, and each pattern joined as the equality it is.
  *
  * This suite runs the old shape and the new one side by side on the same data and requires them to
  * agree, including on the edge cases the rewrite had to preserve: wildcard cells, null rule cells,
@@ -113,28 +114,26 @@ class PdDeteriorationRuleSpec extends AnyFunSuite with Matchers with BeforeAndAf
         col("det_orig.__det_cap__").as("__det_cap_origination__"))
   }
 
-  /** The shape `computePdDeterioration` now uses. */
+  /** The shape `computePdDeterioration` now uses, reusing one reduced rule table as it does. */
   private def currentShape(df: DataFrame, ruleTable: DataFrame): DataFrame = {
-    val ordered = ruleTable.orderBy(col("__det_rule_num__").cast("long").asc).collect()
-    val matchType = pdDeteriorationMatchType(ruleTable)
+    val reduced = reducePdDeteriorationRules(ruleTable)
+    val masks = pdDeteriorationMasks(reduced)
 
-    val asOf = df
-      .withColumn("__pd_det_as_of__", resolvePdDeterioration(ordered, PD_DET_AS_OF_KEYS, matchType))
+    val asOf = resolvePdDeterioration(df, reduced, masks, PD_DET_AS_OF_KEYS, PD_DET_AS_OF)
       .select(df("*"),
-        col("__pd_det_as_of__.value").as("__det_value__"),
-        col("__pd_det_as_of__.cap").as("__det_cap__"))
+        col(s"$PD_DET_AS_OF.value").as("__det_value__"),
+        col(s"$PD_DET_AS_OF.cap").as("__det_cap__"))
 
-    asOf
-      .withColumn("__pd_det_orig__", resolvePdDeterioration(ordered, PD_DET_ORIGINATION_KEYS, matchType))
+    resolvePdDeterioration(asOf, reduced, masks, PD_DET_ORIGINATION_KEYS, PD_DET_ORIG)
       .select(asOf("*"),
-        col("__pd_det_orig__.value").as("__det_value_origination__"),
-        col("__pd_det_orig__.cap").as("__det_cap_origination__"))
+        col(s"$PD_DET_ORIG.value").as("__det_value_origination__"),
+        col(s"$PD_DET_ORIG.cap").as("__det_cap_origination__"))
   }
 
   private val resolved = Seq("id_technique", "__det_value__", "__det_cap__",
     "__det_value_origination__", "__det_cap_origination__")
 
-  test("the CASE chain resolves the same rule as the join + row_number() it replaces") {
+  test("the pattern joins resolve the same rule as the join + row_number() they replace") {
     val before = previousShape(portfolio, rules).select(resolved.map(col): _*)
     val after = currentShape(portfolio, rules).select(resolved.map(col): _*)
 
@@ -208,10 +207,35 @@ class PdDeteriorationRuleSpec extends AnyFunSuite with Matchers with BeforeAndAf
     after.map(f => f.name -> f.dataType) shouldBe before.map(f => f.name -> f.dataType)
   }
 
-  test("the new plan has no join, no window and no shuffle on the portfolio") {
-    val plan = currentShape(portfolio, rules).queryExecution.executedPlan.toString
-    plan should not include "Join"
+  test("the new plan resolves through broadcast equality joins, with no window and no nested loop") {
+    val resolvedDf = currentShape(portfolio, rules)
+    resolvedDf.collect()
+    val plan = resolvedDf.queryExecution.executedPlan.toString
+
+    plan should include ("BroadcastHashJoin")
     plan should not include "Window"
-    plan should not include "Exchange"
+    plan should not include "SortMergeJoin"
+    plan should not include "BroadcastNestedLoopJoin"
+  }
+
+  test("the rule count no longer bounds the plan: 20k rules resolve as 4 wildcard patterns") {
+    import spark.implicits._
+    // A rule table the CASE chain this replaces could not build: one nested when per rule, 20k deep.
+    val manyRules = (Seq(("99999", "PDMODEL_A", "FR", "", "", "", "", 9.99, 0.99)) ++
+      (1 to 20000).map(i => (i.toString, "PDMODEL_A", s"C$i", "", "", "", "", i / 100.0, i / 1000.0)))
+      .toDF("__det_rule_num__", "__det_pd_model_short_name__", "__det_geographical_breakdown__",
+        "__det_nace_sector_ecb__", "__det_epc_rating__", "__det_cd_niv_risq_chr__",
+        "__det_rating_scale__", "__det_value__", "__det_cap__")
+      .union(rules)
+
+    pdDeteriorationMasks(reducePdDeteriorationRules(manyRules)).length shouldBe 4
+
+    val before = previousShape(portfolio, manyRules).select(resolved.map(col): _*)
+    val after = currentShape(portfolio, manyRules).select(resolved.map(col): _*)
+
+    before.except(after).collect() shouldBe empty
+    after.except(before).collect() shouldBe empty
+    // p1 (geo FR) matches rule 10 as before: the 20k country rules are all reachable, none applies
+    after.filter(col("id_technique") === "p1").head().getAs[Double]("__det_value__") shouldBe 1.10
   }
 }

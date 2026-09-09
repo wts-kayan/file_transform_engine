@@ -7,8 +7,8 @@ import com.bnp.str.climatetables.utility.{DataframesResult, FrameMeta}
 import com.typesafe.config.Config
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{StructField, StructType}
-import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
 import org.slf4j.LoggerFactory
 
@@ -180,7 +180,7 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
       .withColumnRenamed("pd_ttc_chr", "pd_ttc_chr_before_det")
       .withColumnRenamed("tx_pd", "tx_pd_before_det")
       .withColumnRenamed("pd_reg_origination", "pd_reg_origination_before_det")
-      .withColumn("pd_reg_origination_src", col("pd_reg_origination_before_det"))
+      .withColumn("pd_reg_origination_sro", col("pd_reg_origination_before_det"))
 
     val tiers_before_det_table = tiers_table.
       withColumnRenamed("rating_code", "rating_code_before_det")
@@ -697,45 +697,52 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
         col("cap").alias("__det_cap__")
       )
 
-    // The rule table is wildcard-matched (an empty rule cell means "any"), so which rule applies
-    // depends on the portfolio row and cannot be pre-reduced on the rule table alone the way
-    // computeRatingDeterioration does it. Folding the (already broadcast-sized) rules into a
-    // first-match-wins CASE chain, lowest rule_num first, gives the same answer as the previous
-    // row_number() == 1 over a join, but resolves the rule on the small side: no nested-loop join,
-    // no row explosion, no shuffle and no sort on the portfolio.
-    val orderedRules: Array[Row] = inputDeteriorationPdFiltered
-      .orderBy(col(DET_RULE_NUM).cast("long").asc)
-      .collect()
+    // The rule table is wildcard-matched (an empty rule cell means "any"), so none of the six
+    // predicates is an equality and no single join can resolve it: the original shape planned a
+    // nested-loop join, and folding the rules into a first-match-wins CASE chain instead only holds
+    // while the rule table is tiny - on the ~350k rules the real input carries, building that
+    // expression tree overflows the driver stack, and it would evaluate every rule per row anyway.
+    //
+    // Split the rules by wildcard pattern instead. Within one pattern the same columns are set, so
+    // the match *is* an equality on those columns: one reduced broadcast join per pattern, at most
+    // one candidate per row, then the lowest rule_num across patterns - which is what the original
+    // row_number() == 1 ordered on rule_num picked. Cost scales with the number of patterns (at
+    // most 64, in practice a handful), not with the number of rules.
+    val reducedRules = reducePdDeteriorationRules(inputDeteriorationPdFiltered)
+      .persist(StorageLevel.MEMORY_AND_DISK_SER)
+    persistedDataFrames += reducedRules
 
-    log.info(s"Resolve pd deterioration against ${orderedRules.length} rule(s) for " +
-      s"scenario=${frameMeta.scenario}, year=${frameMeta.date}")
+    val masks = pdDeteriorationMasks(reducedRules)
 
-    // A rule_num that does not parse as a long casts to null, and null sorts first: such a rule
-    // would silently win over every valid one. Surface it rather than change the ordering.
-    val unparsableRuleNums = orderedRules.count(r => Option(r.getAs[Any](DET_RULE_NUM))
-      .forall(v => scala.util.Try(v.toString.trim.toLong).isFailure))
+    log.info(s"Resolve pd deterioration against ${reducedRules.count()} reduced rule(s) in " +
+      s"${masks.length} wildcard pattern(s) for scenario=${frameMeta.scenario}, year=${frameMeta.date}")
+
+    // A rule_num that does not parse as a long casts to null, and null orders first: such a rule
+    // wins over every valid rule it competes with. Surface it rather than change the ordering.
+    val unparsableRuleNums = reducedRules
+      .filter(col(s"$PD_DET_CANDIDATE.$CANDIDATE_ORDER").isNull)
+      .count()
     if (unparsableRuleNums > 0) {
       log.warn(s"$unparsableRuleNums deterioration pd rule(s) have a non-numeric rule_num; " +
-        s"they take precedence over every valid rule. Check input_deterioration_pd.")
+        s"they take precedence over every valid rule they compete with. Check input_deterioration_pd.")
     }
 
-    val matchType = pdDeteriorationMatchType(inputDeteriorationPdFiltered)
+    val withPdDeteriorationAsOf =
+      resolvePdDeterioration(dfDistinct, reducedRules, masks, PD_DET_AS_OF_KEYS, PD_DET_AS_OF)
+        .select(
+          dfDistinct("*"),
+          col(s"$PD_DET_AS_OF.$CANDIDATE_VALUE").as("__det_value__"),
+          col(s"$PD_DET_AS_OF.$CANDIDATE_CAP").as("__det_cap__")
+        )
 
-    val withPdDeteriorationAsOf = dfDistinct
-      .withColumn(PD_DET_AS_OF, resolvePdDeterioration(orderedRules, PD_DET_AS_OF_KEYS, matchType))
-      .select(
-        dfDistinct("*"),
-        col(s"$PD_DET_AS_OF.value").as("__det_value__"),
-        col(s"$PD_DET_AS_OF.cap").as("__det_cap__")
-      )
-
-    val withPdDeteriorationAsOri = withPdDeteriorationAsOf
-      .withColumn(PD_DET_ORIG, resolvePdDeterioration(orderedRules, PD_DET_ORIGINATION_KEYS, matchType))
-      .select(
-        withPdDeteriorationAsOf("*"),
-        col(s"$PD_DET_ORIG.value").as("__det_value_origination__"),
-        col(s"$PD_DET_ORIG.cap").as("__det_cap_origination__")
-      )
+    val withPdDeteriorationAsOri =
+      resolvePdDeterioration(withPdDeteriorationAsOf, reducedRules, masks,
+        PD_DET_ORIGINATION_KEYS, PD_DET_ORIG)
+        .select(
+          withPdDeteriorationAsOf("*"),
+          col(s"$PD_DET_ORIG.$CANDIDATE_VALUE").as("__det_value_origination__"),
+          col(s"$PD_DET_ORIG.$CANDIDATE_CAP").as("__det_cap_origination__")
+        )
 
     log.info(s"Prepare idealized term structure data for mapping")
 
@@ -1202,20 +1209,28 @@ class PrimaryMapper(input_ead_factors_target_data: DataFrame,
 }
 
 /**
- * Pure, Spark-session-free helpers backing `computePdDeterioration`: everything that only needs
- * the (small, already filtered) deterioration rule table, so it can be resolved on the driver
- * instead of joined against the portfolio. Package-visible for the non-regression test that
- * pins this against the join + `row_number()` shape it replaces.
+ * Helpers backing the `computePdDeterioration` rule resolution: everything that only needs the
+ * (already filtered) deterioration rule table, so the rule is resolved on the small side instead of
+ * by a wildcard join against the portfolio. Package-visible for the non-regression test that pins
+ * this against the join + `row_number()` shape it replaces.
  */
 private[mapping] object PrimaryMapper {
 
   /** Aliased columns of `input_deterioration_pd` used to resolve the applicable rule. */
   private[mapping] val DET_RULE_NUM = "__det_rule_num__"
   private[mapping] val DET_PD_MODEL_SHORT_NAME = "__det_pd_model_short_name__"
+  private[mapping] val DET_VALUE = "__det_value__"
+  private[mapping] val DET_CAP = "__det_cap__"
 
   /** Working columns holding the resolved rule, dropped by the enclosing select. */
   private[mapping] val PD_DET_AS_OF = "__pd_det_as_of__"
   private[mapping] val PD_DET_ORIG = "__pd_det_orig__"
+
+  /** Column of the reduced rule table holding the winning rule, and the fields of that struct. */
+  private[mapping] val PD_DET_CANDIDATE = "__pd_det_candidate__"
+  private[mapping] val CANDIDATE_ORDER = "order"
+  private[mapping] val CANDIDATE_VALUE = "value"
+  private[mapping] val CANDIDATE_CAP = "cap"
 
   /**
    * Rule column of `input_deterioration_pd` paired with the portfolio column it is matched against,
@@ -1240,57 +1255,128 @@ private[mapping] object PrimaryMapper {
     "__det_rating_scale__" -> "ste_target_rating_scale_origination"
   )
 
-  /**
-   * Type of the struct a resolved rule yields, taken from the rule table itself so `__det_value__`
-   * and `__det_cap__` keep exactly the types they had when they came out of a join.
-   */
-  private[mapping] def pdDeteriorationMatchType(rules: DataFrame): StructType = StructType(Seq(
-    StructField("value", rules.schema("__det_value__").dataType),
-    StructField("cap", rules.schema("__det_cap__").dataType)
-  ))
+  /** The rule columns matched against the portfolio, in the order both key pairings list them. */
+  private[mapping] val DET_RULE_KEY_COLUMNS: Seq[String] = PD_DET_AS_OF_KEYS.map(_._1)
 
   /**
-   * Match condition of a single deterioration rule, as the equivalent of the join predicate it
-   * replaces (`portfolio === rule || rule === ""`), with the rule side already known:
-   *
-   *  - an empty rule cell is a wildcard, so its predicate is dropped instead of evaluated per row;
-   *  - a null rule cell made the old disjunction null, i.e. never matched, so the rule is disabled;
-   *  - `pd_model` keeps the six-character prefix comparison of the original condition.
-   *
-   * @param rule one row of the filtered rule table, already collected to the driver
-   * @param keys rule column -> portfolio column pairing, see [[PD_DET_AS_OF_KEYS]]
+   * Which rule columns a rule has set. Rules sharing a pattern are matched the same way, so each
+   * pattern resolves as one equality join; the empty pattern is the catch-all rule.
    */
-  private[mapping] def pdDeteriorationRuleCondition(rule: Row, keys: Seq[(String, String)]): Column = {
-    val predicates = keys.flatMap { case (ruleColumn, portfolioColumn) =>
-      Option(rule.getAs[String](ruleColumn)) match {
-        case Some("") => None
-        case Some(value) if ruleColumn == DET_PD_MODEL_SHORT_NAME =>
-          Some(col(portfolioColumn).substr(1, 6) === lit(value).substr(1, 6))
-        case Some(value) => Some(col(portfolioColumn) === lit(value))
-        case None => Some(lit(false))
-      }
-    }
-    if (predicates.isEmpty) lit(true) else predicates.reduce(_ && _)
+  private[mapping] type RuleMask = Set[String]
+
+  /**
+   * The value a rule cell - or the portfolio cell it is matched against - is compared on. The
+   * original predicate compared only the first six characters of `pd_model`, on both sides, so
+   * PDMODEL_A stays indistinguishable from PDMODEL_B here too.
+   */
+  private[mapping] def pdDeteriorationKey(column: String, ruleColumn: String): Column =
+    if (ruleColumn == DET_PD_MODEL_SHORT_NAME) col(column).substr(1, 6) else col(column)
+
+  /**
+   * The rule table reduced to the rules that can still win: one candidate per wildcard pattern and
+   * key tuple, the one with the lowest rule_num, since a higher one is unreachable behind it. `min`
+   * over a struct led by the rule_num is an argmin, so the candidate carries its own value and cap
+   * with the types they had when they came out of the join this replaces.
+   *
+   * Grouping on all six columns at once reduces every pattern in a single pass: within a pattern
+   * the wildcard cells are constant (empty), so they add nothing to the grouping.
+   *
+   * A null rule cell made the old disjunction null, i.e. never matched, so such a rule is dropped
+   * here rather than read as a wildcard.
+   */
+  private[mapping] def reducePdDeteriorationRules(rules: DataFrame): DataFrame = {
+    val enabled = DET_RULE_KEY_COLUMNS.map(col(_).isNotNull).reduce(_ && _)
+    rules
+      .filter(enabled)
+      .groupBy(DET_RULE_KEY_COLUMNS.map(c => pdDeteriorationKey(c, c).as(c)): _*)
+      .agg(min(struct(
+        col(DET_RULE_NUM).cast("long").as(CANDIDATE_ORDER),
+        col(DET_VALUE).as(CANDIDATE_VALUE),
+        col(DET_CAP).as(CANDIDATE_CAP)
+      )).as(PD_DET_CANDIDATE))
+  }
+
+  /** The wildcard patterns actually present in the reduced rule table, in a stable order. */
+  private[mapping] def pdDeteriorationMasks(reducedRules: DataFrame): Seq[RuleMask] =
+    reducedRules
+      .select(DET_RULE_KEY_COLUMNS.map(c => (col(c) =!= "").as(c)): _*)
+      .distinct()
+      .collect()
+      .map(row => DET_RULE_KEY_COLUMNS.filter(c => row.getAs[Boolean](c)).toSet)
+      .sortBy((mask: RuleMask) => DET_RULE_KEY_COLUMNS.map(c => if (mask(c)) '1' else '0').mkString)
+      .toSeq
+
+  /**
+   * The catch-all rule as a literal. Every one of its cells is a wildcard, so it matches every row:
+   * it is a constant, not a join, and joining its single row would cost a BroadcastNestedLoopJoin
+   * (Catalyst folds away a constant join key) and with it the whole-stage codegen of the pipeline.
+   * The rule table is reduced upstream, so there is exactly one such row when the pattern exists.
+   */
+  private[mapping] def pdDeteriorationCatchAll(reducedRules: DataFrame): Column = {
+    val candidateType = reducedRules.schema(PD_DET_CANDIDATE).dataType.asInstanceOf[StructType]
+    val candidate = reducedRules
+      .filter(DET_RULE_KEY_COLUMNS.map(col(_) === "").reduce(_ && _))
+      .select(PD_DET_CANDIDATE)
+      .head()
+      .getStruct(0)
+    struct(candidateType.zipWithIndex.map { case (field, i) =>
+      lit(candidate.get(i)).as(field.name)
+    }: _*).cast(candidateType)
   }
 
   /**
-   * First-match-wins chain over `rules`, which must already be ordered by ascending rule_num. The
-   * outermost `when` is therefore the lowest rule_num, reproducing `row_number() == 1` ordered on
-   * `rule_num` without ranking anything. A row matching no rule yields a typed null, as the left
-   * join used to.
+   * Resolve the applicable deterioration rule for every portfolio row into a single `output` struct
+   * holding the winning value and cap, or nulls where no rule matches, as the left join produced.
+   *
+   * One left broadcast equality join per wildcard pattern gives a row that pattern's candidate - at
+   * most one, the rule table being already reduced, so nothing fans out - and `array_min` keeps the
+   * lowest rule_num across patterns, the rule `row_number() == 1` used to pick. Null portfolio cells
+   * match no key, exactly as the old `portfolio === rule` disjunct did.
+   *
+   * @param keys rule column -> portfolio column pairing, see [[PD_DET_AS_OF_KEYS]]
    */
-  private[mapping] def resolvePdDeterioration(rules: Array[Row],
+  private[mapping] def resolvePdDeterioration(portfolio: DataFrame,
+                                              reducedRules: DataFrame,
+                                              masks: Seq[RuleMask],
                                               keys: Seq[(String, String)],
-                                              matchType: StructType): Column =
-    rules.foldRight(lit(null).cast(matchType)) { (rule, fallback) =>
-      when(
-        pdDeteriorationRuleCondition(rule, keys),
-        struct(
-          lit(rule.getAs[Any]("__det_value__")).cast(matchType("value").dataType).as("value"),
-          lit(rule.getAs[Any]("__det_cap__")).cast(matchType("cap").dataType).as("cap")
-        )
-      ).otherwise(fallback)
+                                              output: String): DataFrame = {
+    val candidateType = reducedRules.schema(PD_DET_CANDIDATE).dataType
+    if (masks.isEmpty) {
+      return portfolio.withColumn(output, lit(null).cast(candidateType))
     }
+
+    val portfolioColumnOf = keys.toMap
+    val keyedMasks = masks.filter(_.nonEmpty)
+
+    val joined = keyedMasks.zipWithIndex.foldLeft(portfolio) { case (acc, (mask, index)) =>
+      val maskColumns = DET_RULE_KEY_COLUMNS.filter(mask)
+      val ruleKeys = maskColumns.indices.map(key => maskKeyColumn(output, index, key))
+
+      val ruleSide = reducedRules
+        .filter(DET_RULE_KEY_COLUMNS
+          .map(c => if (mask(c)) col(c) =!= "" else col(c) === "").reduce(_ && _))
+        .select(maskColumns.zip(ruleKeys).map { case (c, key) => col(c).as(key) } :+
+          col(PD_DET_CANDIDATE).as(candidateColumn(output, index)): _*)
+
+      val condition = maskColumns.zip(ruleKeys)
+        .map { case (c, key) => pdDeteriorationKey(portfolioColumnOf(c), c) === col(key) }
+        .reduce(_ && _)
+
+      acc.join(ruleSide.hint("broadcast"), condition, "left")
+    }
+
+    val candidates = keyedMasks.indices.map(index => col(candidateColumn(output, index))) ++
+      (if (masks.exists(_.isEmpty)) Seq(pdDeteriorationCatchAll(reducedRules)) else Nil)
+
+    joined.select(portfolio("*"), array_min(array(candidates: _*)).as(output))
+  }
+
+  /** Join columns of one pattern's rule side, named so that no two patterns can collide. */
+  private def maskKeyColumn(output: String, mask: Int, key: Int): String =
+    s"${output.stripSuffix("__")}_k${mask}_${key}__"
+
+  private def candidateColumn(output: String, mask: Int): String =
+    s"${output.stripSuffix("__")}_cand${mask}__"
 }
 
 /* TODO[EXTRACTION] lines 170-171 were hidden behind the IDE sticky header and
